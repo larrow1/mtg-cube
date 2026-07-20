@@ -47,6 +47,18 @@ type DataOf<E extends AckedEvent> = Parameters<C2S[E]> extends [...unknown[], (r
 const CALL_TIMEOUT_MS = 10_000;
 
 /**
+ * Scryfall-resolving operations legitimately take 15-60s on large cube lists
+ * (batched requests + fuzzy fallback) — give them a generous deadline instead
+ * of the default 10s so slow-but-successful saves don't read as failures.
+ */
+const SLOW_EVENTS: Partial<Record<AckedEvent, number>> = {
+  uploadCube: 120_000,
+  saveCube: 120_000,
+  adminUploadSystemCube: 120_000,
+  loadCubeIntoRoom: 30_000,
+};
+
+/**
  * Emit an acked event and resolve with the server's Ack. Never rejects: a
  * missing server / timeout resolves with `{ ok: false, error }` so callers can
  * uniformly toast the error string.
@@ -59,7 +71,7 @@ export function call<E extends AckedEvent>(event: E, ...args: ArgsOf<E>): Promis
         settled = true;
         resolve({ ok: false, error: "Server did not respond — is it running?" });
       }
-    }, CALL_TIMEOUT_MS);
+    }, SLOW_EVENTS[event] ?? CALL_TIMEOUT_MS);
     const emit = socket.emit.bind(socket) as unknown as (ev: string, ...rest: unknown[]) => void;
     emit(event, ...args, (r: Ack<DataOf<E>>) => {
       if (!settled) {

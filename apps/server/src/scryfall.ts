@@ -165,6 +165,23 @@ function identifierNameFor(name: string): string {
 const FUZZY_FALLBACK_CAP = 60;
 
 /**
+ * Process-wide resolution cache: normalized requested name -> CardData.
+ * Card data is stable, so entries never expire; the map is capped with
+ * insertion-order eviction. Makes repeat resolutions (upload a cube in the
+ * lobby, then save it to your account) near-instant and cuts Scryfall load.
+ */
+const CACHE_MAX = 10_000;
+const resolutionCache = new Map<string, CardData>();
+
+function cachePut(key: string, card: CardData): void {
+  if (resolutionCache.size >= CACHE_MAX) {
+    const oldest = resolutionCache.keys().next().value;
+    if (oldest !== undefined) resolutionCache.delete(oldest);
+  }
+  resolutionCache.set(key, card);
+}
+
+/**
  * Last-chance lookup for names the batch pass missed: GET /cards/named?fuzzy=
  * only matches when unambiguous, and also knows alternate/flavor names (e.g.
  * Universes Beyond in-universe names like "Ademi of the Silkchutes").
@@ -185,11 +202,21 @@ async function fuzzyLookup(name: string): Promise<ScryfallCard | null> {
  */
 export async function resolveCardNames(names: string[]): Promise<ResolvedCards> {
   const requested = [...new Set(names)];
-  const foundRaw: ScryfallCard[] = [];
 
-  for (let i = 0; i < requested.length; i += BATCH_SIZE) {
+  // Serve everything we already know from the cache; only fetch the misses.
+  const byName = new Map<string, CardData>();
+  const toFetch: string[] = [];
+  for (const name of requested) {
+    const cached = resolutionCache.get(normalizeName(name));
+    if (cached) byName.set(name, cached);
+    else toFetch.push(name);
+  }
+  if (toFetch.length === 0) return { byName, unresolved: [] };
+
+  const foundRaw: ScryfallCard[] = [];
+  for (let i = 0; i < toFetch.length; i += BATCH_SIZE) {
     if (i > 0) await delay(BATCH_DELAY_MS);
-    const batch = requested.slice(i, i + BATCH_SIZE);
+    const batch = toFetch.slice(i, i + BATCH_SIZE);
     const res = await fetch(`${API}/cards/collection`, {
       method: "POST",
       headers: HEADERS,
@@ -208,12 +235,16 @@ export async function resolveCardNames(names: string[]): Promise<ResolvedCards> 
     }
   }
 
-  const byName = new Map<string, CardData>();
   const missing: string[] = [];
-  for (const name of requested) {
-    const card = byKey.get(normalizeName(name));
-    if (card) byName.set(name, card);
-    else missing.push(name);
+  for (const name of toFetch) {
+    const key = normalizeName(name);
+    const card = byKey.get(key);
+    if (card) {
+      byName.set(name, card);
+      cachePut(key, card);
+    } else {
+      missing.push(name);
+    }
   }
 
   const unresolved: string[] = [];
@@ -228,7 +259,9 @@ export async function resolveCardNames(names: string[]): Promise<ResolvedCards> 
     const raw = await fuzzyLookup(name);
     if (raw) {
       console.log(`[scryfall] fuzzy-resolved ${JSON.stringify(name)} -> "${raw.name}"`);
-      byName.set(name, toCardData(raw));
+      const card = toCardData(raw);
+      byName.set(name, card);
+      cachePut(normalizeName(name), card);
     } else {
       unresolved.push(name);
     }
