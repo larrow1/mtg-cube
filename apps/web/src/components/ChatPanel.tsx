@@ -25,19 +25,19 @@ export function ChatPanel({ className = "" }: { className?: string }): JSX.Eleme
 
   return (
     <div className={`panel flex flex-col ${className}`}>
-      <div className="border-b border-white/[0.06] px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+      <div className="border-b border-amber-100/[0.08] px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-zinc-400">
         Table talk
       </div>
       <div ref={listRef} className="scrollbar-slim flex-1 space-y-1.5 overflow-y-auto p-3">
         {state.chat.length === 0 ? (
           <div className="flex h-full min-h-[4rem] flex-col items-center justify-center gap-1 text-center">
-            <svg viewBox="0 0 24 24" className="h-5 w-5 fill-zinc-700"><path d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-6 4V6a2 2 0 0 1 2-2Z" /></svg>
-            <span className="text-[10px] text-zinc-600">No messages yet — say hi</span>
+            <svg viewBox="0 0 24 24" className="h-5 w-5 fill-indigo-400/50"><path d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-6 4V6a2 2 0 0 1 2-2Z" /></svg>
+            <span className="text-[10px] text-zinc-500">No messages yet — go on, break the ice</span>
           </div>
         ) : (
           state.chat.map((m, i) => (
             <div key={`${m.ts}-${i}`} className="text-xs leading-snug">
-              <span className={`font-bold ${m.playerId === myId ? "text-emerald-300" : "text-brass-300"}`}>
+              <span className={`font-bold ${m.playerId === myId ? "text-brass-300" : "text-sky-300"}`}>
                 {m.playerName}
               </span>
               <span className="text-zinc-600"> · {new Date(m.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
@@ -46,7 +46,7 @@ export function ChatPanel({ className = "" }: { className?: string }): JSX.Eleme
           ))
         )}
       </div>
-      <div className="flex gap-1.5 border-t border-white/[0.06] p-2">
+      <div className="flex gap-1.5 border-t border-amber-100/[0.08] p-2">
         <input
           className="input !py-1.5 text-xs"
           placeholder="Message…"

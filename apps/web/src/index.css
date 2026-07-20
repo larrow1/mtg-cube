@@ -1,3 +1,4 @@
+/* Arena-inspired indigo and gold theme. */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -9,81 +10,137 @@
   body {
     @apply bg-felt-950 text-zinc-200 antialiased;
     background-image:
-      radial-gradient(1100px 700px at 50% -12%, rgba(16, 185, 129, 0.09), transparent 60%),
-      radial-gradient(900px 600px at 85% 110%, rgba(5, 150, 105, 0.06), transparent 55%),
-      radial-gradient(700px 500px at 8% 100%, rgba(13, 148, 136, 0.05), transparent 60%);
+      radial-gradient(1100px 700px at 50% -12%, rgba(109, 106, 245, 0.22), transparent 60%),
+      radial-gradient(900px 600px at 85% 110%, rgba(217, 119, 6, 0.12), transparent 55%),
+      radial-gradient(700px 500px at 8% 100%, rgba(56, 189, 248, 0.1), transparent 60%),
+      radial-gradient(1600px 1000px at 50% 45%, transparent 55%, rgba(8, 6, 30, 0.55) 100%);
     background-attachment: fixed;
   }
   ::selection {
-    @apply bg-emerald-500/40 text-white;
+    @apply bg-amber-400/40 text-white;
   }
 }
 
 @layer components {
   .panel {
-    @apply rounded-xl border border-white/[0.06] bg-felt-900/80 shadow-[0_1px_0_rgba(255,255,255,0.04)_inset,0_8px_28px_rgba(0,0,0,0.35)] backdrop-blur-sm;
+    @apply rounded-2xl border border-amber-200/[0.14] bg-felt-900/80 shadow-[0_1px_0_rgba(255,221,150,0.09)_inset,0_0_0_1px_rgba(20,15,50,0.4),0_8px_28px_rgba(8,6,30,0.4)] backdrop-blur-sm;
   }
   .panel-inset {
-    @apply rounded-lg border border-black/40 bg-felt-950/60 shadow-[0_1px_0_rgba(255,255,255,0.03)];
+    @apply rounded-xl border border-amber-100/[0.08] bg-felt-950/60 shadow-[0_1px_0_rgba(255,221,150,0.05)];
   }
   .btn {
-    @apply inline-flex select-none items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-semibold transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 disabled:cursor-not-allowed disabled:opacity-40;
+    @apply inline-flex select-none items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-semibold transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/70 disabled:cursor-not-allowed disabled:opacity-40;
   }
   .btn-primary {
-    @apply btn bg-emerald-600 text-white shadow-[0_1px_0_rgba(255,255,255,0.15)_inset,0_2px_8px_rgba(0,0,0,0.4)] hover:bg-emerald-500 active:translate-y-px;
+    @apply btn bg-gradient-to-b from-amber-300 via-brass-400 to-amber-600 text-amber-950 shadow-[0_1px_0_rgba(255,255,255,0.45)_inset,0_-2px_5px_rgba(120,70,0,0.3)_inset,0_2px_8px_rgba(8,6,30,0.45),0_0_12px_rgba(251,191,36,0.2)] hover:brightness-110 active:scale-[0.97];
   }
   .btn-ghost {
-    @apply btn border border-white/10 bg-white/[0.04] text-zinc-200 hover:border-white/20 hover:bg-white/[0.08] active:translate-y-px;
+    @apply btn border border-amber-100/15 bg-white/[0.05] text-zinc-200 hover:border-amber-200/30 hover:bg-white/[0.09] active:scale-[0.97];
   }
   .btn-danger {
-    @apply btn bg-red-700/90 text-white hover:bg-red-600 active:translate-y-px;
+    @apply btn bg-gradient-to-b from-red-600 to-red-800 text-white shadow-[0_1px_0_rgba(255,255,255,0.2)_inset,0_2px_8px_rgba(8,6,30,0.45)] hover:brightness-110 active:scale-[0.97];
   }
   .btn-gold {
-    @apply btn bg-gradient-to-b from-brass-300 to-brass-500 text-felt-950 shadow-[0_1px_0_rgba(255,255,255,0.35)_inset,0_2px_10px_rgba(0,0,0,0.45)] hover:brightness-110 active:translate-y-px;
+    @apply btn bg-gradient-to-b from-yellow-200 via-brass-300 to-amber-500 text-amber-950 shadow-[0_1px_0_rgba(255,255,255,0.55)_inset,0_-2px_6px_rgba(120,70,0,0.35)_inset,0_2px_10px_rgba(8,6,30,0.45),0_0_20px_rgba(251,191,36,0.35)] hover:brightness-110 active:scale-[0.97];
   }
   .input {
-    @apply w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 transition-colors duration-150 focus:border-emerald-500/60 focus:outline-none focus:ring-1 focus:ring-emerald-500/40;
+    @apply w-full rounded-lg border border-amber-100/15 bg-felt-950/70 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 transition-colors duration-150 focus:border-amber-300/60 focus:outline-none focus:ring-1 focus:ring-amber-300/40;
   }
   .label {
     @apply mb-1 block text-[11px] font-semibold uppercase tracking-wider text-zinc-400;
   }
   .card-back {
-    @apply rounded-[6%] border border-emerald-900/80;
-    background-color: #0b1512;
+    @apply rounded-[6%] border border-indigo-400/30;
+    background-color: #1b1a42;
     background-image:
-      radial-gradient(circle at 50% 50%, rgba(16, 185, 129, 0.22) 0%, rgba(16, 185, 129, 0.05) 34%, transparent 36%),
-      repeating-linear-gradient(45deg, rgba(16, 185, 129, 0.07) 0 2px, transparent 2px 8px),
-      repeating-linear-gradient(-45deg, rgba(16, 185, 129, 0.07) 0 2px, transparent 2px 8px);
+      radial-gradient(circle at 50% 50%, rgba(242, 182, 75, 0.3) 0%, rgba(242, 182, 75, 0.07) 34%, transparent 36%),
+      repeating-linear-gradient(45deg, rgba(129, 140, 248, 0.12) 0 2px, transparent 2px 8px),
+      repeating-linear-gradient(-45deg, rgba(129, 140, 248, 0.12) 0 2px, transparent 2px 8px);
     box-shadow:
-      0 0 0 1px rgba(0, 0, 0, 0.6),
-      0 2px 6px rgba(0, 0, 0, 0.55),
-      inset 0 0 0 3px rgba(5, 46, 37, 0.9);
+      0 0 0 1px rgba(8, 6, 30, 0.6),
+      0 2px 6px rgba(8, 6, 30, 0.55),
+      inset 0 0 0 3px rgba(41, 40, 94, 0.95);
   }
   .zone-row {
-    @apply flex min-h-[7.5rem] flex-wrap content-start items-start gap-2 rounded-lg border border-white/[0.04] bg-black/20 p-2 transition-colors duration-150;
+    @apply flex min-h-[7.5rem] flex-wrap content-start items-start gap-2 rounded-xl border border-amber-100/[0.06] bg-felt-950/40 p-2 transition-colors duration-150;
   }
   .chip {
-    @apply inline-flex items-center gap-1 rounded-full border border-white/10 bg-black/60 px-1.5 py-0.5 text-[10px] font-medium leading-none text-zinc-300;
+    @apply inline-flex items-center gap-1 rounded-full border border-amber-100/15 bg-felt-950/80 px-2 py-0.5 text-[10px] font-semibold leading-none text-zinc-300;
+  }
+  /* Celebratory rising sparkles (winner banner) — pure CSS, no extra markup. */
+  .sparkle-field {
+    position: relative;
+    overflow: hidden;
+  }
+  .sparkle-field::before,
+  .sparkle-field::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 100%;
+    width: 6px;
+    height: 6px;
+    border-radius: 9999px;
+    pointer-events: none;
+    background: #fbbf24;
+    box-shadow:
+      26px 6px 0 0 #fbbf24,
+      70px -14px 0 -1px #38bdf8,
+      118px 10px 0 0 #f8fadc,
+      166px -8px 0 -2px #f87171,
+      214px 4px 0 0 #4ade80,
+      262px -16px 0 -1px #fbbf24,
+      310px 8px 0 0 #a78bfa,
+      358px -6px 0 -2px #38bdf8,
+      404px 2px 0 0 #fbbf24;
+    animation: sparkle-rise 2.8s linear infinite;
+  }
+  .sparkle-field::after {
+    box-shadow:
+      14px -10px 0 -2px #4ade80,
+      58px 8px 0 0 #fbbf24,
+      104px -4px 0 -1px #f87171,
+      150px 12px 0 0 #38bdf8,
+      198px -12px 0 -2px #f8fadc,
+      248px 6px 0 0 #fbbf24,
+      296px -8px 0 -1px #4ade80,
+      344px 10px 0 0 #f87171,
+      392px -2px 0 -2px #a78bfa;
+    animation-duration: 3.6s;
+    animation-delay: -1.6s;
+  }
+  @keyframes sparkle-rise {
+    0% {
+      transform: translateY(0);
+      opacity: 0;
+    }
+    12% {
+      opacity: 1;
+    }
+    100% {
+      transform: translateY(-480px);
+      opacity: 0;
+    }
   }
 }
 
 @layer utilities {
   .scrollbar-slim {
     scrollbar-width: thin;
-    scrollbar-color: rgba(52, 211, 153, 0.25) transparent;
+    scrollbar-color: rgba(251, 191, 36, 0.3) transparent;
   }
   .scrollbar-slim::-webkit-scrollbar {
     width: 8px;
     height: 8px;
   }
   .scrollbar-slim::-webkit-scrollbar-thumb {
-    background: rgba(52, 211, 153, 0.2);
+    background: rgba(251, 191, 36, 0.25);
     border-radius: 8px;
   }
   .scrollbar-slim::-webkit-scrollbar-track {
     background: transparent;
   }
   .text-shadow {
-    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+    text-shadow: 0 1px 3px rgba(8, 6, 30, 0.8);
   }
 }

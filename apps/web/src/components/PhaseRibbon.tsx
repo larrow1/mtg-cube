@@ -61,7 +61,7 @@ export function PhaseRibbon(props: PhaseRibbonProps): JSX.Element {
           Turn {turnNumber}
         </span>
         <span className="text-xs text-zinc-400">
-          <span className={`font-bold ${isMyTurn ? "text-emerald-300" : "text-zinc-200"}`}>{activePlayerName}</span>
+          <span className={`font-bold ${isMyTurn ? "text-brass-300" : "text-zinc-200"}`}>{activePlayerName}</span>
           {isMyTurn ? " (you)" : ""}
         </span>
       </div>
@@ -78,8 +78,8 @@ export function PhaseRibbon(props: PhaseRibbonProps): JSX.Element {
                 current
                   ? combat
                     ? "scale-110 bg-red-500/90 text-white shadow-card"
-                    : "scale-110 bg-emerald-500/90 text-felt-950 shadow-card"
-                  : "bg-white/[0.04] text-zinc-500"
+                    : "scale-110 bg-gradient-to-b from-brass-300 to-brass-500 text-amber-950 shadow-card"
+                  : "bg-white/[0.05] text-zinc-500"
               }`}
             >
               {STEP_LABELS[s].short}
@@ -90,10 +90,10 @@ export function PhaseRibbon(props: PhaseRibbonProps): JSX.Element {
 
       <div className="flex items-center gap-1.5">
         <span
-          className={`chip ${haveIPriority ? "border-emerald-400/50 text-emerald-300" : "border-white/10 text-zinc-400"}`}
+          className={`chip ${haveIPriority ? "border-amber-400/50 text-amber-300" : "border-white/10 text-zinc-400"}`}
           title="Who holds priority"
         >
-          <span className={`h-1.5 w-1.5 rounded-full ${haveIPriority ? "bg-emerald-400" : "bg-zinc-500"}`} />
+          <span className={`h-1.5 w-1.5 rounded-full ${haveIPriority ? "bg-amber-400" : "bg-zinc-500"}`} />
           {haveIPriority ? "Your priority" : `${priorityPlayerName} has priority`}
         </span>
         <button type="button" className="btn-ghost !px-2.5 !py-1.5 !text-xs" onClick={onPassPriority} disabled={!haveIPriority || finished} title="Pass priority">

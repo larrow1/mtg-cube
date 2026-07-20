@@ -7,6 +7,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type Dispatch,
@@ -43,19 +44,58 @@ export interface PreviewValue {
   data?: CardData;
   gameCard?: GameCard;
   faceIndex: number;
+  /** Viewport rect of the hovered card — the preview docks next to it. */
+  anchor?: { left: number; right: number; top: number; bottom: number };
 }
 
 const PreviewContext = createContext<Dispatch<SetStateAction<PreviewValue | null>> | null>(null);
 
+const PREVIEW_WIDTH = 248;
+const PREVIEW_GAP = 12;
+const PREVIEW_MARGIN = 8;
+
 export function CardPreviewProvider({ children }: { children: ReactNode }): JSX.Element {
   const [preview, setPreview] = useState<PreviewValue | null>(null);
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const face = preview ? activeFace(preview.data, preview.faceIndex) : undefined;
   const oracle = face && "oracleText" in face ? face.oracleText : undefined;
+
+  // Position after render (we need the preview's measured height to clamp).
+  useLayoutEffect(() => {
+    if (!preview) {
+      setPos(null);
+      return;
+    }
+    const a = preview.anchor;
+    const height = boxRef.current?.offsetHeight ?? 420;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    if (!a) {
+      setPos({ left: PREVIEW_MARGIN, top: vh - height - PREVIEW_MARGIN });
+      return;
+    }
+    // Prefer the right side of the hovered card; flip left when cramped.
+    let left = a.right + PREVIEW_GAP;
+    if (left + PREVIEW_WIDTH > vw - PREVIEW_MARGIN) {
+      left = a.left - PREVIEW_GAP - PREVIEW_WIDTH;
+    }
+    left = Math.max(PREVIEW_MARGIN, Math.min(left, vw - PREVIEW_WIDTH - PREVIEW_MARGIN));
+    // Center vertically on the card, clamped into the viewport.
+    let top = (a.top + a.bottom) / 2 - height / 2;
+    top = Math.max(PREVIEW_MARGIN, Math.min(top, vh - height - PREVIEW_MARGIN));
+    setPos({ left, top });
+  }, [preview]);
+
   return (
     <PreviewContext.Provider value={setPreview}>
       {children}
       {preview && (preview.data || preview.gameCard?.isToken) && (
-        <div className="pointer-events-none fixed bottom-3 left-3 z-[70] w-[248px] animate-fade-in">
+        <div
+          ref={boxRef}
+          className="pointer-events-none fixed z-[70] w-[248px] animate-fade-in"
+          style={pos ? { left: pos.left, top: pos.top } : { left: PREVIEW_MARGIN, top: -9999 }}
+        >
           <Card
             data={preview.data}
             gameCard={preview.gameCard?.isToken ? preview.gameCard : undefined}
@@ -87,7 +127,7 @@ function ManaCost({ cost }: { cost: string | undefined }): JSX.Element | null {
       {symbols.map((s, i) => (
         <span
           key={`${s}-${i}`}
-          className={`flex h-3.5 w-3.5 items-center justify-center rounded-full text-[9px] font-bold leading-none ${manaPipClasses(s)}`}
+          className={`flex h-4 w-4 items-center justify-center rounded-full text-[10px] font-bold leading-none shadow-[0_1px_2px_rgba(8,6,30,0.5)] ${manaPipClasses(s)}`}
         >
           {s}
         </span>
@@ -137,8 +177,8 @@ function TextFrame({ name, manaCost, typeLine, oracleText, pt, bucket, compact }
 export function CardBack({ className = "" }: { className?: string }): JSX.Element {
   return (
     <div className={`card-back flex h-full w-full items-center justify-center ${className}`}>
-      <div className="flex h-1/3 w-1/2 items-center justify-center rounded-full border border-emerald-800/70 bg-emerald-950/60">
-        <span className="select-none text-[10px] font-black tracking-widest text-emerald-500/80">MTG</span>
+      <div className="flex h-1/3 w-1/2 items-center justify-center rounded-full border border-indigo-400/40 bg-indigo-950/70">
+        <span className="select-none text-[10px] font-black tracking-widest text-brass-300/90">MTG</span>
       </div>
     </div>
   );
@@ -230,7 +270,7 @@ export function Card(props: CardProps): JSX.Element {
       ? "shadow-glow-red"
       : highlight === "block"
         ? "shadow-glow-blue"
-        : "shadow-card";
+        : "shadow-card hover:shadow-glow-soft";
 
   const counters = gameCard ? Object.entries(gameCard.counters).filter(([, n]) => n !== 0) : [];
   const damage = gameCard?.damage ?? 0;
@@ -284,12 +324,16 @@ export function Card(props: CardProps): JSX.Element {
       onClick={onClick}
       onDoubleClick={onDoubleClick}
       onContextMenu={onContextMenu}
-      onMouseEnter={() => {
-        if (!disablePreview && setPreview && previewValue && !showBack) {
-          lastPreviewSet.current = previewValue;
-          setPreview(previewValue);
-        } else if (!disablePreview && setPreview && isFaceDown && data) {
-          const v = { data, gameCard, faceIndex: shownFaceIndex };
+      onMouseEnter={(e) => {
+        if (disablePreview || !setPreview) return;
+        const r = e.currentTarget.getBoundingClientRect();
+        const anchor = { left: r.left, right: r.right, top: r.top, bottom: r.bottom };
+        if (previewValue && !showBack) {
+          const v = { ...previewValue, anchor };
+          lastPreviewSet.current = v;
+          setPreview(v);
+        } else if (isFaceDown && data) {
+          const v = { data, gameCard, faceIndex: shownFaceIndex, anchor };
           lastPreviewSet.current = v;
           setPreview(v);
         }
@@ -303,7 +347,7 @@ export function Card(props: CardProps): JSX.Element {
       className={`relative shrink-0 select-none ${SIZE_CLASSES[size]} ${className} ${onClick || onDoubleClick || onContextMenu ? "cursor-pointer" : ""}`}
     >
       <div
-        className={`relative aspect-[5/7] w-full rounded-[6%] transition-all duration-150 ${ring} ${tapped ? "rotate-90" : ""} ${dimmed ? "opacity-50" : ""} ${onClick || onDoubleClick ? "hover:-translate-y-0.5" : ""}`}
+        className={`relative aspect-[5/7] w-full rounded-[6%] transition-all duration-150 ${ring} ${tapped ? "rotate-90" : ""} ${dimmed ? "opacity-50" : ""} ${onClick || onDoubleClick ? "hover:-translate-y-1 hover:scale-[1.03]" : ""}`}
       >
         {body}
         {isFaceDown && !isHidden && (
@@ -329,7 +373,7 @@ export function Card(props: CardProps): JSX.Element {
         {counters.length > 0 && (
           <div className="absolute bottom-1 left-1 right-1 flex flex-wrap gap-0.5">
             {counters.map(([type, n]) => (
-              <span key={type} className="rounded bg-amber-400/95 px-1 py-0.5 text-[8px] font-bold leading-none text-amber-950 shadow" title={`${n} ${type} counter${n === 1 ? "" : "s"}`}>
+              <span key={type} className="rounded bg-amber-400 px-1 py-0.5 text-[9px] font-bold leading-none text-amber-950 shadow" title={`${n} ${type} counter${n === 1 ? "" : "s"}`}>
                 {n} {type}
               </span>
             ))}

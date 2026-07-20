@@ -24,7 +24,7 @@ export function ZonePile(props: ZonePileProps): JSX.Element {
   const { label, count, topCard, topCardData, faceDown = false, onClick, onContextMenu, accent = "zinc", className = "" } = props;
 
   const accentText =
-    accent === "emerald" ? "text-emerald-300" : accent === "purple" ? "text-purple-300" : "text-zinc-300";
+    accent === "emerald" ? "text-brass-300" : accent === "purple" ? "text-purple-300" : "text-zinc-300";
 
   return (
     <div
@@ -35,7 +35,7 @@ export function ZonePile(props: ZonePileProps): JSX.Element {
     >
       <div className="relative aspect-[5/7] w-full">
         {count === 0 ? (
-          <div className="flex h-full w-full items-center justify-center rounded-[6%] border border-dashed border-white/15 bg-black/20 text-[9px] uppercase tracking-wide text-zinc-600 transition-colors duration-150 group-hover:border-white/30">
+          <div className="flex h-full w-full items-center justify-center rounded-[6%] border border-dashed border-amber-100/20 bg-felt-950/40 text-[9px] uppercase tracking-wide text-zinc-500 transition-colors duration-150 group-hover:border-amber-200/40">
             Empty
           </div>
         ) : (
@@ -49,7 +49,7 @@ export function ZonePile(props: ZonePileProps): JSX.Element {
                 <Card gameCard={topCard} data={topCardData} size="xs" disablePreview={false} className="!w-full" />
               )}
             </div>
-            <span className={`absolute -right-1.5 -top-1.5 z-10 flex h-5 min-w-5 items-center justify-center rounded-full border border-white/15 bg-felt-950 px-1 text-[10px] font-bold shadow-card ${accentText}`}>
+            <span className={`absolute -right-1.5 -top-1.5 z-10 flex h-5 min-w-5 items-center justify-center rounded-full border border-amber-200/25 bg-felt-950 px-1 text-[10px] font-bold shadow-card ${accentText}`}>
               {count}
             </span>
           </>

@@ -72,13 +72,13 @@ export function Home(): JSX.Element {
       <div className="w-full max-w-md animate-fade-in">
         {/* Logo treatment */}
         <div className="mb-8 text-center">
-          <div className="mx-auto mb-4 flex h-20 w-20 items-center justify-center rounded-2xl border border-emerald-500/25 bg-gradient-to-br from-felt-700 to-felt-950 shadow-card-lg">
-            <svg viewBox="0 0 24 24" className="h-10 w-10 fill-emerald-400 drop-shadow-[0_0_8px_rgba(52,211,153,0.5)]">
+          <div className="mx-auto mb-4 flex h-20 w-20 items-center justify-center rounded-2xl border border-brass-400/40 bg-gradient-to-br from-felt-700 to-felt-950 shadow-card-lg">
+            <svg viewBox="0 0 24 24" className="h-10 w-10 fill-brass-300 drop-shadow-[0_0_8px_rgba(251,191,36,0.55)]">
               <path d="M12 1.5 3 6.75v10.5L12 22.5l9-5.25V6.75L12 1.5Zm0 2.3 7 4.08v8.24l-7 4.08-5-2.92V8.7l-2-1.17L12 3.8Zm-5 6.06 5 2.92v5.83l-5-2.92v-5.83Z" />
             </svg>
           </div>
           <h1 className="text-4xl font-black tracking-tight text-zinc-50">
-            MTG <span className="bg-gradient-to-r from-emerald-300 to-brass-300 bg-clip-text text-transparent">Cube</span>
+            MTG <span className="bg-gradient-to-r from-sky-300 via-brass-300 to-amber-400 bg-clip-text text-transparent">Cube</span>
           </h1>
           <p className="mt-2 text-sm text-zinc-400">Upload a cube · draft with friends · play at the table</p>
         </div>
@@ -97,7 +97,7 @@ export function Home(): JSX.Element {
             <div className="flex items-center justify-between gap-3">
               <div>
                 <div className="text-sm font-bold text-zinc-100">
-                  Room <span className="font-mono tracking-widest text-emerald-300">{stored.roomId}</span>
+                  Room <span className="font-mono tracking-widest text-brass-300">{stored.roomId}</span>
                 </div>
                 <div className="text-xs text-zinc-500">as {stored.name}</div>
                 {state.rejoinFailed && <div className="mt-1 text-[11px] text-red-400">Automatic rejoin failed — the room may be gone.</div>}
@@ -140,10 +140,10 @@ export function Home(): JSX.Element {
             Create a room
           </button>
 
-          <div className="my-4 flex items-center gap-3 text-[10px] font-bold uppercase tracking-widest text-zinc-600">
-            <div className="h-px flex-1 bg-white/10" />
+          <div className="my-4 flex items-center gap-3 text-[10px] font-bold uppercase tracking-widest text-zinc-500">
+            <div className="h-px flex-1 bg-amber-100/15" />
             or join
-            <div className="h-px flex-1 bg-white/10" />
+            <div className="h-px flex-1 bg-amber-100/15" />
           </div>
 
           <div className="flex gap-2">
@@ -168,7 +168,7 @@ export function Home(): JSX.Element {
           </div>
         </div>
 
-        <p className="mt-6 text-center text-[11px] text-zinc-600">
+        <p className="mt-6 text-center text-[11px] text-zinc-500">
           Rooms hold up to 8 drafters — empty seats are filled with bots.
         </p>
       </div>

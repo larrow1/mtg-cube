@@ -166,7 +166,7 @@ export function Deckbuild(): JSX.Element {
   return (
     <div className="mx-auto max-w-[110rem] animate-fade-in p-4">
       {myLiveMatch && (
-        <div className="panel mb-3 flex flex-wrap items-center justify-between gap-3 border-emerald-500/30 px-4 py-3">
+        <div className="panel mb-3 flex flex-wrap items-center justify-between gap-3 border-brass-400/40 px-4 py-3">
           <div className="flex items-center gap-2 text-sm text-zinc-200">
             <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
             Your match against{" "}
@@ -189,7 +189,7 @@ export function Deckbuild(): JSX.Element {
               type="button"
               onClick={() => setSortMode(m)}
               className={`rounded-md px-2.5 py-1 text-xs font-semibold uppercase transition-colors duration-150 ${
-                sortMode === m ? "bg-emerald-600 text-white" : "bg-white/[0.04] text-zinc-400 hover:bg-white/10"
+                sortMode === m ? "bg-gradient-to-b from-brass-300 to-brass-500 text-amber-950 shadow-card" : "bg-white/[0.05] text-zinc-400 hover:bg-white/10"
               }`}
             >
               {m}
@@ -224,11 +224,11 @@ export function Deckbuild(): JSX.Element {
         >
           <h2 className="mb-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-zinc-400">
             Pool <span className="chip">{pool.length}</span>
-            <span className="normal-case text-zinc-600">click a card to add it to your deck</span>
+            <span className="normal-case text-zinc-500">click a card to add it to your deck</span>
           </h2>
           {pool.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-white/10 py-10 text-center text-xs text-zinc-600">
-              Pool is empty — every pick is in your deck or sideboard.
+            <div className="rounded-xl border border-dashed border-amber-100/15 py-10 text-center text-xs text-zinc-400">
+              Pool is empty — every last pick made the cut.
             </div>
           ) : (
             renderGroups(pool, "pool", "main")
@@ -245,8 +245,8 @@ export function Deckbuild(): JSX.Element {
             Main deck <span className="chip">{main.length} + {basicsTotal} basics</span>
           </h2>
           {main.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-emerald-500/20 py-10 text-center text-xs text-zinc-600">
-              Drag or click cards from your pool to build your deck.
+            <div className="rounded-xl border border-dashed border-brass-400/30 py-10 text-center text-xs text-zinc-400">
+              Nothing here yet — drag or click cards from your pool and start brewing.
             </div>
           ) : (
             renderGroups(main, "main", "pool")
@@ -254,7 +254,7 @@ export function Deckbuild(): JSX.Element {
 
           {/* Sideboard */}
           <div
-            className="mt-4 border-t border-white/[0.06] pt-3"
+            className="mt-4 border-t border-amber-100/[0.08] pt-3"
             onDragOver={(e) => {
               e.preventDefault();
               e.stopPropagation();
@@ -266,10 +266,10 @@ export function Deckbuild(): JSX.Element {
           >
             <h3 className="mb-2 flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-zinc-400">
               Sideboard <span className="chip">{side.length}</span>
-              <span className="normal-case text-zinc-600">drop cards here</span>
+              <span className="normal-case text-zinc-500">drop cards here</span>
             </h3>
             {side.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-white/10 py-4 text-center text-[11px] text-zinc-700">
+              <div className="rounded-xl border border-dashed border-amber-100/15 py-4 text-center text-[11px] text-zinc-500">
                 Unused pool cards are also submitted as sideboard.
               </div>
             ) : (
@@ -289,7 +289,7 @@ export function Deckbuild(): JSX.Element {
                 const sym = BASIC_COLORS[name] ?? "C";
                 return (
                   <div key={name} className="flex items-center gap-2">
-                    <span className={`flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-black shadow-card ${manaPipClasses(sym)}`}>
+                    <span className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-black shadow-card ${manaPipClasses(sym)}`}>
                       {sym}
                     </span>
                     <span className="flex-1 text-xs font-semibold text-zinc-300">{name}</span>
@@ -347,7 +347,7 @@ export function Deckbuild(): JSX.Element {
 
           {/* Host: pair matches */}
           {isHost && (
-            <div className="panel border-brass-400/20 p-3">
+            <div className="panel border-brass-400/30 p-3">
               <h2 className="mb-2 text-[10px] font-bold uppercase tracking-wider text-brass-300">Pair a match</h2>
               <div className="mb-2 grid grid-cols-2 gap-2">
                 <select className="input !py-1.5 text-xs" value={pairA} onChange={(e) => setPairA(e.target.value)}>

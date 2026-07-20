@@ -19,10 +19,10 @@ export function CurveChart({ counts }: CurveChartProps): JSX.Element {
           const pct = Math.round((n / max) * 100);
           return (
             <div key={label} className="flex flex-1 flex-col items-center gap-1" title={`${n} card${n === 1 ? "" : "s"} at cmc ${label}`}>
-              <span className={`text-[10px] font-bold tabular-nums ${n > 0 ? "text-emerald-300" : "text-zinc-700"}`}>{n}</span>
+              <span className={`text-[10px] font-bold tabular-nums ${n > 0 ? "text-amber-300" : "text-zinc-600"}`}>{n}</span>
               <div className="flex w-full flex-1 items-end">
                 <div
-                  className={`w-full rounded-t transition-all duration-300 ${n > 0 ? "bg-gradient-to-t from-emerald-700 to-emerald-400" : "bg-white/[0.04]"}`}
+                  className={`w-full rounded-t transition-all duration-300 ${n > 0 ? "bg-gradient-to-t from-amber-600 to-amber-300" : "bg-white/[0.05]"}`}
                   style={{ height: `${Math.max(n > 0 ? 8 : 2, pct)}%` }}
                 />
               </div>

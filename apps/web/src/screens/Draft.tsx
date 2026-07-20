@@ -35,10 +35,10 @@ function SeatStrip({ draft }: { draft: DraftView }): JSX.Element {
           <div
             key={seat.seatIndex}
             className={`flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors duration-150 ${
-              isMe ? "border-emerald-500/40 bg-emerald-500/10" : "border-white/[0.06] bg-white/[0.03]"
+              isMe ? "border-brass-400/50 bg-amber-400/10" : "border-amber-100/[0.08] bg-white/[0.04]"
             }`}
           >
-            <span className={`font-semibold ${isMe ? "text-emerald-300" : "text-zinc-300"}`}>
+            <span className={`font-semibold ${isMe ? "text-brass-300" : "text-zinc-300"}`}>
               {seat.playerName ?? `Bot ${seat.seatIndex + 1}`}
             </span>
             {seat.isBot && <span className="chip border-purple-400/30 text-purple-300">bot</span>}
@@ -123,7 +123,7 @@ export function Draft(): JSX.Element {
       <header className="panel flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2.5">
         <div className="flex items-baseline gap-3">
           <span className="text-lg font-black text-zinc-50">
-            Pack <span className="text-emerald-300">{draft.packNumber}</span>
+            Pack <span className="text-brass-300">{draft.packNumber}</span>
             <span className="text-zinc-500">/{draft.packsPerPlayer}</span>
           </span>
           <span className="text-sm font-semibold text-zinc-400">
@@ -149,7 +149,7 @@ export function Draft(): JSX.Element {
       <main className="panel flex-1 p-4">
         {draft.complete ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 py-16 text-center">
-            <svg viewBox="0 0 24 24" className="h-10 w-10 fill-emerald-400"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2Z" /></svg>
+            <svg viewBox="0 0 24 24" className="h-10 w-10 fill-brass-300 drop-shadow-[0_0_8px_rgba(251,191,36,0.45)]"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2Z" /></svg>
             <div className="text-lg font-bold text-zinc-100">Draft complete</div>
             <div className="text-sm text-zinc-500">Moving to deck building…</div>
           </div>
@@ -186,11 +186,11 @@ export function Draft(): JSX.Element {
           <div className="flex h-full flex-col items-center justify-center gap-3 py-16 text-center">
             <div className="flex gap-1">
               {[0, 1, 2].map((i) => (
-                <span key={i} className="h-2.5 w-2.5 animate-pulse rounded-full bg-emerald-500/60" style={{ animationDelay: `${i * 200}ms` }} />
+                <span key={i} className="h-2.5 w-2.5 animate-pulse rounded-full bg-brass-400/70" style={{ animationDelay: `${i * 200}ms` }} />
               ))}
             </div>
             <div className="text-sm font-semibold text-zinc-300">Waiting for the next pack…</div>
-            <div className="text-xs text-zinc-600">Your neighbor is still deliberating.</div>
+            <div className="text-xs text-zinc-500">Your neighbor is still deliberating.</div>
           </div>
         )}
       </main>
@@ -202,8 +202,8 @@ export function Draft(): JSX.Element {
           <span className="chip">{draft.picks.length}</span>
         </div>
         {draft.picks.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-white/10 py-4 text-center text-xs text-zinc-600">
-            Cards you pick will collect here, grouped by color.
+          <div className="rounded-xl border border-dashed border-amber-100/15 py-4 text-center text-xs text-zinc-400">
+            No picks yet — grab something spicy and it&apos;ll land here, grouped by color.
           </div>
         ) : (
           <div className="scrollbar-slim flex gap-4 overflow-x-auto pb-1">

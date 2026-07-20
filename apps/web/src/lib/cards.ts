@@ -92,17 +92,17 @@ export function parseManaCost(cost: string | undefined): string[] {
 export function manaPipClasses(symbol: string): string {
   switch (symbol) {
     case "W":
-      return "bg-amber-100 text-stone-900";
+      return "bg-amber-200 text-amber-950";
     case "U":
-      return "bg-sky-400 text-sky-950";
+      return "bg-sky-500 text-sky-50";
     case "B":
-      return "bg-zinc-800 text-zinc-100 border border-zinc-600";
+      return "bg-zinc-900 text-zinc-100 border border-zinc-500";
     case "R":
       return "bg-red-500 text-red-50";
     case "G":
-      return "bg-green-600 text-green-50";
+      return "bg-green-500 text-green-950";
     case "C":
-      return "bg-zinc-400 text-zinc-900";
+      return "bg-zinc-300 text-zinc-800";
     default:
       return "bg-zinc-500 text-zinc-100";
   }

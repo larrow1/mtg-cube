@@ -402,12 +402,12 @@ export function Game(): JSX.Element {
 
   const renderRow = (rowCards: GameCard[], mine: boolean, label: string): JSX.Element => (
     <div
-      className={`zone-row ${mine && canAct ? "hover:border-emerald-500/20" : ""}`}
+      className={`zone-row ${mine && canAct ? "hover:border-brass-400/30" : ""}`}
       onDragOver={mine ? (e) => e.preventDefault() : undefined}
       onDrop={mine ? dropTo("battlefield") : undefined}
     >
       {rowCards.length === 0 ? (
-        <span className="self-center px-2 text-[9px] font-semibold uppercase tracking-wider text-zinc-700">{label}</span>
+        <span className="self-center px-2 text-[9px] font-semibold uppercase tracking-wider text-zinc-500/70">{label}</span>
       ) : (
         rowCards.map((gc) => (
           <Card
@@ -440,7 +440,7 @@ export function Game(): JSX.Element {
     <div className="mx-auto flex h-screen max-w-[120rem] flex-col gap-2 overflow-hidden p-2 lg:p-3">
       {/* Mode hints */}
       {(attachSource || blockSource) && (
-        <div className="fixed left-1/2 top-2 z-[60] flex -translate-x-1/2 animate-fade-in items-center gap-2 rounded-full border border-emerald-500/40 bg-felt-900 px-4 py-1.5 text-xs font-semibold text-emerald-200 shadow-card-lg">
+        <div className="fixed left-1/2 top-2 z-[60] flex -translate-x-1/2 animate-fade-in items-center gap-2 rounded-full border border-brass-400/50 bg-felt-900 px-4 py-1.5 text-xs font-semibold text-brass-300 shadow-card-lg">
           {attachSource ? "Click a permanent to attach to" : "Click an attacking creature to block"}
           <button
             type="button"
@@ -470,7 +470,7 @@ export function Game(): JSX.Element {
                   <CardBack />
                 </div>
               ))}
-              {oppHandCount === 0 && <span className="text-[10px] uppercase tracking-wider text-zinc-700">Empty hand</span>}
+              {oppHandCount === 0 && <span className="text-[10px] uppercase tracking-wider text-zinc-500/70">Empty hand</span>}
             </div>
             <span className="chip" title="Opponent hand size">
               {nameFor(opp.playerId)} · {oppHandCount} card{oppHandCount === 1 ? "" : "s"}
@@ -524,7 +524,7 @@ export function Game(): JSX.Element {
             onDrop={dropTo("hand")}
           >
             {myHand.length === 0 ? (
-              <span className="pb-6 text-[10px] uppercase tracking-wider text-zinc-700">Your hand is empty</span>
+              <span className="pb-6 text-[10px] uppercase tracking-wider text-zinc-500/70">Your hand is empty</span>
             ) : (
               <div className="flex items-end">
                 {myHand.map((gc, i) => {
@@ -598,7 +598,7 @@ export function Game(): JSX.Element {
             />
           </div>
 
-          <div className="my-0.5 border-t border-white/[0.06]" />
+          <div className="my-0.5 border-t border-amber-100/[0.08]" />
 
           {/* My panel */}
           <LifeCounter
@@ -705,9 +705,9 @@ export function Game(): JSX.Element {
               </svg>
             </button>
             {logOpen && (
-              <div className="scrollbar-slim min-h-[6rem] flex-1 space-y-1 overflow-y-auto border-t border-white/[0.06] p-2.5">
+              <div className="scrollbar-slim min-h-[6rem] flex-1 space-y-1 overflow-y-auto border-t border-amber-100/[0.08] p-2.5">
                 {gs.log.length === 0 ? (
-                  <div className="text-[10px] text-zinc-600">Nothing has happened yet.</div>
+                  <div className="text-[10px] text-zinc-500">All quiet so far — go make some history.</div>
                 ) : (
                   [...gs.log].reverse().map((entry) => (
                     <div key={entry.seq} className="text-[10px] leading-snug text-zinc-400">
@@ -805,7 +805,7 @@ export function Game(): JSX.Element {
             );
           })()}
           {browse.playerId === me.playerId && (
-            <p className="mt-3 text-[11px] text-zinc-600">Click a card to return it to your hand; right-click or drag it out for other zones.</p>
+            <p className="mt-3 text-[11px] text-zinc-500">Click a card to return it to your hand; right-click or drag it out for other zones.</p>
           )}
         </Modal>
       )}
@@ -867,8 +867,8 @@ export function Game(): JSX.Element {
       {/* Winner banner */}
       {gs.finished && (
         <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/80 p-6 backdrop-blur-sm">
-          <div className="panel w-full max-w-md animate-pop-in p-8 text-center">
-            <svg viewBox="0 0 24 24" className="mx-auto mb-3 h-12 w-12 fill-brass-300"><path d="M5 3h14v2h3v4a5 5 0 0 1-4.5 4.97A6.5 6.5 0 0 1 13 17.4V19h3v2H8v-2h3v-1.6a6.5 6.5 0 0 1-4.5-3.43A5 5 0 0 1 2 9V5h3V3Zm0 4H4v2a3 3 0 0 0 1.6 2.66A11 11 0 0 1 5 7Zm15 0h-1a11 11 0 0 1-.6 4.66A3 3 0 0 0 20 9V7Z" /></svg>
+          <div className="panel sparkle-field w-full max-w-md animate-pop-in border-brass-400/40 p-8 text-center shadow-[0_0_40px_rgba(251,191,36,0.25)]">
+            <svg viewBox="0 0 24 24" className="mx-auto mb-3 h-12 w-12 animate-trophy fill-brass-300 drop-shadow-[0_0_10px_rgba(251,191,36,0.6)]"><path d="M5 3h14v2h3v4a5 5 0 0 1-4.5 4.97A6.5 6.5 0 0 1 13 17.4V19h3v2H8v-2h3v-1.6a6.5 6.5 0 0 1-4.5-3.43A5 5 0 0 1 2 9V5h3V3Zm0 4H4v2a3 3 0 0 0 1.6 2.66A11 11 0 0 1 5 7Zm15 0h-1a11 11 0 0 1-.6 4.66A3 3 0 0 0 20 9V7Z" /></svg>
             <h2 className="text-2xl font-black text-zinc-50">
               {winnerName ? `${winnerName} wins!` : "Game over"}
             </h2>
@@ -1102,7 +1102,7 @@ function TokenDialog({ onClose, onCreate }: TokenDialogProps): JSX.Element {
           </div>
         </div>
         <label className="flex items-center gap-2 text-xs text-zinc-300">
-          <input type="checkbox" className="accent-emerald-500" checked={tapped} onChange={(e) => setTapped(e.target.checked)} />
+          <input type="checkbox" className="accent-amber-400" checked={tapped} onChange={(e) => setTapped(e.target.checked)} />
           Enters tapped
         </label>
       </div>

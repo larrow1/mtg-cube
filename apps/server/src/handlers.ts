@@ -403,6 +403,9 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
       // Re-emit current views so a reconnecting client is fully caught up.
       emitDraftViewTo(io, room, player.id);
       for (const match of room.matches.values()) {
+        // Finished games are not re-emitted: a reload should land in the room,
+        // not back on the game-over banner (results live in RoomState.matches).
+        if (match.game.finished) continue;
         if (match.playerIds.includes(player.id)) {
           io.to(socket.id).emit("gameState", buildGameView(match.game, player.id, match.cardLookup));
         } else if (!match.game.finished) {

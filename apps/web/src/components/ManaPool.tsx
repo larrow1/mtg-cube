@@ -30,11 +30,11 @@ export function ManaPool({ pool, editable, onAdd, onEmpty }: ManaPoolProps): JSX
                 if (editable && n > 0) onAdd(color, -1);
               }}
               title={editable ? `${color}: ${n} — click to add, right-click to remove` : `${color}: ${n}`}
-              className={`relative flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-black transition-all duration-150 disabled:cursor-default ${manaPipClasses(color)} ${n === 0 ? "opacity-35" : "shadow-card"} ${editable ? "hover:scale-110 active:scale-95" : ""}`}
+              className={`relative flex h-7 w-7 items-center justify-center rounded-full text-xs font-black transition-all duration-150 disabled:cursor-default ${manaPipClasses(color)} ${n === 0 ? "opacity-35" : "shadow-card"} ${editable ? "hover:scale-110 active:scale-95" : ""}`}
             >
               {color}
               {n > 0 && (
-                <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-felt-950 px-0.5 text-[9px] font-bold text-emerald-300 ring-1 ring-white/20">
+                <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-felt-950 px-0.5 text-[9px] font-bold text-brass-300 ring-1 ring-amber-200/30">
                   {n}
                 </span>
               )}
@@ -48,7 +48,7 @@ export function ManaPool({ pool, editable, onAdd, onEmpty }: ManaPoolProps): JSX
           onClick={onEmpty}
           disabled={total === 0}
           title="Empty mana pool"
-          className="ml-1 rounded-md border border-white/10 p-1 text-zinc-400 transition-colors duration-150 hover:border-white/25 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-30"
+          className="ml-1 rounded-md border border-amber-100/15 p-1 text-zinc-400 transition-colors duration-150 hover:border-amber-200/30 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-30"
         >
           <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-current"><path d="M6 7h12l-1 14H7L6 7Zm3-3h6l1 2h4v2H4V6h4l1-2Z" /></svg>
         </button>

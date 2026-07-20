@@ -61,7 +61,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps): JSX.Ele
     <div
       ref={ref}
       style={{ left: pos.left, top: pos.top }}
-      className="fixed z-[90] min-w-[176px] animate-pop-in rounded-lg border border-white/10 bg-felt-850 py-1 shadow-card-lg"
+      className="fixed z-[90] min-w-[176px] animate-pop-in rounded-xl border border-amber-200/15 bg-felt-850 py-1 shadow-card-lg"
       onMouseDown={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.preventDefault()}
     >
@@ -85,7 +85,7 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps): JSX.Ele
               className={`block w-full px-3 py-1.5 text-left text-xs transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
                 item.danger
                   ? "text-red-400 hover:bg-red-500/15"
-                  : "text-zinc-200 hover:bg-emerald-500/15"
+                  : "text-zinc-200 hover:bg-amber-400/15"
               }`}
             >
               {item.label}

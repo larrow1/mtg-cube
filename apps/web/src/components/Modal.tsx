@@ -67,7 +67,7 @@ export function Modal(props: ModalProps): JSX.Element {
     >
       <div className={`panel w-full ${WIDTHS[width]} max-h-[88vh] overflow-hidden animate-pop-in flex flex-col`}>
         {title && (
-          <div className="flex items-center justify-between border-b border-white/[0.06] px-4 py-3">
+          <div className="flex items-center justify-between border-b border-amber-100/[0.08] px-4 py-3">
             <h2 className="text-sm font-bold uppercase tracking-wider text-zinc-200">{title}</h2>
             <button
               type="button"
@@ -81,7 +81,7 @@ export function Modal(props: ModalProps): JSX.Element {
         )}
         <div className="scrollbar-slim flex-1 overflow-y-auto p-4">{children}</div>
         {!noFooter && (
-          <div className="flex justify-end gap-2 border-t border-white/[0.06] px-4 py-3">
+          <div className="flex justify-end gap-2 border-t border-amber-100/[0.08] px-4 py-3">
             <button type="button" className="btn-ghost" onClick={onClose}>
               {cancelLabel}
             </button>
