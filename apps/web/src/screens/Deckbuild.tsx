@@ -235,7 +235,10 @@ export function Deckbuild(): JSX.Element {
     );
   }
 
-  const zoneOf = (instanceId: string): DeckZone => assignment[instanceId] ?? "pool";
+  // Picks arrive pre-built: everything you drafted starts in the main deck
+  // (sideboarded draft cards are seeded to "side" above) — the pool is where
+  // cuts go.
+  const zoneOf = (instanceId: string): DeckZone => assignment[instanceId] ?? "main";
   const inZone = (zone: DeckZone): DraftCard[] => picks.filter((p) => zoneOf(p.instanceId) === zone);
   const pool = inZone("pool");
   const main = inZone("main");
@@ -523,7 +526,7 @@ export function Deckbuild(): JSX.Element {
             <div className="scrollbar-slim min-h-0 flex-1 overflow-y-auto p-3">
               {pool.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-amber-100/15 py-10 text-center text-xs text-zinc-400">
-                  Pool is empty — every last pick made the cut.
+                  Your deck starts fully built from the draft — click or drag cards out of it and your cuts land here.
                 </div>
               ) : shownPool.length === 0 ? (
                 <div className="rounded-xl border border-dashed border-amber-100/15 py-10 text-center text-xs text-zinc-400">
