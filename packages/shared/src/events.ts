@@ -4,6 +4,7 @@
  */
 import type {
   Account,
+  AdminStats,
   DraftCard,
   DraftView,
   GameAction,
@@ -13,6 +14,7 @@ import type {
   RatingInfo,
   RoomState,
   SavedCubeSummary,
+  SystemCubeSummary,
 } from "./types.js";
 
 export interface Ack<T = undefined> {
@@ -97,6 +99,20 @@ export interface ClientToServerEvents {
    *  queueMatched when paired; the client then joins the created room. */
   queueJoin: (ack: (r: Ack) => void) => void;
   queueLeave: (ack: (r: Ack) => void) => void;
+
+  // -- Admin portal (require an authenticated ADMIN socket) -----------------
+  adminListSystemCubes: (ack: (r: Ack<{ cubes: SystemCubeSummary[] }>) => void) => void;
+  /** Upload a preloaded cube into the ranked pool (resolved via Scryfall). */
+  adminUploadSystemCube: (
+    args: { name: string; list: string; active: boolean },
+    ack: (r: Ack<{ cube: SystemCubeSummary }>) => void
+  ) => void;
+  adminSetSystemCubeActive: (
+    args: { cubeId: string; active: boolean },
+    ack: (r: Ack<{ cube: SystemCubeSummary }>) => void
+  ) => void;
+  adminDeleteSystemCube: (args: { cubeId: string }, ack: (r: Ack) => void) => void;
+  adminGetStats: (ack: (r: Ack<{ stats: AdminStats }>) => void) => void;
 }
 
 export interface ServerToClientEvents {

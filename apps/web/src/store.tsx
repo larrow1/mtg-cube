@@ -72,6 +72,8 @@ export interface AppState {
   queue: QueueState | null;
   /** Sign-in / create-account modal visibility (openable from any screen). */
   authOpen: boolean;
+  /** Admin portal visibility (client-side route flag; admins only). */
+  adminOpen: boolean;
 }
 
 export type AppEvent =
@@ -90,7 +92,9 @@ export type AppEvent =
   | { type: "accountState"; account: AccountState | null }
   | { type: "queueState"; queue: QueueState | null }
   | { type: "openAuth" }
-  | { type: "closeAuth" };
+  | { type: "closeAuth" }
+  | { type: "openAdmin" }
+  | { type: "closeAdmin" };
 
 // ---------------------------------------------------------------------------
 // Session persistence
@@ -170,6 +174,7 @@ const initialState: AppState = {
   account: null,
   queue: null,
   authOpen: false,
+  adminOpen: false,
 };
 
 function reducer(state: AppState, event: AppEvent): AppState {
@@ -233,14 +238,24 @@ function reducer(state: AppState, event: AppEvent): AppState {
     case "dismissToast":
       return { ...state, toasts: state.toasts.filter((t) => t.id !== event.id) };
     case "accountState":
-      // Losing the account also ends any ranked queue membership.
-      return { ...state, account: event.account, queue: event.account ? state.queue : null };
+      // Losing the account also ends any ranked queue membership; losing admin
+      // (sign-out mid-session) also closes the admin portal.
+      return {
+        ...state,
+        account: event.account,
+        queue: event.account ? state.queue : null,
+        adminOpen: state.adminOpen && event.account?.account.isAdmin === true,
+      };
     case "queueState":
       return { ...state, queue: event.queue };
     case "openAuth":
       return { ...state, authOpen: true };
     case "closeAuth":
       return { ...state, authOpen: false };
+    case "openAdmin":
+      return { ...state, adminOpen: true };
+    case "closeAdmin":
+      return { ...state, adminOpen: false };
     default:
       return state;
   }

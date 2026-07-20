@@ -23,11 +23,15 @@ import type { CardData, Cube } from "@mtg-cube/shared";
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_DB_PATH = path.resolve(moduleDir, "..", "data", "mtg-cube.db");
 
+/** Cubes with this owner are admin-managed system cubes (the ranked pool). */
+export const SYSTEM_OWNER_ID = "system";
+
 const MIGRATIONS = `
 CREATE TABLE IF NOT EXISTS users (
   id            TEXT PRIMARY KEY,
   username      TEXT NOT NULL COLLATE NOCASE UNIQUE,
   password_hash TEXT NOT NULL,
+  is_admin      INTEGER NOT NULL DEFAULT 0,
   created_at    INTEGER NOT NULL
 );
 
@@ -48,6 +52,7 @@ CREATE TABLE IF NOT EXISTS cubes (
   card_count      INTEGER NOT NULL,
   unresolved_json TEXT NOT NULL,
   ranked_eligible INTEGER NOT NULL DEFAULT 0,
+  active          INTEGER NOT NULL DEFAULT 1,
   created_at      INTEGER NOT NULL,
   updated_at      INTEGER NOT NULL
 );
@@ -76,6 +81,15 @@ CREATE INDEX IF NOT EXISTS idx_ranked_matches_b ON ranked_matches(user_b, ts);
 
 let db: DatabaseSync | null = null;
 
+/** Idempotently ALTER a pre-existing table that is missing a newer column. */
+function ensureColumn(database: DatabaseSync, table: string, column: string, ddl: string): void {
+  const cols = database.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (!cols.some((c) => c.name === column)) {
+    database.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+    console.log(`SQLite migration: added ${table}.${column}`);
+  }
+}
+
 export function getDb(): DatabaseSync {
   if (db) return db;
   const dbPath = process.env.DB_PATH?.trim() || DEFAULT_DB_PATH;
@@ -84,6 +98,9 @@ export function getDb(): DatabaseSync {
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec(MIGRATIONS);
+  // v2.1 columns for databases created before they existed in MIGRATIONS.
+  ensureColumn(db, "users", "is_admin", "is_admin INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "cubes", "active", "active INTEGER NOT NULL DEFAULT 1");
   // Opportunistic hygiene: drop long-expired sessions on boot.
   db.prepare("DELETE FROM sessions WHERE expires_at < ?").run(Date.now());
   console.log(`SQLite database ready at ${path.resolve(dbPath)}`);
@@ -98,6 +115,7 @@ export interface UserRow {
   id: string;
   username: string;
   password_hash: string;
+  is_admin: number;
   created_at: number;
 }
 
@@ -106,6 +124,7 @@ export function createUser(username: string, passwordHash: string): UserRow {
     id: nanoid(12),
     username,
     password_hash: passwordHash,
+    is_admin: 0,
     created_at: Date.now(),
   };
   try {
@@ -130,6 +149,11 @@ export function findUserByUsername(username: string): UserRow | undefined {
 
 export function findUserById(id: string): UserRow | undefined {
   return getDb().prepare("SELECT * FROM users WHERE id = ?").get(id) as UserRow | undefined;
+}
+
+/** Grant admin (idempotent). There is deliberately no revoke path (v2.1). */
+export function setUserAdmin(userId: string): void {
+  getDb().prepare("UPDATE users SET is_admin = 1 WHERE id = ?").run(userId);
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +207,8 @@ export interface CubeSummaryRow {
   card_count: number;
   unresolved: string[];
   ranked_eligible: boolean;
+  /** System cubes only: inactive cubes are excluded from the ranked pool. */
+  active: boolean;
   created_at: number;
   updated_at: number;
 }
@@ -201,6 +227,7 @@ interface RawCubeRow {
   card_count: number;
   unresolved_json: string;
   ranked_eligible: number;
+  active: number;
   created_at: number;
   updated_at: number;
 }
@@ -213,13 +240,14 @@ function toSummary(raw: RawCubeRow): CubeSummaryRow {
     card_count: raw.card_count,
     unresolved: JSON.parse(raw.unresolved_json) as string[],
     ranked_eligible: raw.ranked_eligible !== 0,
+    active: raw.active !== 0,
     created_at: raw.created_at,
     updated_at: raw.updated_at,
   };
 }
 
 const SUMMARY_COLUMNS =
-  "id, owner_id, name, card_count, unresolved_json, ranked_eligible, created_at, updated_at";
+  "id, owner_id, name, card_count, unresolved_json, ranked_eligible, active, created_at, updated_at";
 
 export function insertCube(args: {
   id?: string;
@@ -229,6 +257,8 @@ export function insertCube(args: {
   cards: StoredCubeCards;
   unresolved: string[];
   rankedEligible: boolean;
+  /** System cubes only; defaults to true. */
+  active?: boolean;
 }): CubeSummaryRow {
   const now = Date.now();
   const raw: RawCubeRow = {
@@ -240,14 +270,15 @@ export function insertCube(args: {
     card_count: args.cards.cardIds.length,
     unresolved_json: JSON.stringify(args.unresolved),
     ranked_eligible: args.rankedEligible ? 1 : 0,
+    active: args.active === false ? 0 : 1,
     created_at: now,
     updated_at: now,
   };
   getDb()
     .prepare(
       `INSERT INTO cubes (id, owner_id, name, list_text, cards_json, card_count, unresolved_json,
-                          ranked_eligible, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                          ranked_eligible, active, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       raw.id,
@@ -258,6 +289,7 @@ export function insertCube(args: {
       raw.card_count,
       raw.unresolved_json,
       raw.ranked_eligible,
+      raw.active,
       raw.created_at,
       raw.updated_at
     );
@@ -320,12 +352,71 @@ export function setCubeRankedEligible(
   return raw ? toSummary(raw) : undefined;
 }
 
-/** All ranked-eligible cubes (any owner, including the system default cube). */
-export function listRankedEligible(): CubeSummaryRow[] {
+/** The ranked cube pool: ACTIVE system cubes + user cubes opted into ranked. */
+export function listRankedPool(): CubeSummaryRow[] {
   const rows = getDb()
-    .prepare(`SELECT ${SUMMARY_COLUMNS} FROM cubes WHERE ranked_eligible = 1`)
-    .all() as unknown as (RawCubeRow & { unresolved_json: string })[];
+    .prepare(
+      `SELECT ${SUMMARY_COLUMNS} FROM cubes
+       WHERE (owner_id = ? AND active = 1) OR (owner_id != ? AND ranked_eligible = 1)`
+    )
+    .all(SYSTEM_OWNER_ID, SYSTEM_OWNER_ID) as unknown as (RawCubeRow & { unresolved_json: string })[];
   return rows.map((r) => toSummary({ ...r, list_text: "", cards_json: "" }));
+}
+
+// ---------------------------------------------------------------------------
+// System cubes (admin-managed; owner_id = SYSTEM_OWNER_ID)
+// ---------------------------------------------------------------------------
+
+export function listSystemCubes(): CubeSummaryRow[] {
+  const rows = getDb()
+    .prepare(`SELECT ${SUMMARY_COLUMNS} FROM cubes WHERE owner_id = ? ORDER BY updated_at DESC`)
+    .all(SYSTEM_OWNER_ID) as unknown as (RawCubeRow & { unresolved_json: string })[];
+  return rows.map((r) => toSummary({ ...r, list_text: "", cards_json: "" }));
+}
+
+/** Toggle a system cube in/out of the ranked pool. Undefined if not a system cube. */
+export function setCubeActive(id: string, active: boolean): CubeSummaryRow | undefined {
+  const result = getDb()
+    .prepare("UPDATE cubes SET active = ?, updated_at = ? WHERE id = ? AND owner_id = ?")
+    .run(active ? 1 : 0, Date.now(), id, SYSTEM_OWNER_ID);
+  if (result.changes === 0) return undefined;
+  const raw = getDb().prepare("SELECT * FROM cubes WHERE id = ?").get(id) as RawCubeRow | undefined;
+  return raw ? toSummary(raw) : undefined;
+}
+
+/** Rename a cube in place (used to migrate the seeded default cube's name). */
+export function renameCube(id: string, name: string): void {
+  getDb().prepare("UPDATE cubes SET name = ? WHERE id = ?").run(name, id);
+}
+
+// ---------------------------------------------------------------------------
+// Admin stats counts
+// ---------------------------------------------------------------------------
+
+function countRow(sql: string, ...params: (string | number)[]): number {
+  const row = getDb().prepare(sql).get(...params) as { n: number } | undefined;
+  return row?.n ?? 0;
+}
+
+export function countUsers(): number {
+  return countRow("SELECT COUNT(*) AS n FROM users");
+}
+
+/** User-saved cubes (system cubes excluded). */
+export function countSavedCubes(): number {
+  return countRow("SELECT COUNT(*) AS n FROM cubes WHERE owner_id != ?", SYSTEM_OWNER_ID);
+}
+
+export function countRankedMatches(): number {
+  return countRow("SELECT COUNT(*) AS n FROM ranked_matches");
+}
+
+/** User-owned cubes currently opted into the ranked pool. */
+export function countUserEligibleCubes(): number {
+  return countRow(
+    "SELECT COUNT(*) AS n FROM cubes WHERE owner_id != ? AND ranked_eligible = 1",
+    SYSTEM_OWNER_ID
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -83,6 +83,21 @@ export function AccountMenu(): JSX.Element {
                 </svg>
                 My cubes
               </button>
+              {acct.account.isAdmin && (
+                <button
+                  type="button"
+                  className={itemClasses}
+                  onClick={() => {
+                    setOpen(false);
+                    dispatch({ type: "openAdmin" });
+                  }}
+                >
+                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-brass-400/90">
+                    <path d="M12 1.75 4 5v6c0 5.05 3.41 9.76 8 11.25 4.59-1.49 8-6.2 8-11.25V5l-8-3.25Zm-1.2 14.3-3.3-3.3 1.4-1.4 1.9 1.9 4.3-4.3 1.4 1.4-5.7 5.7Z" />
+                  </svg>
+                  Admin portal
+                </button>
+              )}
               <div className="my-1 border-t border-amber-100/[0.08]" />
               <button
                 type="button"

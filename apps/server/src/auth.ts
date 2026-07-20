@@ -17,7 +17,9 @@ import {
   findUserById,
   findUserByUsername,
   getRating,
+  setUserAdmin,
 } from "./db.js";
+import type { UserRow } from "./db.js";
 
 const BCRYPT_COST = 10;
 const SESSION_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
@@ -95,8 +97,41 @@ function issueSession(userId: string): { token: string; tokenHash: string } {
   return { token, tokenHash };
 }
 
-function toAccount(user: { id: string; username: string; created_at: number }): Account {
-  return { id: user.id, username: user.username, createdAt: user.created_at };
+// ---------------------------------------------------------------------------
+// Admin bootstrap: ADMIN_USERNAMES env (comma-separated, case-insensitive)
+// ---------------------------------------------------------------------------
+
+/** Read per call so tests can tweak the env between runs. */
+function adminUsernames(): Set<string> {
+  return new Set(
+    (process.env.ADMIN_USERNAMES ?? "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  );
+}
+
+/**
+ * On successful register/login/authenticate: if the username is listed in
+ * ADMIN_USERNAMES and not yet admin, persist is_admin=1. Idempotent; removing
+ * a name from the env does NOT revoke (revocation is a future concern).
+ */
+function promoteIfConfiguredAdmin(user: UserRow): UserRow {
+  if (user.is_admin === 0 && adminUsernames().has(user.username.toLowerCase())) {
+    setUserAdmin(user.id);
+    console.log(`admin granted via ADMIN_USERNAMES: ${user.username}`);
+    return { ...user, is_admin: 1 };
+  }
+  return user;
+}
+
+function toAccount(user: UserRow): Account {
+  return {
+    id: user.id,
+    username: user.username,
+    createdAt: user.created_at,
+    isAdmin: user.is_admin !== 0,
+  };
 }
 
 export interface AuthResult {
@@ -109,7 +144,7 @@ export interface AuthResult {
 export async function registerUser(username: string, password: string): Promise<AuthResult> {
   if (findUserByUsername(username)) throw new Error("That username is already taken");
   const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
-  const user = createUser(username, passwordHash);
+  const user = promoteIfConfiguredAdmin(createUser(username, passwordHash));
   const { token, tokenHash } = issueSession(user.id);
   return { token, tokenHash, account: toAccount(user) };
 }
@@ -124,8 +159,9 @@ export async function loginUser(username: string, password: string, ip: string):
     throw new Error("Invalid username or password");
   }
   clearLoginFailures(username, ip);
-  const { token, tokenHash } = issueSession(user.id);
-  return { token, tokenHash, account: toAccount(user) };
+  const promoted = promoteIfConfiguredAdmin(user);
+  const { token, tokenHash } = issueSession(promoted.id);
+  return { token, tokenHash, account: toAccount(promoted) };
 }
 
 /** Resolve a raw session token to its account, or null if invalid/expired. */
@@ -136,7 +172,7 @@ export function verifyToken(token: string): { account: Account; tokenHash: strin
   if (!session) return null;
   const user = findUserById(session.user_id);
   if (!user) return null;
-  return { account: toAccount(user), tokenHash };
+  return { account: toAccount(promoteIfConfiguredAdmin(user)), tokenHash };
 }
 
 export function revokeSessionByHash(tokenHash: string): void {

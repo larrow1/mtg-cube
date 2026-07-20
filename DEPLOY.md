@@ -22,6 +22,7 @@ Env vars (all optional locally):
 | `PORT` | `3001` | Listen port |
 | `SERVE_STATIC_DIR` | unset | Path to the built web client (`apps/web/dist`); enables static serving + SPA fallback |
 | `CORS_ORIGIN` | `http://localhost:5173` | Only relevant if you host the client on a *different* origin |
+| `ADMIN_USERNAMES` | unset | Comma-separated usernames (case-insensitive) granted admin on their next register/login; admins manage the preloaded ranked cube pool. Removing a name does **not** revoke admin |
 
 ## Docker
 

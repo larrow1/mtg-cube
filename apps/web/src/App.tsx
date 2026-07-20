@@ -8,6 +8,7 @@ import { AccountMenu } from "./components/AccountMenu";
 import { CardPreviewProvider } from "./components/Card";
 import { ToastLayer } from "./components/Toast";
 import { useApp } from "./store";
+import { AdminPortal } from "./screens/AdminPortal";
 import { Home } from "./screens/Home";
 import { Lobby } from "./screens/Lobby";
 import { Draft } from "./screens/Draft";
@@ -36,6 +37,13 @@ function Router(): JSX.Element {
     default:
       return <Lobby />;
   }
+}
+
+/** Admin portal overlay: sits above the router when the client-side flag is set. */
+function AdminLayer(): JSX.Element | null {
+  const { state } = useApp();
+  if (!state.adminOpen) return null;
+  return <AdminPortal />;
 }
 
 function ConnectionBanner(): JSX.Element | null {
@@ -72,6 +80,7 @@ export default function App(): JSX.Element {
         <div className="min-h-0 flex-1 overflow-y-auto">
           <Router />
         </div>
+        <AdminLayer />
         <ToastLayer />
       </div>
     </CardPreviewProvider>

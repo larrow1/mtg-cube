@@ -9,12 +9,14 @@ import { BASIC_LAND_NAMES, normalizeCubeLines, parseCubeList } from "@mtg-cube/s
 import type {
   Account,
   Ack,
+  AdminStats,
   CardData,
   DraftCard,
   GameAction,
   RankedMatchRecord,
   RatingInfo,
   SavedCubeSummary,
+  SystemCubeSummary,
 } from "@mtg-cube/shared";
 import {
   accountStateFor,
@@ -32,13 +34,21 @@ import {
   verifyToken,
 } from "./auth.js";
 import {
+  SYSTEM_OWNER_ID,
   countCubesByOwner,
+  countRankedMatches,
+  countSavedCubes,
+  countUserEligibleCubes,
+  countUsers,
   cubeFromRow,
   deleteCube,
+  findUserById,
   getCubeById,
   insertCube,
   listCubesByOwner,
   listRankedHistory,
+  listSystemCubes,
+  setCubeActive,
   setCubeRankedEligible,
 } from "./db.js";
 import type { CubeSummaryRow, StoredCubeCards } from "./db.js";
@@ -67,6 +77,7 @@ import {
   onUserOffline,
   queueJoin,
   queueLeave,
+  queueSize,
   rankedUserFor,
 } from "./matchmaking.js";
 import { resolveCardNames } from "./scryfall.js";
@@ -137,6 +148,14 @@ function requireUserId(socket: AppSocket): string {
   return userId;
 }
 
+/** Admin-only features: authenticated AND is_admin (checked per call). */
+function requireAdmin(socket: AppSocket): string {
+  const userId = requireUserId(socket);
+  const user = findUserById(userId);
+  if (!user || user.is_admin === 0) throw new Error("Admin access required");
+  return userId;
+}
+
 function toSavedCubeSummary(row: CubeSummaryRow): SavedCubeSummary {
   return {
     id: row.id,
@@ -144,6 +163,17 @@ function toSavedCubeSummary(row: CubeSummaryRow): SavedCubeSummary {
     cardCount: row.card_count,
     unresolvedCount: row.unresolved.length,
     rankedEligible: row.ranked_eligible,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toSystemCubeSummary(row: CubeSummaryRow): SystemCubeSummary {
+  return {
+    id: row.id,
+    name: row.name,
+    cardCount: row.card_count,
+    unresolvedCount: row.unresolved.length,
+    active: row.active,
     updatedAt: row.updated_at,
   };
 }
@@ -685,6 +715,93 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
       const userId = requireUserId(socket);
       queueLeave(userId);
       reply({ ok: true });
+    });
+  });
+
+  // -- admin portal (authenticated admins only; flag verified per call) -----
+  socket.on("adminListSystemCubes", (ack) => {
+    const reply = once<{ cubes: SystemCubeSummary[] }>(ack);
+    guard(reply, () => {
+      requireAdmin(socket);
+      reply({ ok: true, data: { cubes: listSystemCubes().map(toSystemCubeSummary) } });
+    });
+  });
+
+  socket.on("adminUploadSystemCube", (args, ack) => {
+    const reply = once<{ cube: SystemCubeSummary }>(ack);
+    guardAsync(reply, async () => {
+      requireAdmin(socket);
+      const name = String(args?.name ?? "").trim().slice(0, 60) || "Untitled Cube";
+      const active = Boolean(args?.active);
+      const listText = String(args?.list ?? "");
+      // Same limits as saveCube (via resolveCubeList) minus the per-owner cap.
+      const { cards, unresolved } = await resolveCubeList(listText);
+      const row = insertCube({
+        ownerId: SYSTEM_OWNER_ID,
+        name,
+        listText,
+        cards,
+        unresolved,
+        rankedEligible: false, // system cubes are pooled via `active`, not this
+        active,
+      });
+      reply({ ok: true, data: { cube: toSystemCubeSummary(row) } });
+      console.log(
+        `[admin] system cube uploaded: "${name}" ` +
+          `(${row.card_count} cards, ${unresolved.length} unresolved, active=${active})`
+      );
+    });
+  });
+
+  socket.on("adminSetSystemCubeActive", (args, ack) => {
+    const reply = once<{ cube: SystemCubeSummary }>(ack);
+    guard(reply, () => {
+      requireAdmin(socket);
+      const row = setCubeActive(String(args?.cubeId ?? ""), Boolean(args?.active));
+      if (!row) throw new Error("System cube not found");
+      reply({ ok: true, data: { cube: toSystemCubeSummary(row) } });
+      console.log(`[admin] system cube "${row.name}" active=${row.active}`);
+    });
+  });
+
+  socket.on("adminDeleteSystemCube", (args, ack) => {
+    const reply = once(ack);
+    guard(reply, () => {
+      requireAdmin(socket);
+      const cubeId = String(args?.cubeId ?? "");
+      const cubes = listSystemCubes();
+      const target = cubes.find((c) => c.id === cubeId);
+      if (!target) throw new Error("System cube not found");
+      // The ranked pool must never be empty: deleting the last ACTIVE system
+      // cube requires another active system cube or a user-eligible cube.
+      if (target.active) {
+        const anotherActive = cubes.some((c) => c.id !== cubeId && c.active);
+        if (!anotherActive && countUserEligibleCubes() === 0) {
+          throw new Error(
+            "Cannot delete the last active system cube — the ranked pool would be empty. " +
+              "Activate another system cube first."
+          );
+        }
+      }
+      if (!deleteCube(cubeId, SYSTEM_OWNER_ID)) throw new Error("System cube not found");
+      reply({ ok: true });
+      console.log(`[admin] system cube deleted: "${target.name}"`);
+    });
+  });
+
+  socket.on("adminGetStats", (ack) => {
+    const reply = once<{ stats: AdminStats }>(ack);
+    guard(reply, () => {
+      requireAdmin(socket);
+      const stats: AdminStats = {
+        users: countUsers(),
+        savedCubes: countSavedCubes(),
+        rankedMatchesPlayed: countRankedMatches(),
+        activeRooms: rooms.size,
+        playersInQueue: queueSize(),
+        userEligibleCubes: countUserEligibleCubes(),
+      };
+      reply({ ok: true, data: { stats } });
     });
   });
 

@@ -17,7 +17,7 @@ import {
   getCubeById,
   getRating,
   insertRankedMatch,
-  listRankedEligible,
+  listRankedPool,
   upsertRating,
 } from "./db.js";
 import { ensureDefaultCube } from "./defaultCube.js";
@@ -195,6 +195,11 @@ export function onUserOffline(userId: string): void {
   queue.delete(userId);
 }
 
+/** Number of players currently searching (for admin stats). */
+export function queueSize(): number {
+  return queue.size;
+}
+
 function tick(): void {
   if (!io || !rooms) return;
   const now = Date.now();
@@ -249,19 +254,18 @@ function feasible(cardCount: number): boolean {
   return c.seatCount * c.packsPerPlayer * c.cardsPerPack <= cardCount;
 }
 
-/** Random cube among ranked-eligible saved cubes + the bundled default cube. */
+/** Random cube among ACTIVE system cubes + user ranked-eligible saved cubes. */
 async function chooseRankedCubeId(): Promise<string> {
-  const ids = new Set<string>();
-  for (const row of listRankedEligible()) {
-    if (feasible(row.card_count)) ids.add(row.id);
-  }
+  // Seed the bundled default cube on first use so the pool starts non-empty
+  // (admins may later deactivate or delete it in favor of their own cubes).
   try {
-    const def = await ensureDefaultCube();
-    if (feasible(def.card_count)) ids.add(def.id);
+    await ensureDefaultCube();
   } catch (err) {
     console.error("[matchmaking] default cube unavailable:", err);
   }
-  const pool = [...ids];
+  const pool = listRankedPool()
+    .filter((row) => feasible(row.card_count))
+    .map((row) => row.id);
   const pick = pool[Math.floor(Math.random() * pool.length)];
   if (!pick) throw new Error("No ranked-eligible cube is available");
   return pick;

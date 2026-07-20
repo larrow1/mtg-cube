@@ -6,12 +6,12 @@
  */
 import type { CardData } from "@mtg-cube/shared";
 import type { CubeFullRow, StoredCubeCards } from "./db.js";
-import { getCubeById, insertCube } from "./db.js";
+import { SYSTEM_OWNER_ID, getCubeById, insertCube, renameCube } from "./db.js";
 import { resolveCardNames } from "./scryfall.js";
 
 export const DEFAULT_CUBE_ID = "system-default-cube";
-export const DEFAULT_CUBE_NAME = "MTG Cube Classics";
-export const SYSTEM_OWNER_ID = "system";
+export const DEFAULT_CUBE_NAME = "Classic Cube Staples";
+export { SYSTEM_OWNER_ID } from "./db.js";
 
 /** ~360 real cube staples across every color and archetype. Exact Scryfall names. */
 export const DEFAULT_CUBE_CARD_NAMES: readonly string[] = [
@@ -387,18 +387,28 @@ export const DEFAULT_CUBE_CARD_NAMES: readonly string[] = [
 
 let ensuring: Promise<CubeFullRow> | null = null;
 
+/** v2.1: DBs seeded before the rename carry the old name — fix it in place. */
+function withCurrentName(row: CubeFullRow): CubeFullRow {
+  if (row.name !== DEFAULT_CUBE_NAME) {
+    renameCube(DEFAULT_CUBE_ID, DEFAULT_CUBE_NAME);
+    console.log(`[defaultCube] renamed "${row.name}" -> "${DEFAULT_CUBE_NAME}"`);
+    return { ...row, name: DEFAULT_CUBE_NAME };
+  }
+  return row;
+}
+
 /**
  * Return the persisted system default cube, resolving + persisting it on
  * first use. Concurrent callers share one in-flight resolution.
  */
 export function ensureDefaultCube(): Promise<CubeFullRow> {
   const existing = getCubeById(DEFAULT_CUBE_ID);
-  if (existing) return Promise.resolve(existing);
+  if (existing) return Promise.resolve(withCurrentName(existing));
   ensuring ??= (async () => {
     try {
       // Re-check inside the lock: another caller may have just persisted it.
       const row = getCubeById(DEFAULT_CUBE_ID);
-      if (row) return row;
+      if (row) return withCurrentName(row);
 
       const names = [...DEFAULT_CUBE_CARD_NAMES];
       const { byName, unresolved } = await resolveCardNames(names);

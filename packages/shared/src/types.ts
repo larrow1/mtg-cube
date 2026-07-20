@@ -101,6 +101,28 @@ export interface Account {
   id: string;
   username: string;
   createdAt: number;
+  /** Admins manage the preloaded ranked cube pool via the admin portal. */
+  isAdmin: boolean;
+}
+
+/** An admin-managed preloaded cube; active ones form the ranked cube pool. */
+export interface SystemCubeSummary {
+  id: string;
+  name: string;
+  cardCount: number;
+  unresolvedCount: number;
+  active: boolean;
+  updatedAt: number;
+}
+
+export interface AdminStats {
+  users: number;
+  savedCubes: number;
+  rankedMatchesPlayed: number;
+  activeRooms: number;
+  playersInQueue: number;
+  /** User-owned cubes currently opted into the ranked pool. */
+  userEligibleCubes: number;
 }
 
 export const RANK_TIERS = ["Bronze", "Silver", "Gold", "Platinum", "Diamond", "Mythic"] as const;
