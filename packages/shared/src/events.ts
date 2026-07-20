@@ -5,6 +5,7 @@
 import type {
   Account,
   AdminStats,
+  AdminUserRow,
   DraftCard,
   DraftView,
   GameAction,
@@ -113,6 +114,13 @@ export interface ClientToServerEvents {
   ) => void;
   adminDeleteSystemCube: (args: { cubeId: string }, ack: (r: Ack) => void) => void;
   adminGetStats: (ack: (r: Ack<{ stats: AdminStats }>) => void) => void;
+  adminListUsers: (ack: (r: Ack<{ users: AdminUserRow[] }>) => void) => void;
+  /**
+   * Permanently delete a user: account, sessions, saved cubes, rating, and
+   * ranked history rows involving them; live sockets are signed out. Admins
+   * cannot delete their own account.
+   */
+  adminDeleteUser: (args: { userId: string }, ack: (r: Ack) => void) => void;
 }
 
 export interface ServerToClientEvents {

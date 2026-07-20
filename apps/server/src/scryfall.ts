@@ -153,9 +153,35 @@ export interface ResolvedCards {
 }
 
 /**
- * Resolve a list of card names via POST /cards/collection in batches of 75
- * with a 100ms pause between batches. Names that come back in `not_found`
- * (i.e. that no returned card matches) are collected into `unresolved`.
+ * The collection endpoint rejects full split-card names ("Life // Death") —
+ * identifiers must use a single face/half, which still returns the whole card.
+ */
+function identifierNameFor(name: string): string {
+  const front = name.split("//")[0]!.trim();
+  return front.length > 0 ? front : name;
+}
+
+/** Max fuzzy-fallback lookups per resolution, so garbage lists can't hammer Scryfall. */
+const FUZZY_FALLBACK_CAP = 60;
+
+/**
+ * Last-chance lookup for names the batch pass missed: GET /cards/named?fuzzy=
+ * only matches when unambiguous, and also knows alternate/flavor names (e.g.
+ * Universes Beyond in-universe names like "Ademi of the Silkchutes").
+ */
+async function fuzzyLookup(name: string): Promise<ScryfallCard | null> {
+  const res = await fetch(`${API}/cards/named?fuzzy=${encodeURIComponent(name)}`, {
+    headers: HEADERS,
+  });
+  if (!res.ok) return null;
+  return (await res.json()) as ScryfallCard;
+}
+
+/**
+ * Resolve a list of card names: POST /cards/collection in batches of 75 with a
+ * 100ms pause between batches, then a fuzzy-fallback pass for any leftovers
+ * (split names, alternate/flavor names, minor typos). Names that still match
+ * nothing are collected into `unresolved`.
  */
 export async function resolveCardNames(names: string[]): Promise<ResolvedCards> {
   const requested = [...new Set(names)];
@@ -167,7 +193,7 @@ export async function resolveCardNames(names: string[]): Promise<ResolvedCards> 
     const res = await fetch(`${API}/cards/collection`, {
       method: "POST",
       headers: HEADERS,
-      body: JSON.stringify({ identifiers: batch.map((name) => ({ name })) }),
+      body: JSON.stringify({ identifiers: batch.map((name) => ({ name: identifierNameFor(name) })) }),
     });
     if (!res.ok) throw new Error(`Scryfall request failed (HTTP ${res.status})`);
     const body = (await res.json()) as { data?: ScryfallCard[] };
@@ -183,11 +209,29 @@ export async function resolveCardNames(names: string[]): Promise<ResolvedCards> 
   }
 
   const byName = new Map<string, CardData>();
-  const unresolved: string[] = [];
+  const missing: string[] = [];
   for (const name of requested) {
     const card = byKey.get(normalizeName(name));
     if (card) byName.set(name, card);
-    else unresolved.push(name);
+    else missing.push(name);
+  }
+
+  const unresolved: string[] = [];
+  let fuzzyBudget = FUZZY_FALLBACK_CAP;
+  for (const name of missing) {
+    if (fuzzyBudget <= 0) {
+      unresolved.push(name);
+      continue;
+    }
+    fuzzyBudget -= 1;
+    await delay(BATCH_DELAY_MS);
+    const raw = await fuzzyLookup(name);
+    if (raw) {
+      console.log(`[scryfall] fuzzy-resolved ${JSON.stringify(name)} -> "${raw.name}"`);
+      byName.set(name, toCardData(raw));
+    } else {
+      unresolved.push(name);
+    }
   }
   return { byName, unresolved };
 }

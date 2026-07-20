@@ -156,6 +156,57 @@ export function setUserAdmin(userId: string): void {
   getDb().prepare("UPDATE users SET is_admin = 1 WHERE id = ?").run(userId);
 }
 
+/** One row per user for the admin portal user table (rating defaults applied). */
+export interface UserDetailsRow {
+  id: string;
+  username: string;
+  is_admin: number;
+  created_at: number;
+  rating: number;
+  wins: number;
+  losses: number;
+  draws: number;
+  cube_count: number;
+}
+
+export function listUsersWithDetails(): UserDetailsRow[] {
+  return getDb()
+    .prepare(
+      `SELECT u.id, u.username, u.is_admin, u.created_at,
+              COALESCE(r.rating, ?) AS rating,
+              COALESCE(r.wins, 0)   AS wins,
+              COALESCE(r.losses, 0) AS losses,
+              COALESCE(r.draws, 0)  AS draws,
+              (SELECT COUNT(*) FROM cubes c WHERE c.owner_id = u.id) AS cube_count
+       FROM users u
+       LEFT JOIN ratings r ON r.user_id = u.id
+       ORDER BY u.created_at ASC`
+    )
+    .all(STARTING_RATING) as unknown as UserDetailsRow[];
+}
+
+/**
+ * Permanently delete a user and everything they own, in one transaction:
+ * sessions, saved cubes, rating, ranked match rows involving them, then the
+ * users row itself. Returns whether a users row was actually deleted.
+ */
+export function deleteUserCascade(userId: string): boolean {
+  const database = getDb();
+  database.exec("BEGIN");
+  try {
+    database.prepare("DELETE FROM sessions WHERE user_id = ?").run(userId);
+    database.prepare("DELETE FROM cubes WHERE owner_id = ?").run(userId);
+    database.prepare("DELETE FROM ratings WHERE user_id = ?").run(userId);
+    database.prepare("DELETE FROM ranked_matches WHERE user_a = ? OR user_b = ?").run(userId, userId);
+    const result = database.prepare("DELETE FROM users WHERE id = ?").run(userId);
+    database.exec("COMMIT");
+    return result.changes > 0;
+  } catch (err) {
+    database.exec("ROLLBACK");
+    throw err;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Sessions (tokens arrive here already hashed — hashing lives in auth.ts)
 // ---------------------------------------------------------------------------

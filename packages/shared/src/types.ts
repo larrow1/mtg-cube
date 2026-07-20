@@ -115,6 +115,22 @@ export interface SystemCubeSummary {
   updatedAt: number;
 }
 
+/** One row in the admin portal's user table. */
+export interface AdminUserRow {
+  id: string;
+  username: string;
+  isAdmin: boolean;
+  createdAt: number;
+  /** Currently connected via at least one authenticated socket. */
+  online: boolean;
+  rating: number;
+  rank: RankTier;
+  wins: number;
+  losses: number;
+  draws: number;
+  savedCubes: number;
+}
+
 export interface AdminStats {
   users: number;
   savedCubes: number;

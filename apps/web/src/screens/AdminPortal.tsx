@@ -2,18 +2,21 @@
  * Admin portal: full-screen overlay (client-side route flag, no URL) for
  * managing the preloaded ranked cube pool. Sections per SPEC v2.1:
  *   1. stats tiles via adminGetStats (on open + refresh button)
- *   2. system cube table: name / card count / unresolved badge / active toggle
+ *   2. user table via adminListUsers: username / rank + rating / W-L-D /
+ *      saved cubes / joined date / delete with confirm (never your own row)
+ *   3. system cube table: name / card count / unresolved badge / active toggle
  *      (re-rendered from the ack, no optimistic update) / updated date /
  *      delete with confirm (the server's never-empty-pool rejection toasts)
- *   3. upload form: name + paste textarea + .txt file + active-on-upload
+ *   4. upload form: name + paste textarea + .txt file + active-on-upload
  *      toggle, "Resolving via Scryfall…" progress state, upload report
  * Only rendered for accounts with isAdmin; anyone else is bounced (closeAdmin).
  */
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
-import type { AdminStats, SystemCubeSummary } from "@mtg-cube/shared";
+import type { AdminStats, AdminUserRow, SystemCubeSummary } from "@mtg-cube/shared";
 import { call } from "../socket";
 import { useApp } from "../store";
 import { Modal } from "../components/Modal";
+import { RankBadge } from "../components/RankBadge";
 
 function formatDate(ts: number): string {
   return new Date(ts).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
@@ -71,6 +74,138 @@ function StatsSection({ stats, error, busy, onRefresh }: StatsSectionProps): JSX
           ))}
         </div>
       )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// User table
+// ---------------------------------------------------------------------------
+
+interface UsersSectionProps {
+  users: AdminUserRow[] | null;
+  error: string | null;
+  busy: boolean;
+  busyId: string | null;
+  /** The signed-in admin's own account id (their row cannot be deleted). */
+  selfId: string | undefined;
+  onRefresh: () => void;
+  onDelete: (user: AdminUserRow) => void;
+}
+
+function UsersSection({ users, error, busy, busyId, selfId, onRefresh, onDelete }: UsersSectionProps): JSX.Element {
+  const th = "px-2.5 py-2 text-left text-[10px] font-bold uppercase tracking-wider text-zinc-500";
+
+  let body: JSX.Element;
+  if (error) {
+    body = <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</div>;
+  } else if (!users) {
+    body = (
+      <div className="flex items-center justify-center gap-2 py-8 text-xs text-zinc-400">
+        <span className="h-2 w-2 animate-pulse rounded-full bg-brass-400" />
+        Loading users…
+      </div>
+    );
+  } else if (users.length === 0) {
+    body = (
+      <div className="rounded-xl border border-dashed border-amber-100/15 py-8 text-center text-xs text-zinc-400">
+        No accounts registered yet.
+      </div>
+    );
+  } else {
+    body = (
+      <div className="scrollbar-slim overflow-x-auto">
+        <table className="w-full min-w-[38rem] border-collapse text-xs">
+          <thead>
+            <tr className="border-b border-amber-100/[0.08]">
+              <th className={th}>User</th>
+              <th className={th}>Rank</th>
+              <th className={th}>W / L / D</th>
+              <th className={`${th} text-right`}>Cubes</th>
+              <th className={th}>Joined</th>
+              <th className={`${th} text-right`}>
+                <span className="sr-only">Actions</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {users.map((user) => {
+              const isSelf = user.id === selfId;
+              const rowBusy = busyId === user.id;
+              return (
+                <tr key={user.id} className="border-b border-amber-100/[0.05] last:border-b-0 hover:bg-white/[0.02]">
+                  <td className="max-w-[14rem] px-2.5 py-2.5">
+                    <div className="flex items-center gap-1.5">
+                      {user.online && (
+                        <span
+                          className="h-2 w-2 shrink-0 rounded-full bg-emerald-400 shadow-[0_0_5px_rgba(52,211,153,0.7)]"
+                          title="Online now"
+                        />
+                      )}
+                      <span className="truncate font-bold text-zinc-100" title={user.username}>
+                        {user.username}
+                      </span>
+                      {isSelf && <span className="shrink-0 text-[10px] text-zinc-500">(you)</span>}
+                      {user.isAdmin && <span className="chip shrink-0 !border-brass-400/60 !text-brass-300">Admin</span>}
+                    </div>
+                  </td>
+                  <td className="whitespace-nowrap px-2.5 py-2.5">
+                    <span className="flex items-center gap-1.5">
+                      <RankBadge rank={user.rank} />
+                      <span className="tabular-nums text-zinc-400">{user.rating}</span>
+                    </span>
+                  </td>
+                  <td className="whitespace-nowrap px-2.5 py-2.5 tabular-nums text-zinc-300">
+                    {user.wins} / {user.losses} / {user.draws}
+                  </td>
+                  <td className="px-2.5 py-2.5 text-right tabular-nums text-zinc-300">{user.savedCubes}</td>
+                  <td className="whitespace-nowrap px-2.5 py-2.5 text-zinc-400">{formatDate(user.createdAt)}</td>
+                  <td className="px-2.5 py-2.5 text-right">
+                    {!isSelf && (
+                      <button
+                        type="button"
+                        className="btn-ghost !px-2 !py-1 !text-[10px] hover:!border-red-400/40 hover:!text-red-300"
+                        disabled={rowBusy}
+                        onClick={() => onDelete(user)}
+                        aria-label={`Delete ${user.username}`}
+                        title="Delete this user"
+                      >
+                        <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-current">
+                          <path d="M9 3h6l1 2h4v2H4V5h4l1-2Zm-3 6h12l-1 12H7L6 9Zm4 2v8h1.5v-8H10Zm3 0v8h1.5v-8H13Z" />
+                        </svg>
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  return (
+    <section className="panel p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+          Users
+          {users && <span className="chip">{users.length}</span>}
+        </h2>
+        <button
+          type="button"
+          className="btn-ghost !px-2.5 !py-1 !text-[11px]"
+          disabled={busy}
+          onClick={onRefresh}
+          title="Refresh users"
+        >
+          <svg viewBox="0 0 24 24" className={`h-3.5 w-3.5 fill-current ${busy ? "animate-spin" : ""}`}>
+            <path d="M12 4V1L7.5 5.5 12 10V6.5a5.5 5.5 0 1 1-5.5 5.5H4a8 8 0 1 0 8-8Z" />
+          </svg>
+          Refresh
+        </button>
+      </div>
+      {body}
     </section>
   );
 }
@@ -379,6 +514,11 @@ export function AdminPortal(): JSX.Element | null {
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
   const [statsBusy, setStatsBusy] = useState(false);
+  const [users, setUsers] = useState<AdminUserRow[] | null>(null);
+  const [usersError, setUsersError] = useState<string | null>(null);
+  const [usersBusy, setUsersBusy] = useState(false);
+  const [userBusyId, setUserBusyId] = useState<string | null>(null);
+  const [pendingDeleteUser, setPendingDeleteUser] = useState<AdminUserRow | null>(null);
   const [cubes, setCubes] = useState<SystemCubeSummary[] | null>(null);
   const [cubesError, setCubesError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -393,6 +533,18 @@ export function AdminPortal(): JSX.Element | null {
       setStatsError(null);
     } else {
       setStatsError(r.error ?? "Could not load server stats");
+    }
+  }, []);
+
+  const fetchUsers = useCallback(async (): Promise<void> => {
+    setUsersBusy(true);
+    const r = await call("adminListUsers");
+    setUsersBusy(false);
+    if (r.ok && r.data) {
+      setUsers(r.data.users);
+      setUsersError(null);
+    } else {
+      setUsersError(r.error ?? "Could not load users");
     }
   }, []);
 
@@ -415,8 +567,9 @@ export function AdminPortal(): JSX.Element | null {
   useEffect(() => {
     if (!isAdmin) return;
     void fetchStats();
+    void fetchUsers();
     void fetchCubes();
-  }, [isAdmin, fetchStats, fetchCubes]);
+  }, [isAdmin, fetchStats, fetchUsers, fetchCubes]);
 
   if (!isAdmin) return null;
 
@@ -431,6 +584,24 @@ export function AdminPortal(): JSX.Element | null {
       setCubes((cur) => cur?.map((c) => (c.id === updated.id ? updated : c)) ?? cur);
     } else {
       pushToast(r.error ?? "Could not update the cube");
+    }
+  };
+
+  const confirmDeleteUser = async (): Promise<void> => {
+    const user = pendingDeleteUser;
+    if (!user || userBusyId) return;
+    setUserBusyId(user.id);
+    const r = await call("adminDeleteUser", { userId: user.id });
+    setUserBusyId(null);
+    setPendingDeleteUser(null);
+    if (r.ok) {
+      setUsers((cur) => cur?.filter((u) => u.id !== user.id) ?? cur);
+      pushToast(`“${user.username}” deleted`, "info");
+      void fetchUsers();
+      void fetchStats();
+    } else {
+      // Includes the server's own-account rejection.
+      pushToast(r.error ?? "Could not delete the user");
     }
   };
 
@@ -481,6 +652,16 @@ export function AdminPortal(): JSX.Element | null {
         <div className="space-y-4">
           <StatsSection stats={stats} error={statsError} busy={statsBusy} onRefresh={() => void fetchStats()} />
 
+          <UsersSection
+            users={users}
+            error={usersError}
+            busy={usersBusy}
+            busyId={userBusyId}
+            selfId={state.account?.account.id}
+            onRefresh={() => void fetchUsers()}
+            onDelete={setPendingDeleteUser}
+          />
+
           <div className="grid gap-4 lg:grid-cols-[1fr_22rem]">
             {/* System cubes */}
             <section className="panel p-4">
@@ -508,6 +689,22 @@ export function AdminPortal(): JSX.Element | null {
           </div>
         </div>
       </div>
+
+      {pendingDeleteUser && (
+        <Modal
+          title="Delete this user?"
+          onClose={() => setPendingDeleteUser(null)}
+          onConfirm={() => void confirmDeleteUser()}
+          confirmLabel="Delete"
+          danger
+          width="sm"
+        >
+          <p className="text-sm text-zinc-300">
+            “{pendingDeleteUser.username}” will be deleted for good — along with their saved cubes, rating, and
+            ranked match history. Any open sessions are signed out immediately. This cannot be undone.
+          </p>
+        </Modal>
+      )}
 
       {pendingDelete && (
         <Modal

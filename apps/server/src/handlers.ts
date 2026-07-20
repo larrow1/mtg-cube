@@ -5,11 +5,12 @@
  * ranked room lifecycle in matchmaking.ts.
  */
 import { nanoid } from "nanoid";
-import { BASIC_LAND_NAMES, normalizeCubeLines, parseCubeList } from "@mtg-cube/shared";
+import { BASIC_LAND_NAMES, normalizeCubeLines, parseCubeList, rankFor } from "@mtg-cube/shared";
 import type {
   Account,
   Ack,
   AdminStats,
+  AdminUserRow,
   CardData,
   DraftCard,
   GameAction,
@@ -42,12 +43,14 @@ import {
   countUsers,
   cubeFromRow,
   deleteCube,
+  deleteUserCascade,
   findUserById,
   getCubeById,
   insertCube,
   listCubesByOwner,
   listRankedHistory,
   listSystemCubes,
+  listUsersWithDetails,
   setCubeActive,
   setCubeRankedEligible,
 } from "./db.js";
@@ -802,6 +805,48 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
         userEligibleCubes: countUserEligibleCubes(),
       };
       reply({ ok: true, data: { stats } });
+    });
+  });
+
+  socket.on("adminListUsers", (ack) => {
+    const reply = once<{ users: AdminUserRow[] }>(ack);
+    guard(reply, () => {
+      requireAdmin(socket);
+      const users: AdminUserRow[] = listUsersWithDetails().map((row) => ({
+        id: row.id,
+        username: row.username,
+        isAdmin: row.is_admin !== 0,
+        createdAt: row.created_at,
+        online: socketIdsForUser(row.id).size > 0,
+        rating: row.rating,
+        rank: rankFor(row.rating),
+        wins: row.wins,
+        losses: row.losses,
+        draws: row.draws,
+        savedCubes: row.cube_count,
+      }));
+      reply({ ok: true, data: { users } });
+    });
+  });
+
+  socket.on("adminDeleteUser", (args, ack) => {
+    const reply = once(ack);
+    guard(reply, () => {
+      const adminId = requireAdmin(socket);
+      const userId = String(args?.userId ?? "");
+      if (userId === adminId) throw new Error("You cannot delete your own account");
+      const target = findUserById(userId);
+      if (!target) throw new Error("User not found");
+      queueLeave(userId); // pull them out of the matchmaking queue first
+      if (!deleteUserCascade(userId)) throw new Error("User not found");
+      // Sign out every live socket the deleted account has open. Room seats
+      // are left alone: the player simply continues as an anonymous guest.
+      for (const socketId of [...socketIdsForUser(userId)]) {
+        unbindSocket(socketId);
+        io.to(socketId).emit("accountState", null);
+      }
+      reply({ ok: true });
+      console.log(`[admin] user deleted: ${target.username} (${userId})`);
     });
   });
 
