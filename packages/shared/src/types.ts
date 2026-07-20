@@ -303,6 +303,7 @@ export type GameAction =
   | { type: "scry"; count: number }
   | { type: "reorderLibraryTop"; instanceIds: string[]; toBottom: string[] }
   | { type: "concede" }
+  | { type: "endMatch" }
   | { type: "restartGame"; seed: string };
 
 // Server augments every action with actor + seq before applying.

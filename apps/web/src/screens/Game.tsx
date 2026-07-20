@@ -100,6 +100,7 @@ export function Game(): JSX.Element {
   const [tokenOpen, setTokenOpen] = useState(false);
   const [scryCount, setScryCount] = useState<number | null>(null);
   const [concedeOpen, setConcedeOpen] = useState(false);
+  const [endMatchOpen, setEndMatchOpen] = useState(false);
   const [londonOpen, setLondonOpen] = useState(false);
   const [attachSource, setAttachSource] = useState<string | null>(null);
   const [blockSource, setBlockSource] = useState<string | null>(null);
@@ -674,9 +675,22 @@ export function Game(): JSX.Element {
               Reveal hand
             </button>
           </div>
-          <button type="button" className="btn-danger w-full !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => setConcedeOpen(true)}>
-            Concede
+          <button
+            type="button"
+            className="btn-ghost w-full !py-1.5 !text-[11px]"
+            onClick={() => dispatch({ type: "dismissGame", gameId: view.gameId })}
+            title="Leave the table — the game stays live and you can rejoin from the room"
+          >
+            Back to room
           </button>
+          <div className="grid grid-cols-2 gap-2">
+            <button type="button" className="btn-danger !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => setConcedeOpen(true)}>
+              Concede
+            </button>
+            <button type="button" className="btn-ghost !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => setEndMatchOpen(true)}>
+              End match
+            </button>
+          </div>
 
           {/* Game log */}
           <div className="panel flex min-h-0 flex-1 flex-col">
@@ -827,6 +841,26 @@ export function Game(): JSX.Element {
           width="sm"
         >
           <p className="text-sm text-zinc-300">Your opponent will be declared the winner. This cannot be undone.</p>
+        </Modal>
+      )}
+
+      {/* End-match confirm */}
+      {endMatchOpen && (
+        <Modal
+          title="End the match?"
+          onClose={() => setEndMatchOpen(false)}
+          onConfirm={() => {
+            send({ type: "endMatch" });
+            setEndMatchOpen(false);
+          }}
+          confirmLabel="End match"
+          danger
+          width="sm"
+        >
+          <p className="text-sm text-zinc-300">
+            The game ends for both players with no winner recorded. To leave the table without
+            ending the game, use "Back to room" instead.
+          </p>
         </Modal>
       )}
 

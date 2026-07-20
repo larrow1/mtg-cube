@@ -36,7 +36,7 @@ const BASIC_COLORS: Record<string, string> = {
 const TYPE_GROUP_ORDER = ["Creature", "Planeswalker", "Instant", "Sorcery", "Artifact", "Enchantment", "Battle", "Land", "Other"];
 
 export function Deckbuild(): JSX.Element {
-  const { state, pushToast } = useApp();
+  const { state, pushToast, dispatch } = useApp();
   const room = state.room;
   const me = state.session;
   const picks = state.draft?.picks ?? [];
@@ -159,8 +159,27 @@ export function Deckbuild(): JSX.Element {
     </div>
   );
 
+  const myLiveMatch = room.matches.find(
+    (m) => !m.finished && m.playerIds.includes(me.playerId)
+  );
+
   return (
     <div className="mx-auto max-w-[110rem] animate-fade-in p-4">
+      {myLiveMatch && (
+        <div className="panel mb-3 flex flex-wrap items-center justify-between gap-3 border-emerald-500/30 px-4 py-3">
+          <div className="flex items-center gap-2 text-sm text-zinc-200">
+            <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
+            Your match against{" "}
+            <span className="font-bold">
+              {room.players.find((p) => p.id === myLiveMatch.playerIds.find((id) => id !== me.playerId))?.name ?? "your opponent"}
+            </span>{" "}
+            is still in progress.
+          </div>
+          <button type="button" className="btn-primary !py-1.5 !text-xs" onClick={() => dispatch({ type: "rejoinGame" })}>
+            Return to match
+          </button>
+        </div>
+      )}
       <header className="panel mb-3 flex flex-wrap items-center gap-3 px-4 py-2.5">
         <h1 className="text-lg font-black text-zinc-50">Deck building</h1>
         <div className="flex items-center gap-1.5">

@@ -526,6 +526,14 @@ export function applyAction(
       break;
     }
 
+    case "endMatch": {
+      // Friendly abandon: either player may end the game with no result.
+      s.finished = true;
+      s.winnerId = null;
+      logs.push("ended the match (no result)");
+      break;
+    }
+
     case "restartGame": {
       restartGame(s, action.seed, logs);
       break;

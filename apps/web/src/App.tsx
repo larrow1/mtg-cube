@@ -19,7 +19,7 @@ function Router(): JSX.Element {
 
   if (!joined || !room || !session) return <Home />;
 
-  if (game) {
+  if (game && state.dismissedGameId !== game.gameId) {
     const participant = game.state.players.some((p) => p.playerId === session.playerId);
     if (participant) return <Game />;
   }

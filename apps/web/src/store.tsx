@@ -70,6 +70,7 @@ export type AppEvent =
   | { type: "draftState"; draft: DraftView }
   | { type: "gameState"; game: GameView }
   | { type: "dismissGame"; gameId: string }
+  | { type: "rejoinGame" }
   | { type: "chat"; msg: ChatMessage }
   | { type: "toast"; kind: ToastKind; message: string }
   | { type: "dismissToast"; id: number };
@@ -162,13 +163,21 @@ function reducer(state: AppState, event: AppEvent): AppState {
       // Ignore re-broadcasts of a finished game the viewer already left.
       if (state.dismissedGameId === next.gameId && next.state.finished) return state;
       primeCards(next.cards);
-      const dismissedGameId = state.dismissedGameId === next.gameId ? null : state.dismissedGameId;
-      return { ...state, game: next, dismissedGameId };
+      // A dismissal sticks (even for live games) until the viewer explicitly
+      // rejoins — updates still land in `game` so "Return to match" stays fresh.
+      return { ...state, game: next };
     }
     case "dismissGame": {
-      const game = state.game && state.game.gameId === event.gameId ? null : state.game;
+      // Keep the game view for live games (so the room can offer "Return to
+      // match"); drop it once the game is finished.
+      const game =
+        state.game && state.game.gameId === event.gameId && state.game.state.finished
+          ? null
+          : state.game;
       return { ...state, game, dismissedGameId: event.gameId };
     }
+    case "rejoinGame":
+      return { ...state, dismissedGameId: null };
     case "chat": {
       const chat = [...state.chat, event.msg];
       if (chat.length > MAX_CHAT) chat.splice(0, chat.length - MAX_CHAT);

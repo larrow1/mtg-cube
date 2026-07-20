@@ -474,6 +474,20 @@ describe("state-based losses and game end", () => {
     expect(s.winnerId).toBe("p2");
   });
 
+  it("endMatch finishes with no winner, from either player, and stays no-result", () => {
+    const g = newGame();
+    const s = applyAction(g, "p2", { type: "endMatch" });
+    expect(s.finished).toBe(true);
+    expect(s.winnerId).toBeNull();
+    expect(player(s, "p1").hasLost).toBe(false);
+    expect(player(s, "p2").hasLost).toBe(false);
+    // Finished game rejects further actions (except restart)...
+    expect(() => applyAction(s, "p1", { type: "endMatch" })).toThrow(/finished/);
+    // ...and a restart works from the no-result state.
+    const restarted = applyAction(s, "p1", { type: "restartGame", seed: "again" });
+    expect(restarted.finished).toBe(false);
+  });
+
   it("rejects every action except restartGame once finished", () => {
     const g = newGame();
     const done = applyAction(g, "p1", { type: "concede" });
