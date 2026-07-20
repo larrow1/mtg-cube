@@ -3,7 +3,7 @@
  * land steppers, curve chart, sideboard, submit + waiting state. The host
  * additionally pairs players into matches.
  */
-import { useMemo, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { BASIC_LAND_NAMES, type DraftCard } from "@mtg-cube/shared";
 import { call } from "../socket";
 import { useApp } from "../store";
@@ -18,6 +18,7 @@ import {
   manaPipClasses,
   primaryType,
 } from "../lib/cards";
+import { sideboardedInstanceIds } from "../lib/draftLanes";
 import { Card } from "../components/Card";
 import { CurveChart } from "../components/CurveChart";
 import { ChatPanel } from "../components/ChatPanel";
@@ -49,6 +50,25 @@ export function Deckbuild(): JSX.Element {
   const [pairB, setPairB] = useState("");
 
   const cards = useCardData(useMemo(() => picks.map((p) => p.cardId), [picks]));
+
+  // Seed cards the player parked in the draft's Sideboard lane into "side".
+  // Defensive: bad/absent stored data leaves everything in "pool" as before,
+  // and explicit moves made here are never overwritten.
+  const draftId = state.draft?.draftId;
+  const seededFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!draftId || seededFor.current === draftId) return;
+    seededFor.current = draftId;
+    const side = sideboardedInstanceIds(draftId);
+    if (side.size === 0) return;
+    setAssignment((cur) => {
+      const next = { ...cur };
+      for (const id of side) {
+        if (!(id in next)) next[id] = "side";
+      }
+      return next;
+    });
+  }, [draftId]);
 
   if (!room || !me) {
     return (

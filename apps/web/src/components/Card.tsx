@@ -8,6 +8,7 @@ import {
   useContext,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type Dispatch,
@@ -112,6 +113,30 @@ export function CardPreviewProvider({ children }: { children: ReactNode }): JSX.
         </div>
       )}
     </PreviewContext.Provider>
+  );
+}
+
+/**
+ * Imperative access to the global hover-preview layer for non-Card elements
+ * (e.g. list rows). Wires into the same PreviewContext used by <Card> hovers;
+ * Card behavior is untouched.
+ */
+export function useCardPreview(): {
+  showPreview: (data: CardData | undefined, anchor: NonNullable<PreviewValue["anchor"]>) => void;
+  clearPreview: () => void;
+} {
+  const setPreview = useContext(PreviewContext);
+  return useMemo(
+    () => ({
+      showPreview: (data: CardData | undefined, anchor: NonNullable<PreviewValue["anchor"]>): void => {
+        if (!setPreview || !data) return;
+        setPreview({ data, faceIndex: 0, anchor });
+      },
+      clearPreview: (): void => {
+        setPreview?.(null);
+      },
+    }),
+    [setPreview]
   );
 }
 
