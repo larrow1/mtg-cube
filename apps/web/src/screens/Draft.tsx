@@ -63,6 +63,7 @@ function SeatStrip({ draft }: { draft: DraftView }): JSX.Element {
 export function Draft(): JSX.Element {
   const { state, pushToast } = useApp();
   const draft = state.draft;
+  const ranked = state.room?.ranked ?? false;
   const [selected, setSelected] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
 
@@ -130,6 +131,7 @@ export function Draft(): JSX.Element {
             Pick <span className="text-zinc-100">{Math.min(pickNumber, draft.cardsPerPack)}</span>
           </span>
         </div>
+        {ranked && <span className="chip border-brass-400/60 font-black tracking-widest text-brass-300">RANKED</span>}
         {remaining !== null && draft.currentPack && (
           <span
             className={`rounded-md px-2.5 py-1 font-mono text-sm font-bold tabular-nums ${

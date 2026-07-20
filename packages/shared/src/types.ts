@@ -77,6 +77,11 @@ export interface RoomState {
   decksSubmitted: string[];
   /** Active match pairings: player id -> match id. */
   matches: MatchSummary[];
+  /**
+   * Ranked rooms are created by the matchmaker and auto-run: no host, forced
+   * timers, endMatch disabled, Elo applied on completion.
+   */
+  ranked: boolean;
 }
 
 export interface MatchSummary {
@@ -84,6 +89,58 @@ export interface MatchSummary {
   playerIds: [string, string];
   finished: boolean;
   winnerId?: string | null;
+  /** Ranked only: rating change applied per player id when the match ended. */
+  ratingDeltas?: Record<string, number>;
+}
+
+// ---------------------------------------------------------------------------
+// Accounts, saved cubes & ranked play
+// ---------------------------------------------------------------------------
+
+export interface Account {
+  id: string;
+  username: string;
+  createdAt: number;
+}
+
+export const RANK_TIERS = ["Bronze", "Silver", "Gold", "Platinum", "Diamond", "Mythic"] as const;
+export type RankTier = (typeof RANK_TIERS)[number];
+
+export interface RatingInfo {
+  rating: number;
+  wins: number;
+  losses: number;
+  draws: number;
+  gamesPlayed: number;
+  rank: RankTier;
+}
+
+export interface SavedCubeSummary {
+  id: string;
+  name: string;
+  cardCount: number;
+  unresolvedCount: number;
+  /** Owner opted this cube into the ranked matchmaking cube pool. */
+  rankedEligible: boolean;
+  updatedAt: number;
+}
+
+export interface RankedMatchRecord {
+  id: string;
+  opponentUsername: string;
+  /** From the viewer's perspective. */
+  result: "win" | "loss" | "draw";
+  ratingDelta: number;
+  ratingAfter: number;
+  ts: number;
+}
+
+export interface QueueState {
+  inQueue: boolean;
+  waitSeconds: number;
+  /** Current rating search window (± around your rating). */
+  windowNow: number;
+  playersInQueue: number;
 }
 
 // ---------------------------------------------------------------------------

@@ -40,7 +40,7 @@ function ToastCard({ toast }: { toast: ToastItem }): JSX.Element {
 export function ToastLayer(): JSX.Element {
   const { state } = useApp();
   return (
-    <div className="pointer-events-none fixed right-3 top-3 z-[100] flex flex-col gap-2">
+    <div className="pointer-events-none fixed right-3 top-14 z-[100] flex flex-col gap-2">
       {state.toasts.map((t) => (
         <ToastCard key={t.id} toast={t} />
       ))}

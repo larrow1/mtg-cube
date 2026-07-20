@@ -78,6 +78,7 @@ export function Deckbuild(): JSX.Element {
   const deckCount = main.length + basicsTotal;
   const submitted = room.decksSubmitted.includes(me.playerId);
   const isHost = room.hostId === me.playerId;
+  const ranked = room.ranked;
 
   const groupCards = (list: DraftCard[]): [string, DraftCard[]][] => {
     const map = new Map<string, DraftCard[]>();
@@ -180,8 +181,18 @@ export function Deckbuild(): JSX.Element {
           </button>
         </div>
       )}
+      {/* Ranked: decks lock on the server's 5-minute deadline (no live deadline in the contract). */}
+      {ranked && !submitted && (
+        <div className="panel mb-3 flex flex-wrap items-center gap-3 border-brass-400/40 px-4 py-2.5">
+          <span className="chip border-brass-400/60 font-black tracking-widest text-brass-300">RANKED</span>
+          <span className="text-xs text-zinc-300">
+            Decks auto-submit after 5 minutes — lock yours in before the clock does it for you.
+          </span>
+        </div>
+      )}
       <header className="panel mb-3 flex flex-wrap items-center gap-3 px-4 py-2.5">
         <h1 className="text-lg font-black text-zinc-50">Deck building</h1>
+        {ranked && <span className="chip border-brass-400/60 font-black tracking-widest text-brass-300">RANKED</span>}
         <div className="flex items-center gap-1.5">
           {(["cmc", "color", "type"] as const).map((m) => (
             <button
@@ -345,8 +356,8 @@ export function Deckbuild(): JSX.Element {
             )}
           </div>
 
-          {/* Host: pair matches */}
-          {isHost && (
+          {/* Host: pair matches (ranked rooms auto-pair on the server) */}
+          {isHost && !ranked && (
             <div className="panel border-brass-400/30 p-3">
               <h2 className="mb-2 text-[10px] font-bold uppercase tracking-wider text-brass-300">Pair a match</h2>
               <div className="mb-2 grid grid-cols-2 gap-2">

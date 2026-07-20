@@ -1,51 +1,79 @@
 /**
  * Socket.IO event wiring. Every handler is wrapped so a thrown error acks
- * {ok:false, error} instead of crashing the process. Hidden information never
- * leaves this module except through getDraftView / buildGameView.
+ * {ok:false, error} instead of crashing the process. Draft/match flow lives in
+ * flow.ts (shared with the ranked matchmaker); accounts in auth.ts; queue +
+ * ranked room lifecycle in matchmaking.ts.
  */
 import { nanoid } from "nanoid";
-import type { Server, Socket } from "socket.io";
-import {
-  BASIC_LAND_NAMES,
-  applyAction,
-  applyPick,
-  buildGameView,
-  createDraft,
-  createGame,
-  createRng,
-  getDraftView,
-  normalizeCubeLines,
-  openNextPacks,
-  parseCubeList,
-  runBotPicks,
-  shuffle,
-} from "@mtg-cube/shared";
+import { BASIC_LAND_NAMES, normalizeCubeLines, parseCubeList } from "@mtg-cube/shared";
 import type {
+  Account,
   Ack,
   CardData,
-  ClientToServerEvents,
   DraftCard,
-  DraftConfig,
-  DraftState,
   GameAction,
-  GameCard,
-  GameState,
-  ServerToClientEvents,
+  RankedMatchRecord,
+  RatingInfo,
+  SavedCubeSummary,
 } from "@mtg-cube/shared";
-import { getBasicLandCards, resolveCardNames } from "./scryfall.js";
+import {
+  accountStateFor,
+  bindSocket,
+  bindingForSocket,
+  loginUser,
+  ratingInfoFor,
+  registerUser,
+  revokeSessionByHash,
+  socketIdsForUser,
+  unbindSocket,
+  userIdForSocket,
+  validatePassword,
+  validateUsername,
+  verifyToken,
+} from "./auth.js";
+import {
+  countCubesByOwner,
+  cubeFromRow,
+  deleteCube,
+  getCubeById,
+  insertCube,
+  listCubesByOwner,
+  listRankedHistory,
+  setCubeRankedEligible,
+} from "./db.js";
+import type { CubeSummaryRow, StoredCubeCards } from "./db.js";
+import {
+  applyGameActionServer,
+  broadcastRoomState,
+  emitDraftViewTo,
+  emitDraftViews,
+  finishDraft,
+  performPick,
+  reconcilePickTimers,
+  startDraftInRoom,
+  startMatchInRoom,
+  advanceDraft,
+  emitMatchViewsTo,
+} from "./flow.js";
+import type { AppServer, AppSocket, SocketData } from "./flow.js";
+import {
+  cleanupRankedRoom,
+  isRankedDeckbuildClosed,
+  onRankedDeckSubmitted,
+  onRankedDisconnect,
+  onRankedPlayerLeft,
+  onRankedReconnect,
+  onRankedSeatClaimed,
+  onUserOffline,
+  queueJoin,
+  queueLeave,
+  rankedUserFor,
+} from "./matchmaking.js";
+import { resolveCardNames } from "./scryfall.js";
 import { Room } from "./room.js";
-import type { Match, RoomPlayer, StoredDeck } from "./room.js";
+import type { RoomPlayer } from "./room.js";
 
-export interface SocketData {
-  roomId?: string;
-  playerId?: string;
-}
-
-export type AppServer = Server<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>;
-export type AppSocket = Socket<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>;
-
-/** Viewer id that matches neither player: buildGameView hides both hands. */
-const SPECTATOR_VIEWER_ID = "$spectator";
+export type { AppServer, AppSocket, SocketData } from "./flow.js";
 
 // ---------------------------------------------------------------------------
 // Small utilities
@@ -102,166 +130,43 @@ function getContext(rooms: Map<string, Room>, socket: AppSocket): { room: Room; 
   return { room, player };
 }
 
-// ---------------------------------------------------------------------------
-// Emit helpers — the ONLY places views leave the server
-// ---------------------------------------------------------------------------
-
-function broadcastRoomState(io: AppServer, room: Room): void {
-  io.to(room.id).emit("roomState", room.toRoomState());
+/** The account bound to this socket, or throw for account-only features. */
+function requireUserId(socket: AppSocket): string {
+  const userId = userIdForSocket(socket.id);
+  if (!userId) throw new Error("Sign in to use this feature");
+  return userId;
 }
 
-function seatNames(room: Room, state: DraftState): (string | null)[] {
-  return state.seats.map((s) => (s.playerId ? room.players.get(s.playerId)?.name ?? null : null));
+function toSavedCubeSummary(row: CubeSummaryRow): SavedCubeSummary {
+  return {
+    id: row.id,
+    name: row.name,
+    cardCount: row.card_count,
+    unresolvedCount: row.unresolved.length,
+    rankedEligible: row.ranked_eligible,
+    updatedAt: row.updated_at,
+  };
 }
 
-/** Emit each human seat its personal DraftView. Never broadcasts full DraftState. */
-function emitDraftViews(io: AppServer, room: Room): void {
-  const state = room.draftState;
-  if (!state) return;
-  const names = seatNames(room, state);
-  for (const seat of state.seats) {
-    if (!seat.playerId) continue;
-    const player = room.players.get(seat.playerId);
-    if (!player?.socketId) continue;
-    const view = getDraftView(state, seat.seatIndex, names, room.getPickDeadline(seat.seatIndex));
-    io.to(player.socketId).emit("draftState", view);
+/** Parse + resolve a raw cube list (shared by uploadCube and saveCube). */
+async function resolveCubeList(rawList: string): Promise<{
+  cards: StoredCubeCards;
+  unresolved: string[];
+}> {
+  if (rawList.length > 500_000) throw new Error("Cube list is too large");
+  const lines = normalizeCubeLines(parseCubeList(rawList));
+  if (lines.length === 0) throw new Error("The cube list contains no cards");
+  if (lines.length > 2000) throw new Error("Cube list is too large (max 2000 distinct cards)");
+  const { byName, unresolved } = await resolveCardNames(lines.map((l) => l.name));
+  const cardIds: string[] = [];
+  const cards: Record<string, CardData> = {};
+  for (const line of lines) {
+    const card = byName.get(line.name);
+    if (!card) continue;
+    cards[card.id] = card;
+    for (let i = 0; i < line.count; i++) cardIds.push(card.id);
   }
-}
-
-function emitDraftViewTo(io: AppServer, room: Room, playerId: string): void {
-  const state = room.draftState;
-  if (!state) return;
-  const seatIndex = room.seatIndexOf(playerId);
-  if (seatIndex < 0) return;
-  const player = room.players.get(playerId);
-  if (!player?.socketId) return;
-  const view = getDraftView(state, seatIndex, seatNames(room, state), room.getPickDeadline(seatIndex));
-  io.to(player.socketId).emit("draftState", view);
-}
-
-/** Players in the match get their own view; everyone else a both-hands-hidden one. */
-function emitGameViews(io: AppServer, room: Room, match: Match): void {
-  const spectatorView = buildGameView(match.game, SPECTATOR_VIEWER_ID, match.cardLookup);
-  for (const player of room.players.values()) {
-    if (!player.socketId || !player.connected) continue;
-    const view = match.playerIds.includes(player.id)
-      ? buildGameView(match.game, player.id, match.cardLookup)
-      : spectatorView;
-    io.to(player.socketId).emit("gameState", view);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Draft flow
-// ---------------------------------------------------------------------------
-
-function draftSignature(state: DraftState): string {
-  const picks = state.seats.reduce((n, s) => n + s.picks.length, 0);
-  const queued = state.seats.reduce((n, s) => n + s.packQueue.length, 0);
-  const unopened = state.unopened.reduce((n, packs) => n + packs.length, 0);
-  return `${picks}:${queued}:${unopened}:${state.packNumber}:${state.complete}`;
-}
-
-/**
- * Drive the draft forward: let bots pick everything they can, and open the
- * next round's packs whenever every queue is empty. Progress-checked so a
- * misbehaving engine can never hang the server.
- */
-function advanceDraft(room: Room): void {
-  let state = room.draftState;
-  const rng = room.botRng;
-  if (!state || !rng) return;
-  for (let i = 0; i < 10_000; i++) {
-    if (state.complete) break;
-    const before = draftSignature(state);
-    if (state.seats.every((s) => s.packQueue.length === 0)) {
-      if (!state.unopened.some((packs) => packs.length > 0)) break;
-      state = openNextPacks(state);
-    } else if (state.seats.some((s) => s.isBot && s.packQueue.length > 0)) {
-      state = runBotPicks(state, rng, room.cube?.cards);
-    } else {
-      break; // only humans hold packs; wait for them
-    }
-    if (draftSignature(state) === before) break;
-  }
-  room.draftState = state;
-}
-
-/** Start/stop per-seat auto-pick timers to match who currently has a pack. */
-function reconcilePickTimers(io: AppServer, room: Room): void {
-  const state = room.draftState;
-  const seconds = state?.config.pickTimerSeconds;
-  if (!state || state.complete || room.phase !== "drafting" || !seconds) {
-    room.clearAllPickTimers();
-    return;
-  }
-  for (const seat of state.seats) {
-    if (seat.isBot || !seat.playerId) {
-      room.clearPickTimer(seat.seatIndex);
-      continue;
-    }
-    const waiting = seat.packQueue.length > 0;
-    if (waiting && !room.hasPickTimer(seat.seatIndex)) {
-      const deadline = Date.now() + seconds * 1000;
-      const handle = setTimeout(() => autoPick(io, room, seat.seatIndex), seconds * 1000);
-      room.setPickTimer(seat.seatIndex, deadline, handle);
-    } else if (!waiting) {
-      room.clearPickTimer(seat.seatIndex);
-    }
-  }
-}
-
-/** Timer expiry: pick the first card of the waiting pack for that seat. */
-function autoPick(io: AppServer, room: Room, seatIndex: number): void {
-  try {
-    room.clearPickTimer(seatIndex);
-    const state = room.draftState;
-    if (!state || state.complete || room.phase !== "drafting") return;
-    const seat = state.seats[seatIndex];
-    const first = seat?.packQueue[0]?.cards[0];
-    if (!seat || seat.isBot || !first) return;
-    console.log(`[room ${room.id}] seat ${seatIndex} timed out; auto-picking`);
-    performPick(io, room, seatIndex, first.instanceId);
-  } catch (err) {
-    console.error(`[room ${room.id}] auto-pick failed:`, err);
-  }
-}
-
-/** Apply one human pick, run bots, open packs, re-emit views, manage timers. */
-function performPick(io: AppServer, room: Room, seatIndex: number, instanceId: string): void {
-  const state = room.draftState;
-  if (!state || room.phase !== "drafting") throw new Error("No draft in progress");
-  if (state.complete) throw new Error("The draft is already complete");
-  const seat = state.seats[seatIndex];
-  if (!seat) throw new Error("Invalid seat");
-  const head = seat.packQueue[0];
-  if (!head) throw new Error("You have no pack to pick from");
-  if (!head.cards.some((c) => c.instanceId === instanceId)) {
-    throw new Error("That card is not in your current pack");
-  }
-  room.draftState = applyPick(state, seatIndex, instanceId);
-  room.clearPickTimer(seatIndex);
-  advanceDraft(room);
-  if (room.draftState?.complete) {
-    finishDraft(io, room);
-  } else {
-    reconcilePickTimers(io, room);
-    emitDraftViews(io, room);
-  }
-}
-
-function finishDraft(io: AppServer, room: Room): void {
-  room.clearAllPickTimers();
-  const state = room.draftState;
-  if (state) {
-    for (const seat of state.seats) {
-      if (seat.playerId) room.picksByPlayer.set(seat.playerId, seat.picks);
-    }
-  }
-  room.phase = "deckbuild";
-  emitDraftViews(io, room);
-  broadcastRoomState(io, room);
-  console.log(`[room ${room.id}] draft complete; entering deckbuild`);
+  return { cards: { cardIds, cards }, unresolved };
 }
 
 // ---------------------------------------------------------------------------
@@ -278,6 +183,18 @@ function doLeaveRoom(io: AppServer, rooms: Map<string, Room>, socket: AppSocket)
   if (!room) return;
   const player = room.players.get(playerId);
   if (!player) return;
+
+  // Ranked + match in progress: a "leave" is just a disconnect — the seat is
+  // kept so the 3-minute concession clock (and any reconnect) governs it.
+  if (room.ranked && room.playerIsInActiveMatch(playerId)) {
+    player.connected = false;
+    player.socketId = null;
+    room.touch();
+    broadcastRoomState(io, room);
+    onRankedDisconnect(io, room, playerId);
+    console.log(`[room ${room.id}] ${player.name} left mid-ranked-match; concession clock running`);
+    return;
+  }
 
   room.players.delete(playerId);
   room.decks.delete(playerId);
@@ -305,14 +222,18 @@ function doLeaveRoom(io: AppServer, rooms: Map<string, Room>, socket: AppSocket)
     }
   }
 
+  if (room.ranked) onRankedPlayerLeft(io, room, playerId);
+
   if (room.players.size === 0) {
     room.clearAllPickTimers();
+    cleanupRankedRoom(room.id);
     rooms.delete(room.id);
     console.log(`[room ${room.id}] empty after explicit leave; removed`);
     return;
   }
 
-  if (room.hostId === playerId) {
+  // Ranked rooms have no host to reassign (hostId stays "").
+  if (!room.ranked && room.hostId === playerId) {
     const nextHostId = [...room.players.keys()][0];
     if (nextHostId) {
       room.hostId = nextHostId;
@@ -320,29 +241,6 @@ function doLeaveRoom(io: AppServer, rooms: Map<string, Room>, socket: AppSocket)
     }
   }
   broadcastRoomState(io, room);
-}
-
-// ---------------------------------------------------------------------------
-// Match construction
-// ---------------------------------------------------------------------------
-
-function makeGameCard(instanceId: string, cardId: string, playerId: string): GameCard {
-  return {
-    instanceId,
-    cardId,
-    ownerId: playerId,
-    controllerId: playerId,
-    tapped: false,
-    faceDown: false,
-    faceIndex: 0,
-    counters: {},
-    attachedTo: null,
-    isToken: false,
-    damage: 0,
-    attacking: false,
-    blocking: null,
-    sortIndex: 0,
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -385,10 +283,29 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
         // Same socket re-joining its own room.
         player = room.players.get(socket.data.playerId);
       }
+      let claimedRankedSeat = false;
       if (player) {
         player.connected = true;
         player.socketId = socket.id;
+        if (room.ranked) onRankedReconnect(room, player.id);
         console.log(`[room ${room.id}] ${player.name} reconnected`);
+      } else if (room.ranked) {
+        // Ranked rooms admit only the two matched accounts (no spectators).
+        const userId = userIdForSocket(socket.id);
+        const rankedUser = rankedUserFor(room, userId);
+        const existing = rankedUser.playerId ? room.players.get(rankedUser.playerId) : undefined;
+        if (existing) {
+          // Same account from a new connection: reclaim the reserved seat.
+          player = existing;
+          player.connected = true;
+          player.socketId = socket.id;
+          onRankedReconnect(room, player.id);
+          console.log(`[room ${room.id}] ${player.name} reclaimed their ranked seat`);
+        } else {
+          player = room.addPlayer(validateName(args?.playerName), socket.id);
+          claimedRankedSeat = true;
+          console.log(`[room ${room.id}] ${player.name} joined (ranked)`);
+        }
       } else {
         player = room.addPlayer(validateName(args?.playerName), socket.id);
         console.log(`[room ${room.id}] ${player.name} joined`);
@@ -398,20 +315,15 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
       socket.join(room.id);
       room.touch();
       reply({ ok: true, data: { playerId: player.id, token: player.token } });
+      if (claimedRankedSeat) {
+        const userId = userIdForSocket(socket.id);
+        if (userId) onRankedSeatClaimed(io, room, userId, player.id); // may auto-start the draft
+      }
       broadcastRoomState(io, room);
 
       // Re-emit current views so a reconnecting client is fully caught up.
       emitDraftViewTo(io, room, player.id);
-      for (const match of room.matches.values()) {
-        // Finished games are not re-emitted: a reload should land in the room,
-        // not back on the game-over banner (results live in RoomState.matches).
-        if (match.game.finished) continue;
-        if (match.playerIds.includes(player.id)) {
-          io.to(socket.id).emit("gameState", buildGameView(match.game, player.id, match.cardLookup));
-        } else if (!match.game.finished) {
-          io.to(socket.id).emit("gameState", buildGameView(match.game, SPECTATOR_VIEWER_ID, match.cardLookup));
-        }
-      }
+      emitMatchViewsTo(io, room, player.id, socket.id);
     });
   });
 
@@ -429,36 +341,23 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
     const reply = once<{ cardCount: number; unresolved: string[] }>(ack);
     guardAsync(reply, async () => {
       const { room, player } = getContext(rooms, socket);
+      if (room.ranked) throw new Error("Ranked rooms are server-driven");
       if (player.id !== room.hostId) throw new Error("Only the host can upload a cube");
       if (room.phase !== "lobby") throw new Error("The cube can only be changed in the lobby");
 
-      const rawList = String(args?.list ?? "");
-      if (rawList.length > 500_000) throw new Error("Cube list is too large");
       const cubeName = String(args?.name ?? "").trim().slice(0, 60) || "Untitled Cube";
-      const lines = normalizeCubeLines(parseCubeList(rawList));
-      if (lines.length === 0) throw new Error("The cube list contains no cards");
-      if (lines.length > 2000) throw new Error("Cube list is too large (max 2000 distinct cards)");
-
-      const { byName, unresolved } = await resolveCardNames(lines.map((l) => l.name));
+      const { cards, unresolved } = await resolveCubeList(String(args?.list ?? ""));
 
       // Re-validate after the await: the room may have moved on.
       if (rooms.get(room.id) !== room) throw new Error("Room no longer exists");
       if (room.phase !== "lobby") throw new Error("The cube can only be changed in the lobby");
 
-      const cardIds: string[] = [];
-      const cards: Record<string, CardData> = {};
-      for (const line of lines) {
-        const card = byName.get(line.name);
-        if (!card) continue;
-        cards[card.id] = card;
-        for (let i = 0; i < line.count; i++) cardIds.push(card.id);
-      }
-      room.cube = { id: nanoid(8), name: cubeName, cardIds, cards, unresolved };
+      room.cube = { id: nanoid(8), name: cubeName, cardIds: cards.cardIds, cards: cards.cards, unresolved };
       room.touch();
-      reply({ ok: true, data: { cardCount: cardIds.length, unresolved } });
+      reply({ ok: true, data: { cardCount: cards.cardIds.length, unresolved } });
       broadcastRoomState(io, room);
       console.log(
-        `[room ${room.id}] cube "${cubeName}": ${cardIds.length} cards, ${unresolved.length} unresolved`
+        `[room ${room.id}] cube "${cubeName}": ${cards.cardIds.length} cards, ${unresolved.length} unresolved`
       );
     });
   });
@@ -468,61 +367,16 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
     const reply = once(ack);
     guard(reply, () => {
       const { room, player } = getContext(rooms, socket);
+      if (room.ranked) throw new Error("Ranked rooms are server-driven");
       if (player.id !== room.hostId) throw new Error("Only the host can start the draft");
-      if (room.phase !== "lobby") throw new Error("The draft can only be started from the lobby");
-      const cube = room.cube;
-      if (!cube) throw new Error("Upload a cube before starting the draft");
-
-      const humans = [...room.players.values()];
-      if (humans.length > 8) throw new Error("Too many players for a draft (max 8 seats)");
-
-      const seatCount = Math.max(clampInt(args?.seatCount, 2, 8, 8), humans.length, 2);
-      const packsPerPlayer = clampInt(args?.packsPerPlayer, 1, 6, 3);
-      const cardsPerPack = clampInt(args?.cardsPerPack, 3, 30, 15);
       const rawTimer = args?.pickTimerSeconds;
-      const pickTimerSeconds = rawTimer == null ? null : clampInt(rawTimer, 5, 600, 60);
-      const seed = nanoid(16);
-      const config: DraftConfig = { seatCount, packsPerPlayer, cardsPerPack, pickTimerSeconds, seed };
-
-      let state = createDraft(cube, config); // throws if the cube is too small
-
-      // Seat humans at random (shuffled seat order), bots everywhere else.
-      const seatOrder = shuffle(state.seats.map((s) => s.seatIndex), createRng(`${seed}:seats`));
-      const assignment = new Map<number, string>();
-      humans.forEach((p, i) => {
-        const seatIndex = seatOrder[i];
-        if (seatIndex !== undefined) assignment.set(seatIndex, p.id);
+      startDraftInRoom(io, room, {
+        seatCount: clampInt(args?.seatCount, 2, 8, 8),
+        packsPerPlayer: clampInt(args?.packsPerPlayer, 1, 6, 3),
+        cardsPerPack: clampInt(args?.cardsPerPack, 3, 30, 15),
+        pickTimerSeconds: rawTimer == null ? null : clampInt(rawTimer, 5, 600, 60),
       });
-      state = {
-        ...state,
-        seats: state.seats.map((seat) => {
-          const pid = assignment.get(seat.seatIndex);
-          return pid
-            ? { ...seat, playerId: pid, isBot: false }
-            : { ...seat, playerId: null, isBot: true };
-        }),
-      };
-
-      room.draftConfig = config;
-      room.botRng = createRng(`${seed}:bots`);
-      room.draftState = state;
-      room.picksByPlayer.clear();
-      room.decks.clear();
-      room.phase = "drafting";
-      advanceDraft(room); // opens round 1 if needed + lets bots pick
-      room.touch();
       reply({ ok: true });
-      console.log(
-        `[room ${room.id}] draft started: ${seatCount} seats (${humans.length} human), ` +
-          `${packsPerPlayer}x${cardsPerPack}, timer ${pickTimerSeconds ?? "off"}`
-      );
-      if (room.draftState?.complete) {
-        finishDraft(io, room);
-      } else {
-        reconcilePickTimers(io, room);
-        emitDraftViews(io, room);
-        broadcastRoomState(io, room);
-      }
     });
   });
 
@@ -551,6 +405,9 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
       }
       if (room.playerIsInAnyMatch(player.id)) {
         throw new Error("Your deck is locked once your first match has started");
+      }
+      if (room.ranked && isRankedDeckbuildClosed(room)) {
+        throw new Error("The ranked deckbuild deadline has passed");
       }
 
       const picks = room.picksByPlayer.get(player.id) ?? [];
@@ -599,6 +456,7 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
         `[room ${room.id}] ${player.name} submitted a deck ` +
           `(${main.length} main + ${basicCount} basics, ${sideboard.length} side)`
       );
+      if (room.ranked) onRankedDeckSubmitted(io, room); // may auto-start the match
     });
   });
 
@@ -607,68 +465,10 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
     const reply = once<{ matchId: string }>(ack);
     guard(reply, () => {
       const { room, player } = getContext(rooms, socket);
+      if (room.ranked) throw new Error("Ranked rooms are server-driven");
       if (player.id !== room.hostId) throw new Error("Only the host can start a match");
-      if (room.phase !== "deckbuild" && room.phase !== "playing") {
-        throw new Error("Matches can only start after deckbuilding begins");
-      }
-      const idA = String(args?.playerA ?? "");
-      const idB = String(args?.playerB ?? "");
-      if (idA === idB) throw new Error("A match needs two different players");
-      const playerA = room.players.get(idA);
-      const playerB = room.players.get(idB);
-      if (!playerA || !playerB) throw new Error("Both players must be in the room");
-      const deckA = room.decks.get(idA);
-      const deckB = room.decks.get(idB);
-      if (!deckA) throw new Error(`${playerA.name} has not submitted a deck`);
-      if (!deckB) throw new Error(`${playerB.name} has not submitted a deck`);
-      if (room.playerIsInActiveMatch(idA)) throw new Error(`${playerA.name} is already in an active match`);
-      if (room.playerIsInActiveMatch(idB)) throw new Error(`${playerB.name} is already in an active match`);
-
-      const basicsByName = new Map(getBasicLandCards().map((c) => [c.name, c]));
-      let basicCounter = 0;
-      const buildLibrary = (deck: StoredDeck): GameCard[] => {
-        const library = deck.main.map((c) => makeGameCard(c.instanceId, c.cardId, deck.playerId));
-        for (const [name, count] of Object.entries(deck.basics)) {
-          const data = basicsByName.get(name);
-          if (!data) continue;
-          for (let i = 0; i < count; i++) {
-            basicCounter += 1;
-            library.push(makeGameCard(`b${basicCounter}`, data.id, deck.playerId));
-          }
-        }
-        if (library.length === 0) {
-          throw new Error(`${room.players.get(deck.playerId)?.name ?? "A player"} has an empty deck`);
-        }
-        return library;
-      };
-      const libraryA = buildLibrary(deckA);
-      const libraryB = buildLibrary(deckB);
-
-      // Lookup limited to cards that can actually appear in this match.
-      const cardLookup: Record<string, CardData> = {};
-      for (const basic of getBasicLandCards()) cardLookup[basic.id] = basic;
-      for (const card of [...libraryA, ...libraryB]) {
-        const data = room.cube?.cards[card.cardId];
-        if (data) cardLookup[data.id] = data;
-      }
-
-      const matchId = nanoid(8);
-      const game = createGame(
-        matchId,
-        [
-          { playerId: idA, deck: libraryA },
-          { playerId: idB, deck: libraryB },
-        ],
-        nanoid(16)
-      );
-      const match: Match = { id: matchId, playerIds: [idA, idB], game, cardLookup };
-      room.matches.set(matchId, match);
-      room.phase = "playing";
-      room.touch();
+      const matchId = startMatchInRoom(io, room, String(args?.playerA ?? ""), String(args?.playerB ?? ""));
       reply({ ok: true, data: { matchId } });
-      emitGameViews(io, room, match);
-      broadcastRoomState(io, room);
-      console.log(`[room ${room.id}] match ${matchId}: ${playerA.name} vs ${playerB.name}`);
     });
   });
 
@@ -684,43 +484,13 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
       if (!action || typeof action !== "object" || typeof (action as { type?: unknown }).type !== "string") {
         throw new Error("Invalid action");
       }
-
-      const previousLogLength = match.game.log.length;
-      const wasFinished = match.game.finished;
-      let next: GameState;
-      try {
-        const cardNames: Record<string, string> = {};
-        for (const [id, card] of Object.entries(match.cardLookup)) cardNames[id] = card.name;
-        const playerNames: Record<string, string> = {};
-        for (const p of room.players.values()) playerNames[p.id] = p.name;
-        next = applyAction(match.game, player.id, action as GameAction, Date.now(), {
-          cardNames,
-          playerNames,
-        });
-      } catch (err) {
-        // EngineError (or anything else): reject, keep state, emit nothing.
-        reply({ ok: false, error: errorMessage(err) });
-        return;
+      const type = (action as { type: string }).type;
+      if (room.ranked && (type === "endMatch" || type === "restartGame")) {
+        throw new Error("That action is disabled in ranked matches");
       }
-
-      // The pure engine can't call Date.now(); stamp new log entries here.
-      const now = Date.now();
-      for (let i = previousLogLength; i < next.log.length; i++) {
-        const entry = next.log[i];
-        if (entry) entry.ts = now;
-      }
-
-      match.game = next;
-      room.touch();
+      // EngineError (or anything else): reply {ok:false}, keep state, emit nothing.
+      applyGameActionServer(io, room, match, player.id, action as GameAction);
       reply({ ok: true });
-      emitGameViews(io, room, match);
-      if (next.finished !== wasFinished) {
-        broadcastRoomState(io, room); // MatchSummary picks up finished/winnerId
-        if (next.finished) {
-          const winner = next.winnerId ? room.players.get(next.winnerId)?.name ?? next.winnerId : "nobody";
-          console.log(`[room ${room.id}] match ${match.id} finished; winner: ${winner}`);
-        }
-      }
     });
   });
 
@@ -742,8 +512,187 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
     }
   });
 
+  // -- accounts -------------------------------------------------------------
+  socket.on("register", (args, ack) => {
+    const reply = once<{ token: string; account: Account; rating: RatingInfo }>(ack);
+    guardAsync(reply, async () => {
+      const username = validateUsername(args?.username);
+      const password = validatePassword(args?.password);
+      const { token, tokenHash, account } = await registerUser(username, password);
+      bindSocket(socket.id, account.id, tokenHash);
+      const rating = ratingInfoFor(account.id);
+      reply({ ok: true, data: { token, account, rating } });
+      socket.emit("accountState", { account, rating });
+      console.log(`account registered: ${account.username}`);
+    });
+  });
+
+  socket.on("login", (args, ack) => {
+    const reply = once<{ token: string; account: Account; rating: RatingInfo }>(ack);
+    guardAsync(reply, async () => {
+      const username = validateUsername(args?.username);
+      const password = validatePassword(args?.password);
+      const ip = socket.handshake.address || "unknown";
+      const { token, tokenHash, account } = await loginUser(username, password, ip);
+      bindSocket(socket.id, account.id, tokenHash);
+      const rating = ratingInfoFor(account.id);
+      reply({ ok: true, data: { token, account, rating } });
+      socket.emit("accountState", { account, rating });
+      console.log(`account login: ${account.username}`);
+    });
+  });
+
+  socket.on("authenticate", (args, ack) => {
+    const reply = once<{ account: Account; rating: RatingInfo }>(ack);
+    guard(reply, () => {
+      const result = verifyToken(String(args?.token ?? ""));
+      if (!result) throw new Error("Invalid or expired session");
+      bindSocket(socket.id, result.account.id, result.tokenHash);
+      const rating = ratingInfoFor(result.account.id);
+      reply({ ok: true, data: { account: result.account, rating } });
+      socket.emit("accountState", { account: result.account, rating });
+    });
+  });
+
+  socket.on("logout", (ack) => {
+    const reply = once(ack);
+    guard(reply, () => {
+      const binding = bindingForSocket(socket.id);
+      if (binding) {
+        revokeSessionByHash(binding.tokenHash); // invalidate the token itself
+        const userId = unbindSocket(socket.id);
+        if (userId && socketIdsForUser(userId).size === 0) onUserOffline(userId);
+      }
+      reply({ ok: true });
+      socket.emit("accountState", null);
+    });
+  });
+
+  socket.on("getProfile", (ack) => {
+    const reply = once<{ account: Account; rating: RatingInfo; history: RankedMatchRecord[] }>(ack);
+    guard(reply, () => {
+      const userId = requireUserId(socket);
+      const state = accountStateFor(userId);
+      if (!state) throw new Error("Account not found");
+      const history: RankedMatchRecord[] = [];
+      let ratingAfter = state.rating.rating; // walk backwards from the current rating
+      for (const row of listRankedHistory(userId, 20)) {
+        const viewerIsA = row.user_a === userId;
+        const ratingDelta = viewerIsA ? row.delta_a : row.delta_b;
+        history.push({
+          id: row.id,
+          opponentUsername: viewerIsA ? row.username_b : row.username_a,
+          result:
+            row.winner_user_id === null ? "draw" : row.winner_user_id === userId ? "win" : "loss",
+          ratingDelta,
+          ratingAfter,
+          ts: row.ts,
+        });
+        ratingAfter -= ratingDelta;
+      }
+      reply({ ok: true, data: { account: state.account, rating: state.rating, history } });
+    });
+  });
+
+  // -- saved cubes (authenticated) ------------------------------------------
+  socket.on("saveCube", (args, ack) => {
+    const reply = once<{ cube: SavedCubeSummary }>(ack);
+    guardAsync(reply, async () => {
+      const userId = requireUserId(socket);
+      const name = String(args?.name ?? "").trim().slice(0, 60) || "Untitled Cube";
+      const rankedEligible = Boolean(args?.rankedEligible);
+      const listText = String(args?.list ?? "");
+      if (countCubesByOwner(userId) >= 30) throw new Error("Cube limit reached (30 per account)");
+      const { cards, unresolved } = await resolveCubeList(listText);
+      if (countCubesByOwner(userId) >= 30) throw new Error("Cube limit reached (30 per account)");
+      const row = insertCube({
+        ownerId: userId,
+        name,
+        listText,
+        cards,
+        unresolved,
+        rankedEligible,
+      });
+      reply({ ok: true, data: { cube: toSavedCubeSummary(row) } });
+      console.log(`cube saved: "${name}" (${row.card_count} cards) for user ${userId}`);
+    });
+  });
+
+  socket.on("listMyCubes", (ack) => {
+    const reply = once<{ cubes: SavedCubeSummary[] }>(ack);
+    guard(reply, () => {
+      const userId = requireUserId(socket);
+      reply({ ok: true, data: { cubes: listCubesByOwner(userId).map(toSavedCubeSummary) } });
+    });
+  });
+
+  socket.on("deleteCube", (args, ack) => {
+    const reply = once(ack);
+    guard(reply, () => {
+      const userId = requireUserId(socket);
+      if (!deleteCube(String(args?.cubeId ?? ""), userId)) throw new Error("Cube not found");
+      reply({ ok: true });
+    });
+  });
+
+  socket.on("setCubeRankedEligible", (args, ack) => {
+    const reply = once<{ cube: SavedCubeSummary }>(ack);
+    guard(reply, () => {
+      const userId = requireUserId(socket);
+      const row = setCubeRankedEligible(
+        String(args?.cubeId ?? ""),
+        userId,
+        Boolean(args?.rankedEligible)
+      );
+      if (!row) throw new Error("Cube not found");
+      reply({ ok: true, data: { cube: toSavedCubeSummary(row) } });
+    });
+  });
+
+  socket.on("loadCubeIntoRoom", (args, ack) => {
+    const reply = once<{ cardCount: number }>(ack);
+    guard(reply, () => {
+      const userId = requireUserId(socket);
+      const { room, player } = getContext(rooms, socket);
+      if (room.ranked) throw new Error("Ranked rooms are server-driven");
+      if (player.id !== room.hostId) throw new Error("Only the host can set the cube");
+      if (room.phase !== "lobby") throw new Error("The cube can only be changed in the lobby");
+      const row = getCubeById(String(args?.cubeId ?? ""));
+      if (!row || row.owner_id !== userId) throw new Error("Cube not found");
+      room.cube = cubeFromRow(row); // stored resolved JSON — no Scryfall hit
+      room.touch();
+      reply({ ok: true, data: { cardCount: room.cube.cardIds.length } });
+      broadcastRoomState(io, room);
+      console.log(`[room ${room.id}] cube "${row.name}" loaded from saved cubes`);
+    });
+  });
+
+  // -- ranked matchmaking (authenticated) -----------------------------------
+  socket.on("queueJoin", (ack) => {
+    const reply = once(ack);
+    guard(reply, () => {
+      const userId = requireUserId(socket);
+      const state = accountStateFor(userId);
+      if (!state) throw new Error("Account not found");
+      queueJoin(userId, state.account.username);
+      reply({ ok: true });
+    });
+  });
+
+  socket.on("queueLeave", (ack) => {
+    const reply = once(ack);
+    guard(reply, () => {
+      const userId = requireUserId(socket);
+      queueLeave(userId);
+      reply({ ok: true });
+    });
+  });
+
   // -- disconnect -----------------------------------------------------------
   socket.on("disconnect", () => {
+    const userId = unbindSocket(socket.id);
+    if (userId && socketIdsForUser(userId).size === 0) onUserOffline(userId);
+
     const { roomId, playerId } = socket.data;
     if (!roomId || !playerId) return;
     const room = rooms.get(roomId);
@@ -754,6 +703,7 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
     player.socketId = null;
     room.touch();
     broadcastRoomState(io, room);
+    if (room.ranked) onRankedDisconnect(io, room, playerId);
     console.log(`[room ${room.id}] ${player.name} disconnected`);
   });
 }

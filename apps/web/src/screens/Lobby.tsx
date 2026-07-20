@@ -1,13 +1,15 @@
 /**
  * Lobby: room code + copy, player list (host crown, connection dots), cube
- * upload panel (paste / .txt file), draft config form, start draft (host),
- * chat.
+ * upload panel (paste / .txt file) with save-to-account + my-cubes library,
+ * draft config form, start draft (host), chat. Ranked rooms render a locked
+ * "starting soon" variant with no host controls.
  */
 import { useRef, useState, type ChangeEvent } from "react";
 import type { RoomState } from "@mtg-cube/shared";
 import { call } from "../socket";
 import { useApp } from "../store";
 import { ChatPanel } from "../components/ChatPanel";
+import { MyCubesList, SaveCubeDialog } from "../components/MyCubes";
 
 function CrownIcon(): JSX.Element {
   return (
@@ -38,12 +40,16 @@ interface CubePanelProps {
 }
 
 function CubePanel({ room, isHost }: CubePanelProps): JSX.Element {
-  const { pushToast } = useApp();
+  const { state, pushToast } = useApp();
   const [cubeName, setCubeName] = useState("My Cube");
   const [list, setList] = useState("");
   const [uploading, setUploading] = useState(false);
   const [showUnresolved, setShowUnresolved] = useState(false);
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [myCubesOpen, setMyCubesOpen] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  const signedIn = state.account !== null;
 
   const onFile = (e: ChangeEvent<HTMLInputElement>): void => {
     const file = e.target.files?.[0];
@@ -138,18 +144,63 @@ function CubePanel({ room, isHost }: CubePanelProps): JSX.Element {
             <span className="flex-1 truncate text-[11px] text-zinc-500">
               {list.trim().length > 0 ? `${list.trim().split("\n").filter((l) => l.trim().length > 0).length} lines ready` : "No list loaded"}
             </span>
+            {signedIn && (
+              <button
+                type="button"
+                className="btn-ghost !text-xs"
+                disabled={list.trim().length === 0}
+                onClick={() => setSaveOpen(true)}
+                title={list.trim().length === 0 ? "Paste a list first" : "Save this list to your account"}
+              >
+                Save to my cubes
+              </button>
+            )}
             <button type="button" className="btn-primary !text-xs" disabled={uploading || list.trim().length === 0} onClick={() => void upload()}>
               {uploading ? "Resolving…" : cube ? "Replace cube" : "Upload cube"}
             </button>
           </div>
+          {!signedIn && <p className="mt-2 text-[11px] text-zinc-500">Sign in to save cubes for later.</p>}
         </>
       ) : (
         !cube && (
           <div className="flex flex-col items-center gap-1.5 rounded-xl border border-dashed border-amber-100/15 py-6 text-center">
             <svg viewBox="0 0 24 24" className="h-6 w-6 fill-indigo-400/50"><path d="M12 1.5 3 6.75v10.5L12 22.5l9-5.25V6.75L12 1.5Z" /></svg>
-            <span className="text-xs text-zinc-400">No cube yet — the host is still rummaging through their binder…</span>
+            <span className="text-xs text-zinc-400">
+              {room.ranked
+                ? "The matchmaker is shuffling up a cube…"
+                : "No cube yet — the host is still rummaging through their binder…"}
+            </span>
           </div>
         )
+      )}
+
+      {/* My cubes library */}
+      {signedIn && !room.ranked && (
+        <div className="mt-4 border-t border-amber-100/[0.08] pt-3">
+          <button
+            type="button"
+            className="flex w-full items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-400 transition-colors duration-150 hover:text-zinc-200"
+            onClick={() => setMyCubesOpen((v) => !v)}
+          >
+            <svg viewBox="0 0 24 24" className={`h-3 w-3 fill-current transition-transform duration-150 ${myCubesOpen ? "rotate-90" : ""}`}>
+              <path d="M9 5l7 7-7 7V5Z" />
+            </svg>
+            My cubes
+          </button>
+          {myCubesOpen && (
+            <div className="mt-2">
+              <MyCubesList />
+            </div>
+          )}
+        </div>
+      )}
+
+      {saveOpen && (
+        <SaveCubeDialog
+          defaultName={cubeName.trim() || "My Cube"}
+          list={list.trim()}
+          onClose={() => setSaveOpen(false)}
+        />
       )}
     </section>
   );
@@ -194,6 +245,7 @@ export function Lobby(): JSX.Element {
   };
 
   const humanCount = room.players.length;
+  const ranked = room.ranked;
 
   return (
     <div className="mx-auto max-w-6xl animate-fade-in p-4 md:p-6">
@@ -231,6 +283,28 @@ export function Lobby(): JSX.Element {
         </button>
       </header>
 
+      {/* Ranked banner */}
+      {ranked && (
+        <div className="panel mb-4 flex flex-wrap items-center gap-3 border-brass-400/40 px-4 py-3">
+          <span className="chip border-brass-400/60 font-black tracking-widest text-brass-300">RANKED</span>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-bold text-zinc-100">Ranked draft — starting soon</div>
+            <div className="text-xs text-zinc-500">
+              Seats, packs and timers are locked in. The draft fires automatically once both players are seated.
+            </div>
+          </div>
+          <div className="flex gap-1">
+            {[0, 1, 2].map((i) => (
+              <span
+                key={i}
+                className="h-2 w-2 animate-pulse rounded-full bg-brass-400/70"
+                style={{ animationDelay: `${i * 200}ms` }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="grid gap-4 lg:grid-cols-[1fr_1fr_20rem]">
         {/* Players */}
         <section className="panel p-4">
@@ -252,13 +326,19 @@ export function Lobby(): JSX.Element {
               </li>
             ))}
           </ul>
-          {humanCount < seatCount && (
+          {!ranked && humanCount < seatCount && (
             <p className="mt-3 text-[11px] text-zinc-500">
               {seatCount - humanCount} empty seat{seatCount - humanCount === 1 ? "" : "s"} will be filled with bots.
             </p>
           )}
+          {ranked && (
+            <p className="mt-3 text-[11px] text-zinc-500">
+              Empty seats are filled with bots — it&apos;s you against your rival across the table.
+            </p>
+          )}
 
-          {/* Draft config */}
+          {/* Draft config (never shown in ranked rooms — the matchmaker configures everything) */}
+          {!ranked && (
           <div className="mt-4 border-t border-amber-100/[0.08] pt-4">
             <h3 className="mb-3 text-[10px] font-bold uppercase tracking-wider text-zinc-400">Draft setup {!isHost && <span className="normal-case text-zinc-600">(host controls)</span>}</h3>
             <div className={isHost ? "" : "pointer-events-none opacity-50"}>
@@ -317,6 +397,7 @@ export function Lobby(): JSX.Element {
             )}
             {isHost && !room.cube && <p className="mt-2 text-center text-[11px] text-zinc-500">Upload a cube to enable the draft.</p>}
           </div>
+          )}
         </section>
 
         {/* Cube */}

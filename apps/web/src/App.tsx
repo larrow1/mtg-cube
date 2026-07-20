@@ -4,6 +4,7 @@
  *   - viewer in active game -> Game
  *   - else by room.phase    -> Lobby / Draft / Deckbuild
  */
+import { AccountMenu } from "./components/AccountMenu";
 import { CardPreviewProvider } from "./components/Card";
 import { ToastLayer } from "./components/Toast";
 import { useApp } from "./store";
@@ -48,12 +49,29 @@ function ConnectionBanner(): JSX.Element | null {
   );
 }
 
+function TopBar(): JSX.Element {
+  return (
+    <div className="relative z-40 flex h-11 shrink-0 items-center justify-between border-b border-amber-100/[0.07] bg-felt-950/40 px-3">
+      <div className="flex items-center gap-1.5 text-xs font-black tracking-tight text-zinc-400">
+        <svg viewBox="0 0 24 24" className="h-4 w-4 fill-brass-300/80">
+          <path d="M12 1.5 3 6.75v10.5L12 22.5l9-5.25V6.75L12 1.5Z" />
+        </svg>
+        MTG <span className="text-brass-300/90">Cube</span>
+      </div>
+      <AccountMenu />
+    </div>
+  );
+}
+
 export default function App(): JSX.Element {
   return (
     <CardPreviewProvider>
-      <div className="min-h-full">
+      <div className="flex h-full flex-col">
         <ConnectionBanner />
-        <Router />
+        <TopBar />
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <Router />
+        </div>
         <ToastLayer />
       </div>
     </CardPreviewProvider>

@@ -15,6 +15,7 @@ import { Modal } from "../components/Modal";
 import { LifeCounter } from "../components/LifeCounter";
 import { ManaPool } from "../components/ManaPool";
 import { PhaseRibbon } from "../components/PhaseRibbon";
+import { RankBadge } from "../components/RankBadge";
 import { StackPanel } from "../components/StackPanel";
 import { ZonePile } from "../components/ZonePile";
 
@@ -138,6 +139,7 @@ export function Game(): JSX.Element {
 
   const gs = view.state;
   const cards = view.cards;
+  const ranked = room?.ranked ?? false;
   const [p0, p1] = gs.players;
   const viewerIsPlayer = p0.playerId === session.playerId || p1.playerId === session.playerId;
   const me: PlayerGameState = p0.playerId === session.playerId ? p0 : p1.playerId === session.playerId ? p1 : p1;
@@ -432,12 +434,20 @@ export function Game(): JSX.Element {
 
   const winnerName = gs.winnerId ? nameFor(gs.winnerId) : null;
 
+  // Ranked: the viewer's rating delta from the finished match record, if any.
+  const myRatingDelta =
+    ranked && viewerIsPlayer
+      ? room?.matches.find((m) => m.finished && m.playerIds.includes(session.playerId) && m.ratingDeltas)
+          ?.ratingDeltas?.[session.playerId]
+      : undefined;
+  const acct = state.account;
+
   // -------------------------------------------------------------------------
   // Render
   // -------------------------------------------------------------------------
 
   return (
-    <div className="mx-auto flex h-screen max-w-[120rem] flex-col gap-2 overflow-hidden p-2 lg:p-3">
+    <div className="mx-auto flex h-full max-w-[120rem] flex-col gap-2 overflow-hidden p-2 lg:p-3">
       {/* Mode hints */}
       {(attachSource || blockSource) && (
         <div className="fixed left-1/2 top-2 z-[60] flex -translate-x-1/2 animate-fade-in items-center gap-2 rounded-full border border-brass-400/50 bg-felt-900 px-4 py-1.5 text-xs font-semibold text-brass-300 shadow-card-lg">
@@ -494,7 +504,12 @@ export function Game(): JSX.Element {
               onCounter={() => send({ type: "counterTopOfStack" })}
               disabled={!canAct || gs.stack.length === 0}
             />
-            <div className="flex min-w-0 flex-1 flex-col justify-center">
+            <div className="flex min-w-0 flex-1 flex-col justify-center gap-1">
+              {ranked && (
+                <span className="chip self-center border-brass-400/60 font-black tracking-widest text-brass-300">
+                  RANKED
+                </span>
+              )}
               <PhaseRibbon
                 step={gs.step}
                 turnNumber={gs.turnNumber}
@@ -684,12 +699,20 @@ export function Game(): JSX.Element {
             Back to room
           </button>
           <div className="grid grid-cols-2 gap-2">
-            <button type="button" className="btn-danger !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => setConcedeOpen(true)}>
+            <button
+              type="button"
+              className={`btn-danger !py-1.5 !text-[11px] ${ranked ? "col-span-2" : ""}`}
+              disabled={!canAct}
+              onClick={() => setConcedeOpen(true)}
+            >
               Concede
             </button>
-            <button type="button" className="btn-ghost !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => setEndMatchOpen(true)}>
-              End match
-            </button>
+            {/* Ranked matches always play to a result — the server rejects endMatch anyway. */}
+            {!ranked && (
+              <button type="button" className="btn-ghost !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => setEndMatchOpen(true)}>
+                End match
+              </button>
+            )}
           </div>
 
           {/* Game log */}
@@ -840,7 +863,10 @@ export function Game(): JSX.Element {
           danger
           width="sm"
         >
-          <p className="text-sm text-zinc-300">Your opponent will be declared the winner. This cannot be undone.</p>
+          <p className="text-sm text-zinc-300">
+            Your opponent will be declared the winner. This cannot be undone.
+            {ranked && " Conceding counts as a ranked loss."}
+          </p>
         </Modal>
       )}
 
@@ -874,8 +900,26 @@ export function Game(): JSX.Element {
             </h2>
             {me.hasLost && me.lossReason && <p className="mt-1 text-sm text-zinc-400">{me.lossReason}</p>}
             {opp.hasLost && opp.lossReason && <p className="mt-1 text-sm text-zinc-400">{opp.lossReason}</p>}
+            {myRatingDelta !== undefined && (
+              <div className="mx-auto mt-4 flex w-fit items-center gap-2.5 rounded-xl border border-amber-100/10 bg-felt-950/70 px-4 py-2.5">
+                {acct && <RankBadge rank={acct.rating.rank} />}
+                <span
+                  className={`text-lg font-black tabular-nums ${
+                    myRatingDelta > 0 ? "text-emerald-300" : myRatingDelta < 0 ? "text-red-300" : "text-zinc-300"
+                  }`}
+                  title="Ranked rating change"
+                >
+                  {myRatingDelta > 0 ? `+${myRatingDelta}` : `${myRatingDelta}`}
+                </span>
+                {acct && (
+                  <span className="text-xs text-zinc-400">
+                    rating <span className="font-bold tabular-nums text-zinc-200">{acct.rating.rating}</span>
+                  </span>
+                )}
+              </div>
+            )}
             <div className="mt-6 flex justify-center gap-2">
-              {viewerIsPlayer && (
+              {viewerIsPlayer && !ranked && (
                 <button type="button" className="btn-primary" onClick={() => send({ type: "restartGame", seed: randomSeed() })}>
                   Rematch
                 </button>

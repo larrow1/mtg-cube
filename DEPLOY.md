@@ -75,6 +75,35 @@ port to `3001` (or set env `PORT` to Railway's provided port). Disable any
 Note: Render's **free** plan spins services down when idle, which drops all
 in-memory games — use `starter` or above.
 
+## Accounts & ranked
+
+v2 adds accounts, saved cubes, and ranked matchmaking backed by SQLite via the
+Node built-in `node:sqlite` (**Node 24 required**; the Docker image already
+uses `node:24-alpine`). Room/draft/game state is still in-memory — only
+accounts, sessions, saved cubes, ratings, and ranked match history persist.
+
+- **Persist the database**: mount a volume at `/app/data` (the image sets
+  `DB_PATH=/app/data/mtg-cube.db`). Docker:
+  `docker run -v mtg-cube-data:/app/data -p 3001:3001 mtg-cube`. On
+  Railway/Fly, attach a volume mounted at `/app/data`. Without a volume the
+  database is wiped on every deploy/restart.
+- `DB_PATH` — SQLite file location (default `apps/server/data/mtg-cube.db`
+  locally, `/app/data/mtg-cube.db` in the image). The directory is created
+  automatically.
+
+Test-only env overrides for the ranked flow (leave unset in production):
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `MM_TICK_MS` | `5000` | Matchmaking pairing tick interval (ms) |
+| `RANKED_SEATS` | cube-based (`min(8, max(4, floor(size/45)))`) | Force ranked draft seat count |
+| `RANKED_PACKS` | `3` | Packs per player in ranked drafts |
+| `RANKED_CARDS` | `15` | Cards per pack in ranked drafts |
+| `RANKED_PICK_SECONDS` | `60` | Forced pick timer in ranked drafts |
+| `RANKED_JOIN_SECONDS` | `60` | No-show deadline after a pairing |
+| `RANKED_DECKBUILD_SECONDS` | `300` | Deckbuild deadline before auto-submit |
+| `RANKED_DISCONNECT_GRACE_SECONDS` | `180` | Mid-match disconnect grace before concession |
+
 ## Scaling later
 
 The current design is intentionally **single-instance**:

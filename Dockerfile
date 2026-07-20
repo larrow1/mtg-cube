@@ -1,5 +1,6 @@
 # ---- Stage 1: build web client + bundle server -----------------------------
-FROM node:22-alpine AS builder
+# node:24 is required: the server uses the built-in node:sqlite module.
+FROM node:24-alpine AS builder
 WORKDIR /app
 
 # Copy workspace manifests first so npm ci layer caches across source changes.
@@ -17,16 +18,23 @@ COPY apps/web/ apps/web/
 RUN npm run build:prod
 
 # ---- Stage 2: minimal runtime ----------------------------------------------
-FROM node:22-alpine
+FROM node:24-alpine
 WORKDIR /app
 
+# SQLite database lives under /app/data — mount a persistent volume there
+# (e.g. `docker run -v mtg-cube-data:/app/data ...` or a Railway/Fly volume),
+# otherwise accounts/cubes/ratings are lost on every container restart.
 ENV NODE_ENV=production \
     SERVE_STATIC_DIR=/app/apps/web/dist \
-    PORT=3001
+    PORT=3001 \
+    DB_PATH=/app/data/mtg-cube.db
 
 # Server is a self-contained esbuild bundle — no node_modules needed.
 COPY --from=builder /app/apps/server/dist/ apps/server/dist/
 COPY --from=builder /app/apps/web/dist/ apps/web/dist/
+
+# Pre-create the data dir so the non-root "node" user can write the database.
+RUN mkdir -p /app/data && chown node:node /app/data
 
 # Run as the non-root "node" user shipped with the official image.
 USER node

@@ -12,8 +12,10 @@ import cors from "cors";
 import express from "express";
 import { Server } from "socket.io";
 import type { ClientToServerEvents, ServerToClientEvents } from "@mtg-cube/shared";
+import { getDb } from "./db.js";
 import { registerHandlers } from "./handlers.js";
 import type { SocketData } from "./handlers.js";
+import { cleanupRankedRoom, initMatchmaking } from "./matchmaking.js";
 import { Room } from "./room.js";
 import { preloadBasicLands } from "./scryfall.js";
 
@@ -24,6 +26,10 @@ const corsOrigins = (process.env.CORS_ORIGIN ?? "http://localhost:5173")
   .filter(Boolean);
 
 const rooms = new Map<string, Room>();
+
+// Open (and migrate) the SQLite database up front so boot fails loudly if the
+// data directory is unusable. DB_PATH env overrides the location.
+getDb();
 
 const app = express();
 app.use(cors({ origin: corsOrigins }));
@@ -57,6 +63,9 @@ io.on("connection", (socket) => {
   registerHandlers(io, socket, rooms);
 });
 
+// Ranked matchmaking queue + server-driven ranked rooms.
+initMatchmaking(io, rooms);
+
 // Garbage-collect rooms whose players have all been gone for 2 hours.
 const ROOM_TTL_MS = 2 * 60 * 60 * 1000;
 const GC_INTERVAL_MS = 10 * 60 * 1000;
@@ -66,6 +75,7 @@ setInterval(() => {
     const abandoned = [...room.players.values()].every((p) => !p.connected);
     if (abandoned && now - room.lastActive > ROOM_TTL_MS) {
       room.clearAllPickTimers();
+      cleanupRankedRoom(id);
       rooms.delete(id);
       console.log(`[room ${id}] garbage-collected after 2h of inactivity`);
     }

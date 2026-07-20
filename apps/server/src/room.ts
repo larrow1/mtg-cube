@@ -43,6 +43,8 @@ export interface Match {
   game: GameState;
   /** CardData for every card that can appear in this match (deck cards + basics). */
   cardLookup: Record<string, CardData>;
+  /** Ranked only: Elo change per player id, filled in when the match ends. */
+  ratingDeltas?: Record<string, number>;
 }
 
 interface PickTimer {
@@ -62,6 +64,11 @@ export class Room {
   readonly id: string;
   hostId = "";
   phase: RoomPhase = "lobby";
+  /**
+   * Ranked rooms are created by the matchmaker and auto-run: hostId stays "",
+   * timers are forced, endMatch/restart are disabled, Elo applies on finish.
+   */
+  ranked = false;
   readonly players = new Map<string, RoomPlayer>();
   cube: Cube | null = null;
   draftConfig: DraftConfig = { ...DEFAULT_DRAFT_CONFIG };
@@ -167,6 +174,7 @@ export class Room {
       playerIds: m.playerIds,
       finished: m.game.finished,
       winnerId: m.game.winnerId,
+      ...(m.ratingDeltas ? { ratingDeltas: m.ratingDeltas } : {}),
     }));
   }
 
@@ -207,6 +215,7 @@ export class Room {
       draftConfig: this.draftConfig,
       decksSubmitted: [...this.decks.keys()],
       matches: this.matchSummaries(),
+      ranked: this.ranked,
     };
   }
 }

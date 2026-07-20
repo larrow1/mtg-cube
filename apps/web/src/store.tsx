@@ -12,10 +12,11 @@ import {
   useEffect,
   useMemo,
   useReducer,
+  useRef,
   type Dispatch,
   type ReactNode,
 } from "react";
-import type { DraftView, GameView, RoomState } from "@mtg-cube/shared";
+import type { Account, DraftView, GameView, QueueState, RatingInfo, RoomState } from "@mtg-cube/shared";
 import { call, socket } from "./socket";
 import { primeCards } from "./lib/cardCache";
 
@@ -35,6 +36,12 @@ export interface ChatMessage {
   playerName: string;
   message: string;
   ts: number;
+}
+
+/** A signed-in account plus its current ranked rating, as one unit. */
+export interface AccountState {
+  account: Account;
+  rating: RatingInfo;
 }
 
 export type ToastKind = "error" | "success" | "info";
@@ -59,6 +66,12 @@ export interface AppState {
   dismissedGameId: string | null;
   chat: ChatMessage[];
   toasts: ToastItem[];
+  /** Signed-in account (null = anonymous). Accounts are optional everywhere outside ranked. */
+  account: AccountState | null;
+  /** Ranked matchmaking status while searching; null when not queued. */
+  queue: QueueState | null;
+  /** Sign-in / create-account modal visibility (openable from any screen). */
+  authOpen: boolean;
 }
 
 export type AppEvent =
@@ -73,7 +86,11 @@ export type AppEvent =
   | { type: "rejoinGame" }
   | { type: "chat"; msg: ChatMessage }
   | { type: "toast"; kind: ToastKind; message: string }
-  | { type: "dismissToast"; id: number };
+  | { type: "dismissToast"; id: number }
+  | { type: "accountState"; account: AccountState | null }
+  | { type: "queueState"; queue: QueueState | null }
+  | { type: "openAuth" }
+  | { type: "closeAuth" };
 
 // ---------------------------------------------------------------------------
 // Session persistence
@@ -110,6 +127,29 @@ function persistSession(s: Session | null): void {
 }
 
 // ---------------------------------------------------------------------------
+// Account token persistence
+// ---------------------------------------------------------------------------
+
+const ACCOUNT_KEY = "mtg-cube-account";
+
+export function loadAccountToken(): string | null {
+  try {
+    return localStorage.getItem(ACCOUNT_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function persistAccountToken(token: string | null): void {
+  try {
+    if (token) localStorage.setItem(ACCOUNT_KEY, token);
+    else localStorage.removeItem(ACCOUNT_KEY);
+  } catch {
+    // localStorage unavailable — the sign-in just won't survive reloads.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Reducer
 // ---------------------------------------------------------------------------
 
@@ -127,6 +167,9 @@ const initialState: AppState = {
   dismissedGameId: null,
   chat: [],
   toasts: [],
+  account: null,
+  queue: null,
+  authOpen: false,
 };
 
 function reducer(state: AppState, event: AppEvent): AppState {
@@ -189,6 +232,15 @@ function reducer(state: AppState, event: AppEvent): AppState {
     }
     case "dismissToast":
       return { ...state, toasts: state.toasts.filter((t) => t.id !== event.id) };
+    case "accountState":
+      // Losing the account also ends any ranked queue membership.
+      return { ...state, account: event.account, queue: event.account ? state.queue : null };
+    case "queueState":
+      return { ...state, queue: event.queue };
+    case "openAuth":
+      return { ...state, authOpen: true };
+    case "closeAuth":
+      return { ...state, authOpen: false };
     default:
       return state;
   }
@@ -203,12 +255,17 @@ interface AppContextValue {
   dispatch: Dispatch<AppEvent>;
   pushToast: (message: string, kind?: ToastKind) => void;
   leaveRoom: () => void;
+  signOut: () => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
 
 export function AppProvider({ children }: { children: ReactNode }): JSX.Element {
   const [state, dispatch] = useReducer(reducer, initialState);
+
+  // Latest account, readable from the (mount-once) socket listeners below.
+  const accountRef = useRef<AccountState | null>(state.account);
+  accountRef.current = state.account;
 
   const pushToast = useCallback((message: string, kind: ToastKind = "error") => {
     dispatch({ type: "toast", kind, message });
@@ -217,6 +274,12 @@ export function AppProvider({ children }: { children: ReactNode }): JSX.Element 
   const leaveRoom = useCallback(() => {
     void call("leaveRoom").then(() => undefined);
     dispatch({ type: "sessionCleared" });
+  }, []);
+
+  const signOut = useCallback(() => {
+    void call("logout").then(() => undefined);
+    persistAccountToken(null);
+    dispatch({ type: "accountState", account: null });
   }, []);
 
   useEffect(() => {
@@ -236,13 +299,53 @@ export function AppProvider({ children }: { children: ReactNode }): JSX.Element 
           }
         });
       }
+      const accountToken = loadAccountToken();
+      if (accountToken) {
+        // Re-bind the stored account to this socket; a stale/invalid token is
+        // discarded silently (the user simply stays anonymous).
+        void call("authenticate", { token: accountToken }).then((r) => {
+          if (r.ok && r.data) {
+            dispatch({ type: "accountState", account: { account: r.data.account, rating: r.data.rating } });
+          } else {
+            persistAccountToken(null);
+            dispatch({ type: "accountState", account: null });
+          }
+        });
+      }
     };
-    const onDisconnect = (): void => dispatch({ type: "connected", connected: false });
+    const onDisconnect = (): void => {
+      dispatch({ type: "connected", connected: false });
+      // A dropped socket also drops us from the matchmaking queue server-side.
+      dispatch({ type: "queueState", queue: null });
+    };
     const onRoomState = (room: RoomState): void => dispatch({ type: "roomState", room });
     const onDraftState = (draft: DraftView): void => dispatch({ type: "draftState", draft });
     const onGameState = (game: GameView): void => dispatch({ type: "gameState", game });
     const onChat = (msg: ChatMessage): void => dispatch({ type: "chat", msg });
     const onErrorMsg = (message: string): void => dispatch({ type: "toast", kind: "error", message });
+    const onAccountState = (s: { account: Account; rating: RatingInfo } | null): void =>
+      dispatch({ type: "accountState", account: s });
+    const onQueueState = (queue: QueueState | null): void => dispatch({ type: "queueState", queue });
+    const onQueueMatched = (info: { roomId: string; opponentUsername: string; opponentRank: string }): void => {
+      dispatch({ type: "queueState", queue: null });
+      dispatch({
+        type: "toast",
+        kind: "success",
+        message: `Opponent found: ${info.opponentUsername} (${info.opponentRank}) — joining the draft…`,
+      });
+      // Auto-join the ranked room, reusing the normal join/session flow.
+      const playerName = accountRef.current?.account.username ?? "Player";
+      void call("joinRoom", { roomId: info.roomId, playerName }).then((r) => {
+        if (r.ok && r.data) {
+          dispatch({
+            type: "sessionEstablished",
+            session: { roomId: info.roomId, playerId: r.data.playerId, token: r.data.token, name: playerName },
+          });
+        } else {
+          dispatch({ type: "toast", kind: "error", message: r.error ?? "Could not join the ranked room" });
+        }
+      });
+    };
 
     socket.on("connect", onConnect);
     socket.on("disconnect", onDisconnect);
@@ -251,6 +354,9 @@ export function AppProvider({ children }: { children: ReactNode }): JSX.Element 
     socket.on("gameState", onGameState);
     socket.on("chat", onChat);
     socket.on("errorMsg", onErrorMsg);
+    socket.on("accountState", onAccountState);
+    socket.on("queueState", onQueueState);
+    socket.on("queueMatched", onQueueMatched);
     if (socket.connected) onConnect();
 
     return () => {
@@ -261,12 +367,15 @@ export function AppProvider({ children }: { children: ReactNode }): JSX.Element 
       socket.off("gameState", onGameState);
       socket.off("chat", onChat);
       socket.off("errorMsg", onErrorMsg);
+      socket.off("accountState", onAccountState);
+      socket.off("queueState", onQueueState);
+      socket.off("queueMatched", onQueueMatched);
     };
   }, []);
 
   const value = useMemo<AppContextValue>(
-    () => ({ state, dispatch, pushToast, leaveRoom }),
-    [state, pushToast, leaveRoom]
+    () => ({ state, dispatch, pushToast, leaveRoom, signOut }),
+    [state, pushToast, leaveRoom, signOut]
   );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
