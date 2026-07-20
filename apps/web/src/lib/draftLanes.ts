@@ -8,7 +8,7 @@
  * Deckbuild reads the same key via `sideboardedInstanceIds()` to seed cards
  * from the draft's Sideboard lane into its "side" zone.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CardData, DraftCard } from "@mtg-cube/shared";
 import { cmcBucket } from "./cards";
 
@@ -29,9 +29,19 @@ const DEFAULT_LANES: Lane[] = [
 ];
 
 const DEFAULT_LANE_IDS = new Set(DEFAULT_LANES.map((l) => l.id));
+const DEFAULT_LANE_NAMES = new Map(DEFAULT_LANES.map((l) => [l.id, l.name]));
 
 export function isDefaultLane(id: string): boolean {
   return DEFAULT_LANE_IDS.has(id);
+}
+
+/**
+ * True while a default cmc lane still carries its factory numeric name
+ * ("0-1", "2", …). Such lanes render without header text; once the user gives
+ * the lane a real name it shows like any custom lane.
+ */
+export function isUnnamedDefaultLane(lane: Lane): boolean {
+  return DEFAULT_LANE_NAMES.get(lane.id) === lane.name;
 }
 
 interface LaneState {
@@ -156,9 +166,6 @@ export function useDraftLanes(
     if (box.id === draftId) saveState(draftId, box.s);
   }, [draftId, box]);
 
-  const picksRef = useRef(picks);
-  picksRef.current = picks;
-
   const laneOf = useCallback(
     (pick: DraftCard): string => {
       const a = state.assignments[pick.instanceId];
@@ -169,13 +176,14 @@ export function useDraftLanes(
     [state, cards]
   );
 
-  /** Drop custom lanes no pick is explicitly assigned to. */
+  /**
+   * Drop custom lanes no assignment references. Moving a card away rewrites
+   * its assignment value, so a lane's last reference disappearing still prunes
+   * it — while lanes created for an in-flight pack pick (whose card hasn't
+   * landed in `picks` yet) survive.
+   */
   const prune = useCallback((s: LaneState): LaneState => {
-    const used = new Set<string>();
-    for (const p of picksRef.current) {
-      const a = s.assignments[p.instanceId];
-      if (a) used.add(a);
-    }
+    const used = new Set<string>(Object.values(s.assignments));
     const lanes = s.lanes.filter((l) => DEFAULT_LANE_IDS.has(l.id) || used.has(l.id));
     return lanes.length === s.lanes.length ? s : { ...s, lanes };
   }, []);

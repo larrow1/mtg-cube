@@ -10,10 +10,11 @@ import { call } from "../socket";
 import { useApp } from "../store";
 import { useCardData } from "../lib/cardCache";
 import { formatSeconds } from "../lib/cards";
+import { setPackPickData } from "../lib/dnd";
 import { useDraftLanes } from "../lib/draftLanes";
 import { Card } from "../components/Card";
 import { CardGrid } from "../components/CardGrid";
-import { PicksTray, clampTrayH } from "../components/PicksTray";
+import { AUTO_LANE, PicksTray, clampTrayH } from "../components/PicksTray";
 import { PicksRail } from "../components/PicksRail";
 
 function useCountdown(deadline: number | null): number | null {
@@ -153,6 +154,27 @@ export function Draft(): JSX.Element {
     }
   };
 
+  /**
+   * Drag-to-pick: a pack card dropped on a lane performs the pick through the
+   * same call/ack path as double-click, and only on a successful ack records
+   * the lane assignment so the card lands exactly where it was dropped
+   * (`laneId === null` creates a new lane for it). The assignment is written
+   * immediately on ack; the card renders in the lane once the server's pick
+   * state lands.
+   */
+  const pickToLane = async (instanceId: string, laneId: string | null): Promise<void> => {
+    if (picking) return;
+    setPicking(true);
+    const r = await call("makePick", { instanceId });
+    if (!r.ok) {
+      setPicking(false);
+      pushToast(r.error ?? "Pick rejected");
+      return; // Failed ack: nothing persists.
+    }
+    if (laneId === null) lanesApi.addLaneWithCard(instanceId);
+    else if (laneId !== AUTO_LANE) lanesApi.moveCard(instanceId, laneId);
+  };
+
   const timerDanger = remaining !== null && remaining < 10_000;
 
   return (
@@ -204,6 +226,11 @@ export function Draft(): JSX.Element {
                     selected={selected === dc.instanceId}
                     dimmed={picking}
                     className="!w-full max-w-[160px]"
+                    draggable={!picking}
+                    onDragStart={(e) => {
+                      setSelected(dc.instanceId);
+                      setPackPickData(e.dataTransfer, dc.instanceId);
+                    }}
                     onClick={() => setSelected((cur) => (cur === dc.instanceId ? null : dc.instanceId))}
                     onDoubleClick={() => void makePick(dc.instanceId)}
                   />
@@ -243,6 +270,7 @@ export function Draft(): JSX.Element {
           onView={(view) => setPrefs((p) => ({ ...p, view }))}
           open={prefs.rail}
           onToggleOpen={() => setPrefs((p) => ({ ...p, rail: !p.rail }))}
+          onPackPick={(id, laneId) => void pickToLane(id, laneId)}
         />
       </div>
 
@@ -258,6 +286,7 @@ export function Draft(): JSX.Element {
           onToggleMinimized={() => setPrefs((p) => ({ ...p, min: !p.min }))}
           view={prefs.view}
           onView={(view) => setPrefs((p) => ({ ...p, view }))}
+          onPackPick={(id, laneId) => void pickToLane(id, laneId)}
         />
       )}
     </div>

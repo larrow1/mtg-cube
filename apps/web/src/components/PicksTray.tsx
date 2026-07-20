@@ -8,7 +8,21 @@
 import { useState, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
 import type { CardData, DraftCard } from "@mtg-cube/shared";
 import { Card } from "./Card";
-import { SIDEBOARD_LANE_ID, type DraftLanes, type Lane } from "../lib/draftLanes";
+import { getPackPickInstanceId } from "../lib/dnd";
+import { SIDEBOARD_LANE_ID, isUnnamedDefaultLane, type DraftLanes, type Lane } from "../lib/draftLanes";
+
+/**
+ * Drop handler for dropping a card straight from the current pack onto a lane
+ * (performs the pick, then lands the card in that lane). `laneId === null`
+ * means "create a new lane for it".
+ */
+export type PackPickDrop = (instanceId: string, laneId: string | null) => void;
+
+/**
+ * Sentinel laneId for pack-pick drops with no explicit lane (the tray's empty
+ * state): the pick happens, the card falls into its natural cmc lane.
+ */
+export const AUTO_LANE = "__auto__";
 
 export const TRAY_MIN_H = 120;
 export const trayMaxH = (): number => Math.round(window.innerHeight * 0.65);
@@ -37,6 +51,10 @@ function LaneHeader({
     onRename(val);
   };
 
+  // Default cmc lanes stay headerless until the user names them — only a
+  // subtle hover-only "name" affordance occupies the header row.
+  const unnamed = !accent && isUnnamedDefaultLane(lane);
+
   return (
     <div className="mb-1 flex h-4 items-center gap-1 px-0.5">
       {editing ? (
@@ -54,6 +72,20 @@ function LaneHeader({
             }
           }}
         />
+      ) : unnamed ? (
+        renamable && (
+          <button
+            type="button"
+            className="truncate text-[9px] font-semibold uppercase tracking-wider text-zinc-500 opacity-0 transition-opacity duration-150 hover:text-brass-300 group-hover:opacity-100"
+            title="Name this lane"
+            onClick={() => {
+              setVal("");
+              setEditing(true);
+            }}
+          >
+            + name
+          </button>
+        )
       ) : (
         <button
           type="button"
@@ -71,7 +103,9 @@ function LaneHeader({
           {lane.name}
         </button>
       )}
-      {!editing && <span className="text-[10px] font-semibold tabular-nums text-zinc-500">{count}</span>}
+      {!editing && !unnamed && (
+        <span className="text-[10px] font-semibold tabular-nums text-zinc-500">{count}</span>
+      )}
     </div>
   );
 }
@@ -85,6 +119,7 @@ function LaneColumn({
   lanesApi,
   dragOver,
   setDragOver,
+  onPackPick,
 }: {
   lane: Lane;
   picks: DraftCard[];
@@ -94,6 +129,7 @@ function LaneColumn({
   lanesApi: DraftLanes;
   dragOver: string | null;
   setDragOver: (id: string | null) => void;
+  onPackPick?: PackPickDrop;
 }): JSX.Element {
   // Top margin percentages resolve against the column *width*, so "-119%"
   // is exactly 85% of the card height (aspect 5/7 -> height = 140% of width)
@@ -103,7 +139,7 @@ function LaneColumn({
 
   return (
     <div
-      className={`flex h-full shrink-0 flex-col rounded-lg px-1 pt-0.5 transition-colors duration-100 ${
+      className={`group flex h-full shrink-0 flex-col rounded-lg px-1 pt-0.5 transition-colors duration-100 ${
         sideboard
           ? `border border-dashed ${isOver ? "border-amber-300/80 bg-amber-400/10" : "border-amber-400/40 bg-amber-400/[0.04]"}`
           : isOver
@@ -119,6 +155,12 @@ function LaneColumn({
       onDrop={(e) => {
         e.preventDefault();
         setDragOver(null);
+        // Pack drags pick the card *and* land it here; move drags just move.
+        const packId = getPackPickInstanceId(e.dataTransfer);
+        if (packId) {
+          onPackPick?.(packId, lane.id);
+          return;
+        }
         const id = e.dataTransfer.getData(DRAG_MIME);
         if (id) lanesApi.moveCard(id, lane.id);
       }}
@@ -195,10 +237,11 @@ interface PicksTrayProps {
   onToggleMinimized: () => void;
   view: "cards" | "list";
   onView: (v: "cards" | "list") => void;
+  onPackPick?: PackPickDrop;
 }
 
 export function PicksTray(props: PicksTrayProps): JSX.Element {
-  const { picks, cards, lanesApi, trayH, minimized, onResize, onToggleMinimized, view, onView } = props;
+  const { picks, cards, lanesApi, trayH, minimized, onResize, onToggleMinimized, view, onView, onPackPick } = props;
   const [dragOver, setDragOver] = useState<string | null>(null);
   const [newLaneOver, setNewLaneOver] = useState(false);
 
@@ -287,8 +330,16 @@ export function PicksTray(props: PicksTrayProps): JSX.Element {
         </button>
       </div>
       {picks.length === 0 ? (
-        <div className="mx-3 mb-3 flex min-h-0 flex-1 items-center justify-center rounded-xl border border-dashed border-amber-100/15 text-xs text-zinc-400">
-          No picks yet — grab something spicy and it&apos;ll land here, stacked by mana value.
+        <div
+          className="mx-3 mb-3 flex min-h-0 flex-1 items-center justify-center rounded-xl border border-dashed border-amber-100/15 text-xs text-zinc-400"
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => {
+            e.preventDefault();
+            const packId = getPackPickInstanceId(e.dataTransfer);
+            if (packId) onPackPick?.(packId, AUTO_LANE);
+          }}
+        >
+          No picks yet — drag a card down here (or double-click it) and it&apos;ll land, stacked by mana value.
         </div>
       ) : (
         <div className="scrollbar-slim flex min-h-0 flex-1 gap-2 overflow-x-auto px-3 pb-2">
@@ -303,6 +354,7 @@ export function PicksTray(props: PicksTrayProps): JSX.Element {
               lanesApi={lanesApi}
               dragOver={dragOver}
               setDragOver={setDragOver}
+              onPackPick={onPackPick}
             />
           ))}
           {/* Drop target: create a new lane */}
@@ -318,6 +370,11 @@ export function PicksTray(props: PicksTrayProps): JSX.Element {
             onDrop={(e) => {
               e.preventDefault();
               setNewLaneOver(false);
+              const packId = getPackPickInstanceId(e.dataTransfer);
+              if (packId) {
+                onPackPick?.(packId, null);
+                return;
+              }
               const id = e.dataTransfer.getData(DRAG_MIME);
               if (id) lanesApi.addLaneWithCard(id);
             }}
@@ -336,6 +393,7 @@ export function PicksTray(props: PicksTrayProps): JSX.Element {
             lanesApi={lanesApi}
             dragOver={dragOver}
             setDragOver={setDragOver}
+            onPackPick={onPackPick}
           />
         </div>
       )}

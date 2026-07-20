@@ -8,7 +8,8 @@ import { useMemo, useState, type DragEvent } from "react";
 import type { CardData, DraftCard } from "@mtg-cube/shared";
 import { CurveChart } from "./CurveChart";
 import { useCardPreview } from "./Card";
-import { ViewToggle } from "./PicksTray";
+import { ViewToggle, type PackPickDrop } from "./PicksTray";
+import { getPackPickInstanceId } from "../lib/dnd";
 import {
   cmcBucket,
   colorBucket,
@@ -18,7 +19,7 @@ import {
   primaryType,
   type ColorBucket,
 } from "../lib/cards";
-import { SIDEBOARD_LANE_ID, type DraftLanes, type Lane } from "../lib/draftLanes";
+import { SIDEBOARD_LANE_ID, isUnnamedDefaultLane, type DraftLanes, type Lane } from "../lib/draftLanes";
 
 const DRAG_MIME = "text/plain";
 
@@ -111,7 +112,15 @@ function TypeCounts({ main, cards }: { main: DraftCard[]; cards: Record<string, 
   );
 }
 
-function ColorSplit({ main, cards }: { main: DraftCard[]; cards: Record<string, CardData> }): JSX.Element | null {
+export function ColorSplit({
+  main,
+  cards,
+  label = "Colors (main)",
+}: {
+  main: DraftCard[];
+  cards: Record<string, CardData>;
+  label?: string;
+}): JSX.Element | null {
   const counts = useMemo(() => {
     const map = new Map<ColorBucket, number>();
     for (const pick of main) {
@@ -133,7 +142,7 @@ function ColorSplit({ main, cards }: { main: DraftCard[]; cards: Record<string, 
 
   return (
     <div className="panel-inset p-3">
-      <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-zinc-400">Colors (main)</div>
+      <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-zinc-400">{label}</div>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
         {shown.map((b) => (
           <span key={b} className="flex items-center gap-1">
@@ -195,11 +204,13 @@ function PicksList({
   lanesApi,
   view,
   onView,
+  onPackPick,
 }: {
   cards: Record<string, CardData>;
   lanesApi: DraftLanes;
   view: "cards" | "list";
   onView: (v: "cards" | "list") => void;
+  onPackPick?: PackPickDrop;
 }): JSX.Element {
   const [dragOver, setDragOver] = useState<string | null>(null);
   const sideboardLane: Lane = { id: SIDEBOARD_LANE_ID, name: "Sideboard" };
@@ -244,13 +255,23 @@ function PicksList({
               onDrop={(e) => {
                 e.preventDefault();
                 setDragOver(null);
+                const packId = getPackPickInstanceId(e.dataTransfer);
+                if (packId) {
+                  onPackPick?.(packId, lane.id);
+                  return;
+                }
                 const id = e.dataTransfer.getData(DRAG_MIME);
                 if (id) lanesApi.moveCard(id, lane.id);
               }}
             >
-              <div className={`flex items-center gap-1.5 px-1 pb-0.5 text-[9px] font-bold uppercase tracking-wider ${isSide ? "text-amber-300" : "text-zinc-500"}`}>
-                {lane.name} <span className="tabular-nums">· {picks.length}</span>
-              </div>
+              {!isSide && isUnnamedDefaultLane(lane) ? (
+                // Unnamed default lanes: thin divider instead of a numeric header.
+                <div className="mx-1 mb-1 border-t border-amber-100/10" />
+              ) : (
+                <div className={`flex items-center gap-1.5 px-1 pb-0.5 text-[9px] font-bold uppercase tracking-wider ${isSide ? "text-amber-300" : "text-zinc-500"}`}>
+                  {lane.name} <span className="tabular-nums">· {picks.length}</span>
+                </div>
+              )}
               {picks.map((pick) => (
                 <ListRow
                   key={pick.instanceId}
@@ -278,10 +299,11 @@ interface PicksRailProps {
   onView: (v: "cards" | "list") => void;
   open: boolean;
   onToggleOpen: () => void;
+  onPackPick?: PackPickDrop;
 }
 
 export function PicksRail(props: PicksRailProps): JSX.Element {
-  const { picks, cards, lanesApi, view, onView, open, onToggleOpen } = props;
+  const { picks, cards, lanesApi, view, onView, open, onToggleOpen, onPackPick } = props;
 
   const main = useMemo(
     () => picks.filter((p) => lanesApi.laneOf(p) !== SIDEBOARD_LANE_ID),
@@ -337,7 +359,9 @@ export function PicksRail(props: PicksRailProps): JSX.Element {
         <CurveChart counts={curveCounts} />
         <ColorSplit main={main} cards={cards} />
       </div>
-      {view === "list" && <PicksList cards={cards} lanesApi={lanesApi} view={view} onView={onView} />}
+      {view === "list" && (
+        <PicksList cards={cards} lanesApi={lanesApi} view={view} onView={onView} onPackPick={onPackPick} />
+      )}
     </aside>
   );
 }
