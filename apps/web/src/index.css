@@ -61,6 +61,12 @@
       0 2px 6px rgba(8, 6, 30, 0.55),
       inset 0 0 0 3px rgba(41, 40, 94, 0.95);
   }
+  /* Subtle warm radial wash behind the deck strip (layers over .panel's bg). */
+  .deck-glow {
+    background-image:
+      radial-gradient(560px 180px at 16% 108%, rgba(242, 182, 75, 0.1), transparent 62%),
+      radial-gradient(420px 160px at 86% 112%, rgba(242, 182, 75, 0.06), transparent 60%);
+  }
   .zone-row {
     @apply flex min-h-[7.5rem] flex-wrap content-start items-start gap-2 rounded-xl border border-amber-100/[0.06] bg-felt-950/40 p-2 transition-colors duration-150;
   }
@@ -125,6 +131,15 @@
 }
 
 @layer utilities {
+  /* Number "tick" when a count changes (deck banner) — keyframes live here
+     alongside sparkle-rise rather than in tailwind.config.js. */
+  .animate-count-pop {
+    animation: count-pop 250ms ease-out;
+  }
+  /* Arena "Done"-style warm breathing glow (keeps btn-gold's bevel insets). */
+  .animate-glow-pulse {
+    animation: glow-pulse 1.6s ease-in-out infinite;
+  }
   .scrollbar-slim {
     scrollbar-width: thin;
     scrollbar-color: rgba(251, 191, 36, 0.3) transparent;
@@ -142,5 +157,32 @@
   }
   .text-shadow {
     text-shadow: 0 1px 3px rgba(8, 6, 30, 0.8);
+  }
+}
+
+@keyframes count-pop {
+  from {
+    transform: scale(1.45);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+@keyframes glow-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.55) inset,
+      0 -2px 6px rgba(120, 70, 0, 0.35) inset,
+      0 2px 10px rgba(8, 6, 30, 0.45),
+      0 0 16px rgba(251, 191, 36, 0.35);
+  }
+  50% {
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.55) inset,
+      0 -2px 6px rgba(120, 70, 0, 0.35) inset,
+      0 2px 10px rgba(8, 6, 30, 0.45),
+      0 0 0 3px rgba(251, 191, 36, 0.28),
+      0 0 34px rgba(251, 191, 36, 0.7);
   }
 }

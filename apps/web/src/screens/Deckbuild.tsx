@@ -8,7 +8,15 @@
  * Pool <-> deck <-> sideboard via click or drag-drop; submit semantics are
  * unchanged (leftover pool cards are submitted as sideboard).
  */
-import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type DragEvent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from "react";
 import { BASIC_LAND_NAMES, type CardData, type DraftCard } from "@mtg-cube/shared";
 import { call } from "../socket";
 import { useApp } from "../store";
@@ -24,7 +32,7 @@ import {
 } from "../lib/cards";
 import { sideboardedInstanceIds } from "../lib/draftLanes";
 import { useBasicLandCards } from "../lib/basicLands";
-import { Card, useCardPreview } from "../components/Card";
+import { Card, CardBack, useCardPreview } from "../components/Card";
 import { CardGrid } from "../components/CardGrid";
 import { CurveChart } from "../components/CurveChart";
 import { ColorSplit } from "../components/PicksRail";
@@ -76,6 +84,139 @@ function stackEntries(list: DraftCard[], cards: Record<string, CardData>): Stack
     entry.instances.push(dc);
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Deck-strip resize (mirrors the draft tray's PicksTray mechanics — the tray's
+// clamp/min live in PicksTray.tsx with its own exports and a different min, so
+// the tiny helpers are mirrored here rather than entangling the two screens)
+// ---------------------------------------------------------------------------
+
+const STRIP_PREFS_KEY = "mtg-cube-deckstrip";
+const STRIP_MIN_H = 140;
+const stripMaxH = (): number => Math.round(window.innerHeight * 0.65);
+const clampStripH = (h: number): number => Math.max(STRIP_MIN_H, Math.min(stripMaxH(), Math.round(h)));
+
+interface StripPrefs {
+  h: number;
+  min: boolean;
+}
+
+const DEFAULT_STRIP_PREFS: StripPrefs = { h: 300, min: false };
+
+function loadStripPrefs(): StripPrefs {
+  try {
+    const raw = localStorage.getItem(STRIP_PREFS_KEY);
+    if (!raw) return DEFAULT_STRIP_PREFS;
+    const p = JSON.parse(raw) as Partial<StripPrefs> | null;
+    if (!p || typeof p !== "object") return DEFAULT_STRIP_PREFS;
+    return {
+      h: typeof p.h === "number" && Number.isFinite(p.h) ? clampStripH(p.h) : DEFAULT_STRIP_PREFS.h,
+      min: p.min === true,
+    };
+  } catch {
+    return DEFAULT_STRIP_PREFS;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Arena-style deck banner (deck-box art + count + inline mini curve)
+// ---------------------------------------------------------------------------
+
+/** Fanned trio of card backs (pure SVG) — the Arena sideboard chip icon. */
+function FannedCardsIcon({ className = "" }: { className?: string }): JSX.Element {
+  return (
+    <svg viewBox="0 0 22 16" className={className} aria-hidden="true">
+      <rect x="2" y="3.5" width="8" height="11" rx="1.4" transform="rotate(-14 6 9)" className="fill-felt-800 stroke-amber-300/60" strokeWidth="0.8" />
+      <rect x="7" y="2.5" width="8" height="11.5" rx="1.4" transform="rotate(-2 11 8)" className="fill-felt-700 stroke-amber-300/80" strokeWidth="0.8" />
+      <rect x="12" y="2" width="8" height="12" rx="1.4" transform="rotate(10 16 8)" className="fill-felt-600 stroke-amber-300" strokeWidth="0.8" />
+    </svg>
+  );
+}
+
+/** 7 compact vertical bars (costs 0–6+), Arena banner style: no axes. */
+function MiniCurve({ counts }: { counts: number[] }): JSX.Element {
+  const max = Math.max(1, ...counts);
+  return (
+    <div className="flex h-8 shrink-0 items-end gap-[3px] px-1" aria-label="Mana curve">
+      {counts.map((n, i) => {
+        const label = i >= 6 ? "6+" : String(i);
+        const h = n > 0 ? Math.max(5, Math.round((n / max) * 30)) : 2;
+        return (
+          <div
+            key={label}
+            className="flex h-full w-[7px] items-end"
+            title={`${n} card${n === 1 ? "" : "s"} at cost ${label}`}
+          >
+            <div
+              className={`w-full rounded-sm transition-all duration-300 ${
+                n > 0
+                  ? "bg-gradient-to-t from-amber-700 via-brass-400 to-amber-100 shadow-[0_0_5px_rgba(251,191,36,0.4)]"
+                  : "bg-white/10"
+              }`}
+              style={{ height: h }}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DeckBanner({
+  thumbSrc,
+  thumbName,
+  spellCount,
+  landsCount,
+  deckCount,
+  curve,
+  compact = false,
+}: {
+  thumbSrc: string | undefined;
+  thumbName: string | undefined;
+  spellCount: number;
+  landsCount: number;
+  deckCount: number;
+  /** 7 buckets, costs 0..6+. */
+  curve: number[];
+  compact?: boolean;
+}): JSX.Element {
+  const under = deckCount < 40;
+  return (
+    <div
+      className={`flex shrink-0 items-center rounded-xl border border-brass-400/30 bg-gradient-to-r from-brass-400/[0.16] via-amber-300/[0.06] to-transparent shadow-[inset_0_1px_0_rgba(255,221,150,0.14)] ${
+        compact ? "gap-2 px-1.5 py-0.5" : "gap-2.5 px-2 py-1"
+      }`}
+    >
+      <div
+        className={`shrink-0 overflow-hidden rounded-md border border-brass-400/40 shadow-card transition-transform duration-200 hover:-rotate-3 hover:scale-110 ${
+          compact ? "h-7 w-7" : "h-10 w-10"
+        }`}
+        title={thumbName}
+      >
+        {thumbSrc ? (
+          <img src={thumbSrc} alt="" draggable={false} className="h-full w-full object-cover object-[center_18%]" />
+        ) : (
+          <CardBack />
+        )}
+      </div>
+      <div className="min-w-0">
+        <div className={`font-black uppercase leading-tight tracking-wider text-brass-300 ${compact ? "text-[9px]" : "text-[10px]"}`}>
+          Deck
+        </div>
+        <div
+          key={deckCount}
+          className={`animate-count-pop whitespace-nowrap font-bold tabular-nums leading-tight ${
+            compact ? "text-[11px]" : "text-xs"
+          } ${under ? "text-red-300" : "text-emerald-300"}`}
+          title={under ? "Main deck count including lands — add more cards" : "Main deck count including lands"}
+        >
+          {spellCount} + {landsCount} lands / 40
+        </div>
+      </div>
+      {!compact && <MiniCurve counts={curve} />}
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +277,7 @@ function StackColumn({
         if (id) onDropCard(id);
       }}
     >
-      <div className="flex h-4 shrink-0 items-center gap-1 px-0.5">{header}</div>
+      <div className="flex h-5 shrink-0 items-center gap-1 px-0.5">{header}</div>
       <div className="scrollbar-slim min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-1 pt-1">
         {entries.length === 0 && !footer ? (
           <div
@@ -208,6 +349,32 @@ export function Deckbuild(): JSX.Element {
 
   // Deck-strip drag highlight, keyed per column.
   const [dragCol, setDragCol] = useState<string | null>(null);
+
+  // Deck-strip size prefs (drag-resizable like the draft picks tray).
+  const [stripPrefs, setStripPrefs] = useState<StripPrefs>(loadStripPrefs);
+  useEffect(() => {
+    try {
+      localStorage.setItem(STRIP_PREFS_KEY, JSON.stringify(stripPrefs));
+    } catch {
+      // localStorage unavailable — prefs just won't survive reloads.
+    }
+  }, [stripPrefs]);
+
+  const startStripResize = (e: ReactMouseEvent<HTMLDivElement>): void => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startH = stripPrefs.h;
+    const onMove = (ev: MouseEvent): void =>
+      setStripPrefs((p) => ({ ...p, h: clampStripH(startH + (startY - ev.clientY)) }));
+    const onUp = (): void => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+    };
+    document.body.style.cursor = "row-resize";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
 
   const cards = useCardData(useMemo(() => picks.map((p) => p.cardId), [picks]));
 
@@ -371,6 +538,46 @@ export function Deckbuild(): JSX.Element {
     }
     return counts;
   })();
+
+  // Deck banner: 7-bucket mini curve (costs 6 and 7+ merge into "6+") and
+  // deck-box art from the highest-mana-value main-deck card with an image.
+  const curve7 = [...curveCounts.slice(0, 6), (curveCounts[6] ?? 0) + (curveCounts[7] ?? 0)];
+  let thumbData: CardData | undefined;
+  for (const dc of main) {
+    const d = cards[dc.cardId];
+    if (!d || (!d.imageSmall && !d.imageNormal)) continue;
+    if (!thumbData || (d.cmc ?? 0) > (thumbData.cmc ?? 0)) thumbData = d;
+  }
+
+  // Strip sizing: column card width scales with strip height (like the draft
+  // tray) — the height is clamped at render too, in case the window shrank.
+  const stripH = clampStripH(stripPrefs.h);
+  const laneH = Math.max(40, stripH - 96);
+  const cardW = Math.max(66, Math.min(240, Math.round((laneH * 0.85 * 5) / 7)));
+  const landsW = Math.max(128, cardW + 24);
+
+  const stripHandle = (
+    <div
+      className="group flex h-3.5 w-full shrink-0 cursor-row-resize items-center justify-center"
+      onMouseDown={stripPrefs.min ? undefined : startStripResize}
+      onDoubleClick={() => setStripPrefs((p) => ({ ...p, min: !p.min }))}
+      title="Drag to resize · double-click to minimize"
+    >
+      <div className="h-1 w-20 rounded-full bg-white/15 transition-colors duration-150 group-hover:bg-brass-400/70" />
+    </div>
+  );
+
+  const deckBanner = (compact: boolean): JSX.Element => (
+    <DeckBanner
+      thumbSrc={thumbData?.imageSmall ?? thumbData?.imageNormal}
+      thumbName={thumbData?.name}
+      spellCount={mainSpells.length}
+      landsCount={landsCount}
+      deckCount={deckCount}
+      curve={curve7}
+      compact={compact}
+    />
+  );
 
   const myLiveMatch = room.matches.find((m) => !m.finished && m.playerIds.includes(me.playerId));
 
@@ -546,7 +753,8 @@ export function Deckbuild(): JSX.Element {
             {/* Pool grid */}
             <div className="scrollbar-slim min-h-0 flex-1 overflow-y-auto p-3">
               {pool.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-amber-100/15 py-10 text-center text-xs text-zinc-400">
+                <div className="rounded-xl border border-dashed border-amber-100/15 py-8 text-center text-xs text-zinc-400">
+                  <FannedCardsIcon className="mx-auto mb-2 h-12 w-[4.125rem] opacity-60" />
                   Your deck starts fully built from the draft — click or drag cards out of it and your cuts land here.
                 </div>
               ) : shownPool.length === 0 ? (
@@ -572,84 +780,118 @@ export function Deckbuild(): JSX.Element {
             </div>
           </section>
 
-          {/* Deck strip */}
-          <section
-            className="panel flex h-[34vh] min-h-[13rem] shrink-0 flex-col"
-            onDragOver={allowDrag}
-            onDrop={(e) => {
-              e.preventDefault();
-              const id = e.dataTransfer.getData(DRAG_MIME);
-              if (id) moveTo(id, "main");
-            }}
-          >
-            <div className="flex shrink-0 flex-wrap items-center gap-2 px-3 pb-1 pt-2">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Deck</span>
-              <span
-                className={`rounded-md px-2 py-0.5 text-xs font-bold tabular-nums ${
-                  deckCount < 40 ? "bg-red-500/15 text-red-300" : "bg-emerald-500/15 text-emerald-300"
-                }`}
-                title="Main deck count including lands"
-              >
-                {mainSpells.length} + {landsCount} lands / 40{deckCount < 40 ? " — add more cards" : ""}
-              </span>
-              <span className="hidden text-[10px] text-zinc-600 md:inline">
-                click a card to return it to the pool · drag between deck, lands and sideboard
-              </span>
-            </div>
-            <div className="scrollbar-slim flex min-h-0 flex-1 gap-1.5 overflow-x-auto px-3 pb-2">
-              {DECK_BUCKETS.map((bucket) => (
+          {/* Deck strip (drag the top handle to resize, double-click to minimize) */}
+          {stripPrefs.min ? (
+            <section
+              className="panel deck-glow shrink-0 animate-fade-in"
+              onDragOver={allowDrag}
+              onDrop={(e) => {
+                e.preventDefault();
+                const id = e.dataTransfer.getData(DRAG_MIME);
+                if (id) moveTo(id, "main");
+              }}
+            >
+              {stripHandle}
+              <div className="scrollbar-slim flex items-center gap-2 overflow-x-auto px-3 pb-2">
+                {deckBanner(true)}
+                {DECK_BUCKETS.map((bucket) => {
+                  const n = (bucketEntries.get(bucket) ?? []).reduce((a, e) => a + e.instances.length, 0);
+                  if (n === 0) return null;
+                  return (
+                    <span key={bucket} className="chip shrink-0">
+                      mv {bucket} · {n}
+                    </span>
+                  );
+                })}
+                <span className="chip shrink-0">Lands · {landsCount}</span>
+                {side.length > 0 && (
+                  <span className="chip shrink-0 border-amber-400/40 text-amber-300">Sideboard · {side.length}</span>
+                )}
+                <div className="flex-1" />
+                <button
+                  type="button"
+                  className="btn-ghost shrink-0 !px-2 !py-0.5 !text-[10px]"
+                  onClick={() => setStripPrefs((p) => ({ ...p, min: false }))}
+                  title="Expand the deck strip"
+                >
+                  Expand
+                </button>
+              </div>
+            </section>
+          ) : (
+            <section
+              className="panel deck-glow flex shrink-0 flex-col overflow-hidden"
+              style={{ height: stripH }}
+              onDragOver={allowDrag}
+              onDrop={(e) => {
+                e.preventDefault();
+                const id = e.dataTransfer.getData(DRAG_MIME);
+                if (id) moveTo(id, "main");
+              }}
+            >
+              {stripHandle}
+              <div className="flex shrink-0 flex-wrap items-center gap-2 px-3 pb-1">
+                {deckBanner(false)}
+                <span className="hidden text-[10px] text-zinc-600 md:inline">
+                  click a card to return it to the pool · drag between deck, lands and sideboard
+                </span>
+              </div>
+              <div className="scrollbar-slim flex min-h-0 flex-1 gap-1.5 overflow-x-auto px-3 pb-2">
+                {DECK_BUCKETS.map((bucket) => (
+                  <StackColumn
+                    key={bucket}
+                    entries={bucketEntries.get(bucket) ?? []}
+                    cards={cards}
+                    width={cardW}
+                    isOver={dragCol === `cmc-${bucket}`}
+                    onHoverChange={(over) => setDragCol(over ? `cmc-${bucket}` : null)}
+                    onDropCard={(id) => moveTo(id, "main")}
+                    onEntryClick={(id) => moveTo(id, "pool")}
+                    clickTitle="Click to return to the pool"
+                    emptyLabel="empty"
+                  />
+                ))}
+                <div className="w-1 shrink-0" />
                 <StackColumn
-                  key={bucket}
-                  entries={bucketEntries.get(bucket) ?? []}
+                  entries={landEntries}
                   cards={cards}
-                  width={104}
-                  isOver={dragCol === `cmc-${bucket}`}
-                  onHoverChange={(over) => setDragCol(over ? `cmc-${bucket}` : null)}
+                  width={landsW}
+                  header={
+                    <>
+                      <span className="truncate text-[10px] font-bold uppercase tracking-wider text-zinc-400">Lands</span>
+                      <span className="text-[10px] font-semibold tabular-nums text-zinc-500">{landsCount}</span>
+                    </>
+                  }
+                  isOver={dragCol === "lands"}
+                  onHoverChange={(over) => setDragCol(over ? "lands" : null)}
                   onDropCard={(id) => moveTo(id, "main")}
                   onEntryClick={(id) => moveTo(id, "pool")}
                   clickTitle="Click to return to the pool"
-                  emptyLabel="empty"
+                  emptyLabel="lands"
+                  footer={basicsFooter}
                 />
-              ))}
-              <div className="w-1 shrink-0" />
-              <StackColumn
-                entries={landEntries}
-                cards={cards}
-                width={128}
-                header={
-                  <>
-                    <span className="truncate text-[10px] font-bold uppercase tracking-wider text-zinc-400">Lands</span>
-                    <span className="text-[10px] font-semibold tabular-nums text-zinc-500">{landsCount}</span>
-                  </>
-                }
-                isOver={dragCol === "lands"}
-                onHoverChange={(over) => setDragCol(over ? "lands" : null)}
-                onDropCard={(id) => moveTo(id, "main")}
-                onEntryClick={(id) => moveTo(id, "pool")}
-                clickTitle="Click to return to the pool"
-                emptyLabel="lands"
-                footer={basicsFooter}
-              />
-              <StackColumn
-                entries={sideEntries}
-                cards={cards}
-                width={104}
-                accent
-                header={
-                  <>
-                    <span className="truncate text-[10px] font-bold uppercase tracking-wider text-amber-300">Sideboard</span>
-                    <span className="text-[10px] font-semibold tabular-nums text-zinc-500">{side.length}</span>
-                  </>
-                }
-                isOver={dragCol === "side"}
-                onHoverChange={(over) => setDragCol(over ? "side" : null)}
-                onDropCard={(id) => moveTo(id, "side")}
-                onEntryClick={(id) => moveTo(id, "pool")}
-                clickTitle="Click to return to the pool"
-                emptyLabel="side"
-              />
-            </div>
-          </section>
+                <StackColumn
+                  entries={sideEntries}
+                  cards={cards}
+                  width={cardW}
+                  accent
+                  header={
+                    <span className="flex min-w-0 items-center gap-1 rounded-md border border-amber-400/30 bg-gradient-to-r from-amber-400/20 to-transparent px-1.5 py-px">
+                      <FannedCardsIcon className="h-3 w-4 shrink-0" />
+                      <span className="truncate text-[9px] font-bold uppercase tracking-wider text-amber-300">Sideboard</span>
+                      <span className="text-[9px] font-semibold tabular-nums text-amber-200/80">{side.length}</span>
+                    </span>
+                  }
+                  isOver={dragCol === "side"}
+                  onHoverChange={(over) => setDragCol(over ? "side" : null)}
+                  onDropCard={(id) => moveTo(id, "side")}
+                  onEntryClick={(id) => moveTo(id, "pool")}
+                  clickTitle="Click to return to the pool"
+                  emptyLabel="side"
+                />
+              </div>
+            </section>
+          )}
         </main>
 
         {/* Right rail */}
@@ -662,7 +904,7 @@ export function Deckbuild(): JSX.Element {
             </div>
             <button
               type="button"
-              className="btn-gold w-full"
+              className={`btn-gold w-full ${deckCount >= 40 && !submitted && !submitting ? "animate-glow-pulse" : ""}`}
               disabled={submitting || main.length === 0}
               onClick={() => void submitDeck()}
             >
