@@ -33,11 +33,11 @@ ENV NODE_ENV=production \
 COPY --from=builder /app/apps/server/dist/ apps/server/dist/
 COPY --from=builder /app/apps/web/dist/ apps/web/dist/
 
-# Pre-create the data dir so the non-root "node" user can write the database.
-RUN mkdir -p /app/data && chown node:node /app/data
-
-# Run as the non-root "node" user shipped with the official image.
-USER node
+# Pre-create the data dir. Platform volumes (Railway/Fly) mount OVER this dir
+# as root, so ownership must be fixed at RUNTIME, not build time: the container
+# starts as root, chowns the mount, then drops to the non-root "node" user via
+# su-exec for the actual server process.
+RUN mkdir -p /app/data && chown node:node /app/data && apk add --no-cache su-exec
 
 EXPOSE 3001
 
@@ -45,4 +45,4 @@ EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -q -O /dev/null http://127.0.0.1:3001/health || exit 1
 
-CMD ["node", "apps/server/dist/index.js"]
+CMD ["/bin/sh", "-c", "chown -R node:node /app/data && exec su-exec node node apps/server/dist/index.js"]
