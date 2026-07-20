@@ -1,0 +1,33 @@
+# Fly.io config for mtg-cube.
+# Replace the app name below after `fly launch --no-deploy` (or keep it if free).
+app = "mtg-cube"
+primary_region = "iad" # pick a region near your players: https://fly.io/docs/reference/regions/
+
+[build]
+  # Builds from the multi-stage Dockerfile at the repo root.
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  SERVE_STATIC_DIR = "/app/apps/web/dist"
+  PORT = "3001"
+
+[http_service]
+  internal_port = 3001
+  force_https = true
+  # Game state is in-memory: the machine must NOT sleep or games are lost.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  # Smallest paid tier is plenty; bump memory if you host many concurrent rooms.
+  size = "shared-cpu-1x"
+  memory = "512mb"

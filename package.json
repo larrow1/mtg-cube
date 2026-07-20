@@ -13,9 +13,12 @@
     "dev:web": "npm run dev --workspace=@mtg-cube/web",
     "test": "npm run test --workspace=@mtg-cube/shared",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "build": "npm run build --workspace=@mtg-cube/web"
+    "build": "npm run build --workspace=@mtg-cube/web",
+    "build:prod": "npm run build --workspace=@mtg-cube/web && npm run build --workspace=@mtg-cube/server",
+    "start:prod": "cross-env SERVE_STATIC_DIR=apps/web/dist node apps/server/dist/index.js"
   },
   "devDependencies": {
+    "cross-env": "^7.0.3",
     "npm-run-all": "^4.1.5",
     "typescript": "^5.6.0"
   }

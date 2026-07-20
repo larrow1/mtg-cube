@@ -4,16 +4,26 @@
 import { io, type Socket } from "socket.io-client";
 import type { Ack, ClientToServerEvents, ServerToClientEvents } from "@mtg-cube/shared";
 
-const SERVER_URL: string = import.meta.env.VITE_SERVER_URL ?? "http://localhost:3001";
+/**
+ * Server URL resolution:
+ * - VITE_SERVER_URL always wins when set (dev or prod).
+ * - Dev builds fall back to the standalone dev server on localhost:3001.
+ * - Production builds connect same-origin (the Node server serves both the
+ *   static client and Socket.IO on one port).
+ */
+const SERVER_URL: string | undefined =
+  import.meta.env.VITE_SERVER_URL ?? (import.meta.env.DEV ? "http://localhost:3001" : undefined);
 
 export type AppSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
-export const socket: AppSocket = io(SERVER_URL, {
+const socketOptions = {
   autoConnect: true,
   reconnection: true,
   reconnectionDelay: 500,
   reconnectionDelayMax: 4000,
-});
+};
+
+export const socket: AppSocket = SERVER_URL ? io(SERVER_URL, socketOptions) : io(socketOptions);
 
 type C2S = ClientToServerEvents;
 

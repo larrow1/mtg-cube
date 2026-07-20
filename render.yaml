@@ -1,0 +1,17 @@
+# Render Blueprint for mtg-cube (https://render.com/docs/blueprint-spec).
+# Deploy via "New > Blueprint" in the Render dashboard, pointed at this repo.
+services:
+  - type: web
+    name: mtg-cube
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    # Free plan spins down on idle and would drop in-memory games — use starter+.
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SERVE_STATIC_DIR
+        value: /app/apps/web/dist
+      - key: PORT
+        value: "3001"
