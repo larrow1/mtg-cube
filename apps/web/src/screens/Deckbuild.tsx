@@ -23,7 +23,8 @@ import {
   type ColorBucket,
 } from "../lib/cards";
 import { sideboardedInstanceIds } from "../lib/draftLanes";
-import { Card } from "../components/Card";
+import { useBasicLandCards } from "../lib/basicLands";
+import { Card, useCardPreview } from "../components/Card";
 import { CardGrid } from "../components/CardGrid";
 import { CurveChart } from "../components/CurveChart";
 import { ColorSplit } from "../components/PicksRail";
@@ -194,6 +195,8 @@ export function Deckbuild(): JSX.Element {
 
   const [assignment, setAssignment] = useState<Record<string, DeckZone>>({});
   const [basics, setBasics] = useState<Record<string, number>>({});
+  const basicCards = useBasicLandCards();
+  const { showPreview, clearPreview } = useCardPreview();
   const [submitting, setSubmitting] = useState(false);
   const [pairA, setPairA] = useState("");
   const [pairB, setPairB] = useState("");
@@ -378,6 +381,7 @@ export function Deckbuild(): JSX.Element {
       {BASIC_LAND_NAMES.map((name) => {
         const n = basics[name] ?? 0;
         const sym = BASIC_COLORS[name] ?? "C";
+        const landCard = basicCards[name];
         return (
           <div
             key={name}
@@ -386,9 +390,26 @@ export function Deckbuild(): JSX.Element {
             }`}
             title={name}
           >
-            <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-black shadow-card ${manaPipClasses(sym)}`}>
-              {sym}
-            </span>
+            {landCard?.imageSmall ? (
+              <img
+                src={landCard.imageSmall}
+                alt={name}
+                loading="lazy"
+                draggable={false}
+                className={`h-9 w-[26px] shrink-0 cursor-zoom-in rounded-[3px] object-cover shadow-card transition-all duration-150 hover:-translate-y-0.5 ${
+                  n > 0 ? "" : "opacity-45 saturate-50"
+                }`}
+                onMouseEnter={(e) => {
+                  const r = e.currentTarget.getBoundingClientRect();
+                  showPreview(landCard, { left: r.left, right: r.right, top: r.top, bottom: r.bottom });
+                }}
+                onMouseLeave={clearPreview}
+              />
+            ) : (
+              <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-black shadow-card ${manaPipClasses(sym)}`}>
+                {sym}
+              </span>
+            )}
             <span className={`min-w-6 text-center text-xs font-bold tabular-nums ${n > 0 ? "text-zinc-100" : "text-zinc-600"}`}>
               x{n}
             </span>
