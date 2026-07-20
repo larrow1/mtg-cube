@@ -15,6 +15,7 @@ import type { ClientToServerEvents, ServerToClientEvents } from "@mtg-cube/share
 import { getDb } from "./db.js";
 import { registerHandlers } from "./handlers.js";
 import type { SocketData } from "./handlers.js";
+import { ensureDefaultCube } from "./defaultCube.js";
 import { cleanupRankedRoom, initMatchmaking } from "./matchmaking.js";
 import { Room } from "./room.js";
 import { preloadBasicLands } from "./scryfall.js";
@@ -91,6 +92,12 @@ preloadBasicLands()
   .catch((err: unknown) => {
     console.warn("Basic land preload failed; using hardcoded fallbacks:", err);
   });
+
+// Seed the default system cube at boot so the admin portal and ranked pool
+// are never empty on a fresh database (also runs lazily before matchmaking).
+ensureDefaultCube()
+  .then((cube) => console.log(`Default system cube ready: "${cube.name}" (${cube.card_count} cards)`))
+  .catch((err: unknown) => console.warn("Default cube seed failed (will retry on demand):", err));
 
 server.listen(PORT, () => {
   console.log(`mtg-cube server listening on http://localhost:${PORT}`);
