@@ -1,0 +1,1077 @@
+/**
+ * Game board: opponent zone (face-down hand fan, battlefield rows), shared
+ * middle strip (stack, phase ribbon), your battlefield rows + hand fan, side
+ * rail (life/poison/mana/piles/log). Every interaction is exactly one
+ * `gameAction` emit — no optimistic local mutation; rejected actions toast.
+ */
+import { useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
+import type { CardData, GameAction, GameCard, GameView, PlayerGameState, ZoneName } from "@mtg-cube/shared";
+import { call } from "../socket";
+import { useApp } from "../store";
+import { classifyRow, nameOf, randomSeed, type RowKind } from "../lib/cards";
+import { Card, CardBack } from "../components/Card";
+import { ContextMenu, type ContextMenuState, type MenuItem } from "../components/ContextMenu";
+import { Modal } from "../components/Modal";
+import { LifeCounter } from "../components/LifeCounter";
+import { ManaPool } from "../components/ManaPool";
+import { PhaseRibbon } from "../components/PhaseRibbon";
+import { StackPanel } from "../components/StackPanel";
+import { ZonePile } from "../components/ZonePile";
+
+// ---------------------------------------------------------------------------
+// Local (non-authoritative) per-game memory: mulligan bookkeeping only.
+// ---------------------------------------------------------------------------
+
+interface MullMemory {
+  kept: boolean;
+  mulls: number;
+}
+
+const mullMemory = new Map<string, MullMemory>();
+
+function gameEpochKey(view: GameView): string {
+  return `${view.gameId}:${view.state.log[0]?.ts ?? 0}`;
+}
+
+function getMull(view: GameView): MullMemory {
+  const key = gameEpochKey(view);
+  let m = mullMemory.get(key);
+  if (!m) {
+    m = { kept: false, mulls: 0 };
+    mullMemory.set(key, m);
+  }
+  return m;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function sortRow(cards: GameCard[]): GameCard[] {
+  return [...cards].sort((a, b) => a.sortIndex - b.sortIndex || a.instanceId.localeCompare(b.instanceId));
+}
+
+function splitRows(battlefield: GameCard[], cards: Record<string, CardData>): Record<RowKind, GameCard[]> {
+  const rows: Record<RowKind, GameCard[]> = { lands: [], creatures: [], other: [] };
+  for (const gc of battlefield) rows[classifyRow(gc, cards[gc.cardId])].push(gc);
+  rows.lands = sortRow(rows.lands);
+  rows.creatures = sortRow(rows.creatures);
+  rows.other = sortRow(rows.other);
+  return rows;
+}
+
+interface DragPayload {
+  instanceId: string;
+  from: ZoneName;
+}
+
+function setDragPayload(e: DragEvent, payload: DragPayload): void {
+  e.dataTransfer.setData("text/plain", JSON.stringify(payload));
+  e.dataTransfer.effectAllowed = "move";
+}
+
+function readDragPayload(e: DragEvent): DragPayload | null {
+  try {
+    const raw = e.dataTransfer.getData("text/plain");
+    if (!raw) return null;
+    const p = JSON.parse(raw) as Partial<DragPayload>;
+    if (typeof p.instanceId === "string" && typeof p.from === "string") {
+      return { instanceId: p.instanceId, from: p.from as ZoneName };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Screen
+// ---------------------------------------------------------------------------
+
+export function Game(): JSX.Element {
+  const { state, dispatch, pushToast } = useApp();
+  const view = state.game;
+  const room = state.room;
+  const session = state.session;
+
+  const [menu, setMenu] = useState<ContextMenuState | null>(null);
+  const [selectedHand, setSelectedHand] = useState<string | null>(null);
+  const [browse, setBrowse] = useState<{ playerId: string; zone: "graveyard" | "exile" } | null>(null);
+  const [tokenOpen, setTokenOpen] = useState(false);
+  const [scryCount, setScryCount] = useState<number | null>(null);
+  const [concedeOpen, setConcedeOpen] = useState(false);
+  const [londonOpen, setLondonOpen] = useState(false);
+  const [attachSource, setAttachSource] = useState<string | null>(null);
+  const [blockSource, setBlockSource] = useState<string | null>(null);
+  const [logOpen, setLogOpen] = useState(true);
+  const [, forceRender] = useState(0);
+
+  // Esc cancels attach/block targeting modes and the hand selection.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") {
+        setAttachSource(null);
+        setBlockSource(null);
+        setSelectedHand(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const matchId = useMemo(() => {
+    if (!view) return "";
+    const active = room?.matches.find(
+      (m) => !m.finished && session != null && m.playerIds.includes(session.playerId)
+    );
+    return active?.id ?? view.gameId;
+  }, [room, session, view]);
+
+  if (!view || !session) {
+    return (
+      <div className="flex min-h-full items-center justify-center">
+        <div className="panel px-6 py-4 text-sm text-zinc-400">Loading game…</div>
+      </div>
+    );
+  }
+
+  const gs = view.state;
+  const cards = view.cards;
+  const [p0, p1] = gs.players;
+  const viewerIsPlayer = p0.playerId === session.playerId || p1.playerId === session.playerId;
+  const me: PlayerGameState = p0.playerId === session.playerId ? p0 : p1.playerId === session.playerId ? p1 : p1;
+  const opp: PlayerGameState = me === p0 ? p1 : p0;
+
+  const nameFor = (playerId: string): string =>
+    room?.players.find((p) => p.id === playerId)?.name ?? (playerId === session.playerId ? session.name : "Opponent");
+
+  const isMyTurn = gs.activePlayerId === me.playerId && viewerIsPlayer;
+  const haveIPriority = gs.priorityPlayerId === me.playerId && viewerIsPlayer;
+  const canAct = viewerIsPlayer && !gs.finished;
+  const canAttackToggle = canAct && isMyTurn && (gs.step === "declareAttackers" || gs.step === "beginCombat");
+  const canBlockToggle = canAct && !isMyTurn && (gs.step === "declareBlockers" || gs.step === "combatDamage");
+
+  const send = (action: GameAction): void => {
+    if (!viewerIsPlayer) {
+      pushToast("Spectators cannot act", "info");
+      return;
+    }
+    void call("gameAction", { matchId, action }).then((r) => {
+      if (!r.ok) pushToast(r.error ?? "Action rejected");
+    });
+  };
+
+  const openMenu = (e: ReactMouseEvent, items: MenuItem[]): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (items.length > 0) setMenu({ x: e.clientX, y: e.clientY, items });
+  };
+
+  // All permanents by instanceId, for attachment-name lookups.
+  const permanents = new Map<string, GameCard>();
+  for (const p of gs.players) for (const gc of p.zones.battlefield) permanents.set(gc.instanceId, gc);
+
+  const attachedNameOf = (gc: GameCard): string | undefined => {
+    if (!gc.attachedTo) return undefined;
+    const target = permanents.get(gc.attachedTo);
+    return target ? nameOf(target, cards[target.cardId]) : undefined;
+  };
+
+  // -------------------------------------------------------------------------
+  // Context-menu builders (my cards only — opponent cards are untouchable v1)
+  // -------------------------------------------------------------------------
+
+  const counterMenuItems = (gc: GameCard): MenuItem[] => {
+    const items: MenuItem[] = [{ label: "Counters", heading: true, separator: true }];
+    const types = new Set<string>(["+1/+1", "charge"]);
+    const data = cards[gc.cardId];
+    if (data?.typeLine.includes("Planeswalker") || gc.tokenTypeLine?.includes("Planeswalker")) types.add("loyalty");
+    for (const t of Object.keys(gc.counters)) types.add(t);
+    for (const t of types) {
+      const cur = gc.counters[t] ?? 0;
+      items.push({
+        label: `${t}: ${cur}  (+1)`,
+        onClick: () => send({ type: "setCounters", instanceId: gc.instanceId, counterType: t, count: cur + 1 }),
+      });
+      if (cur > 0) {
+        items.push({
+          label: `${t}: ${cur}  (−1)`,
+          onClick: () => send({ type: "setCounters", instanceId: gc.instanceId, counterType: t, count: cur - 1 }),
+        });
+      }
+    }
+    return items;
+  };
+
+  const moveMenuItems = (gc: GameCard, from: ZoneName, skip: ZoneName[] = []): MenuItem[] => {
+    const items: MenuItem[] = [{ label: "Move to", heading: true, separator: true }];
+    const targets: { zone: ZoneName; label: string; toBottom?: boolean }[] = [
+      { zone: "hand", label: "Hand" },
+      { zone: "battlefield", label: "Battlefield" },
+      { zone: "graveyard", label: "Graveyard" },
+      { zone: "exile", label: "Exile" },
+      { zone: "library", label: "Top of library" },
+      { zone: "library", label: "Bottom of library", toBottom: true },
+    ];
+    for (const t of targets) {
+      if (t.zone === from && t.zone !== "library") continue;
+      if (skip.includes(t.zone) && !t.toBottom) continue;
+      items.push({
+        label: t.label,
+        onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from, to: t.zone, toBottom: t.toBottom }),
+      });
+    }
+    return items;
+  };
+
+  const battlefieldMenu = (gc: GameCard): MenuItem[] => {
+    const data = cards[gc.cardId];
+    const items: MenuItem[] = [
+      {
+        label: gc.tapped ? "Untap" : "Tap",
+        onClick: () => send({ type: "tapCard", instanceId: gc.instanceId, tapped: !gc.tapped }),
+      },
+    ];
+    if (canAttackToggle) {
+      items.push({
+        label: gc.attacking ? "Remove from combat" : "Attack",
+        onClick: () => send({ type: "setAttacking", instanceId: gc.instanceId, attacking: !gc.attacking }),
+      });
+    }
+    if (canBlockToggle) {
+      if (gc.blocking) {
+        items.push({
+          label: "Stop blocking",
+          onClick: () => send({ type: "setBlocking", instanceId: gc.instanceId, blocking: null }),
+        });
+      } else {
+        items.push({ label: "Block… (then click an attacker)", onClick: () => setBlockSource(gc.instanceId) });
+      }
+    }
+    if (data?.faces && data.faces.length > 1) {
+      items.push({
+        label: "Flip / transform",
+        onClick: () => send({ type: "flipCard", instanceId: gc.instanceId, faceIndex: (gc.faceIndex + 1) % (data.faces?.length ?? 2) }),
+      });
+    }
+    items.push({
+      label: gc.faceDown ? "Turn face up" : "Turn face down",
+      onClick: () =>
+        send({ type: "moveCard", instanceId: gc.instanceId, from: "battlefield", to: "battlefield", faceDown: !gc.faceDown }),
+    });
+    items.push({
+      label: gc.attachedTo ? "Unattach" : "Attach to… (then click a permanent)",
+      onClick: () => {
+        if (gc.attachedTo) send({ type: "attach", instanceId: gc.instanceId, targetInstanceId: null });
+        else setAttachSource(gc.instanceId);
+      },
+    });
+    items.push(...counterMenuItems(gc));
+    items.push({ label: "Damage", heading: true, separator: true });
+    items.push({ label: `Damage: ${gc.damage}  (+1)`, onClick: () => send({ type: "setDamage", instanceId: gc.instanceId, damage: gc.damage + 1 }) });
+    if (gc.damage > 0) {
+      items.push({ label: `Damage: ${gc.damage}  (−1)`, onClick: () => send({ type: "setDamage", instanceId: gc.instanceId, damage: gc.damage - 1 }) });
+      items.push({ label: "Clear damage", onClick: () => send({ type: "setDamage", instanceId: gc.instanceId, damage: 0 }) });
+    }
+    items.push(...moveMenuItems(gc, "battlefield"));
+    return items;
+  };
+
+  const handMenu = (gc: GameCard): MenuItem[] => [
+    { label: "Play to battlefield", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "battlefield" }) },
+    { label: "Play face down", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "battlefield", faceDown: true }) },
+    { label: "Cast (put on stack)", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "stack" }) },
+    { label: "Discard", separator: true, onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "graveyard" }) },
+    { label: "Exile", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "exile" }) },
+    { label: "Top of library", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "library" }) },
+    { label: "Bottom of library", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "library", toBottom: true }) },
+  ];
+
+  const libraryMenu = (): MenuItem[] => {
+    const top = me.zones.library[0];
+    const items: MenuItem[] = [
+      { label: "Draw 1", onClick: () => send({ type: "drawCard", count: 1 }) },
+      { label: "Draw 7", onClick: () => send({ type: "drawCard", count: 7 }) },
+      { label: "Shuffle", onClick: () => send({ type: "shuffleLibrary" }) },
+    ];
+    items.push({ label: "Scry", heading: true, separator: true });
+    for (const n of [1, 2, 3, 5]) {
+      items.push({
+        label: `Scry ${n}`,
+        disabled: me.zones.library.length === 0,
+        onClick: () => {
+          send({ type: "scry", count: n });
+          setScryCount(Math.min(n, me.zones.library.length));
+        },
+      });
+    }
+    if (top) {
+      items.push({
+        label: "Mill top card",
+        separator: true,
+        onClick: () => send({ type: "moveCard", instanceId: top.instanceId, from: "library", to: "graveyard" }),
+      });
+    }
+    return items;
+  };
+
+  const browsePileMenu = (gc: GameCard, zone: "graveyard" | "exile"): MenuItem[] => moveMenuItems(gc, zone);
+
+  // -------------------------------------------------------------------------
+  // Click handlers
+  // -------------------------------------------------------------------------
+
+  const clickMyBattlefieldCard = (gc: GameCard): void => {
+    if (!canAct) return;
+    if (attachSource) {
+      if (attachSource !== gc.instanceId) {
+        send({ type: "attach", instanceId: attachSource, targetInstanceId: gc.instanceId });
+      }
+      setAttachSource(null);
+      return;
+    }
+    send({ type: "tapCard", instanceId: gc.instanceId, tapped: !gc.tapped });
+  };
+
+  const clickOppBattlefieldCard = (gc: GameCard): void => {
+    if (blockSource && gc.attacking) {
+      send({ type: "setBlocking", instanceId: blockSource, blocking: gc.instanceId });
+      setBlockSource(null);
+    }
+  };
+
+  const lastHandPlay = useRef(0);
+  const playFromHand = (gc: GameCard): void => {
+    if (!canAct) return;
+    // After a play the fan re-lays out and another card slides under the
+    // cursor; a stray second dblclick from the same gesture must not play it.
+    if (Date.now() - lastHandPlay.current < 300) return;
+    lastHandPlay.current = Date.now();
+    const tl = (cards[gc.cardId]?.typeLine ?? "").toLowerCase();
+    const to: ZoneName = tl.includes("land") ? "battlefield" : "stack";
+    send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to });
+    setSelectedHand(null);
+  };
+
+  const dropTo = (to: ZoneName, toBottom = false) => (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const payload = readDragPayload(e);
+    if (!payload || !canAct) return;
+    if (payload.from === to && to !== "library") return;
+    send({ type: "moveCard", instanceId: payload.instanceId, from: payload.from, to, toBottom: toBottom || undefined });
+  };
+
+  // -------------------------------------------------------------------------
+  // Mulligan
+  // -------------------------------------------------------------------------
+
+  const mull = getMull(view);
+  const boardEmpty =
+    me.zones.battlefield.length === 0 &&
+    opp.zones.battlefield.length === 0 &&
+    me.zones.graveyard.length === 0 &&
+    gs.stack.length === 0;
+  const showMulligan = viewerIsPlayer && !gs.finished && gs.turnNumber === 1 && gs.step === "untap" && boardEmpty && !mull.kept;
+  const expectedBottom = Math.max(0, me.zones.hand.length - (7 - mull.mulls));
+
+  const keepHand = (): void => {
+    if (expectedBottom === 0) {
+      send({ type: "keepHand", bottomCount: 0, bottomInstanceIds: [] });
+      mull.kept = true;
+      forceRender((n) => n + 1);
+    } else {
+      setLondonOpen(true);
+    }
+  };
+
+  const takeMulligan = (): void => {
+    send({ type: "mulligan" });
+    mull.mulls += 1;
+    forceRender((n) => n + 1);
+  };
+
+  // -------------------------------------------------------------------------
+  // Rows / fans
+  // -------------------------------------------------------------------------
+
+  const myRows = splitRows(me.zones.battlefield, cards);
+  const oppRows = splitRows(opp.zones.battlefield, cards);
+  const myHand = me.zones.hand;
+  const oppHandCount = opp.zones.hand.length;
+
+  const renderRow = (rowCards: GameCard[], mine: boolean, label: string): JSX.Element => (
+    <div
+      className={`zone-row ${mine && canAct ? "hover:border-emerald-500/20" : ""}`}
+      onDragOver={mine ? (e) => e.preventDefault() : undefined}
+      onDrop={mine ? dropTo("battlefield") : undefined}
+    >
+      {rowCards.length === 0 ? (
+        <span className="self-center px-2 text-[9px] font-semibold uppercase tracking-wider text-zinc-700">{label}</span>
+      ) : (
+        rowCards.map((gc) => (
+          <Card
+            key={gc.instanceId}
+            gameCard={gc}
+            data={cards[gc.cardId]}
+            size="sm"
+            attachedName={attachedNameOf(gc)}
+            selected={attachSource === gc.instanceId || blockSource === gc.instanceId}
+            highlight={gc.attacking ? "attack" : gc.blocking ? "block" : null}
+            dimmed={!mine && blockSource !== null && !gc.attacking}
+            draggable={mine && canAct}
+            onDragStart={(e) => setDragPayload(e, { instanceId: gc.instanceId, from: "battlefield" })}
+            onClick={mine ? () => clickMyBattlefieldCard(gc) : () => clickOppBattlefieldCard(gc)}
+            onContextMenu={mine && canAct ? (e) => openMenu(e, battlefieldMenu(gc)) : (e) => e.preventDefault()}
+            className={gc.tapped ? "mx-3" : ""}
+          />
+        ))
+      )}
+    </div>
+  );
+
+  const winnerName = gs.winnerId ? nameFor(gs.winnerId) : null;
+
+  // -------------------------------------------------------------------------
+  // Render
+  // -------------------------------------------------------------------------
+
+  return (
+    <div className="mx-auto flex h-screen max-w-[120rem] flex-col gap-2 overflow-hidden p-2 lg:p-3">
+      {/* Mode hints */}
+      {(attachSource || blockSource) && (
+        <div className="fixed left-1/2 top-2 z-[60] flex -translate-x-1/2 animate-fade-in items-center gap-2 rounded-full border border-emerald-500/40 bg-felt-900 px-4 py-1.5 text-xs font-semibold text-emerald-200 shadow-card-lg">
+          {attachSource ? "Click a permanent to attach to" : "Click an attacking creature to block"}
+          <button
+            type="button"
+            className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] hover:bg-white/20"
+            onClick={() => {
+              setAttachSource(null);
+              setBlockSource(null);
+            }}
+          >
+            Cancel (Esc)
+          </button>
+        </div>
+      )}
+
+      <div className="flex min-h-0 flex-1 gap-2">
+        {/* Main board */}
+        <div className="scrollbar-slim flex min-w-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">
+          {/* Opponent hand */}
+          <div className="flex items-center justify-center gap-3 pt-1">
+            <div className="flex items-center">
+              {Array.from({ length: Math.min(oppHandCount, 10) }).map((_, i) => (
+                <div
+                  key={i}
+                  className="-ml-8 h-[72px] w-[52px] first:ml-0"
+                  style={{ transform: `rotate(${(i - (Math.min(oppHandCount, 10) - 1) / 2) * -3}deg) translateY(${Math.abs(i - (Math.min(oppHandCount, 10) - 1) / 2) * 2}px)` }}
+                >
+                  <CardBack />
+                </div>
+              ))}
+              {oppHandCount === 0 && <span className="text-[10px] uppercase tracking-wider text-zinc-700">Empty hand</span>}
+            </div>
+            <span className="chip" title="Opponent hand size">
+              {nameFor(opp.playerId)} · {oppHandCount} card{oppHandCount === 1 ? "" : "s"}
+            </span>
+          </div>
+
+          {/* Opponent battlefield (creatures nearest the middle) */}
+          <div className="space-y-1.5">
+            {renderRow(oppRows.lands, false, "opponent lands")}
+            {renderRow(oppRows.other, false, "opponent artifacts & enchantments")}
+            {renderRow(oppRows.creatures, false, "opponent creatures")}
+          </div>
+
+          {/* Middle strip */}
+          <div className="flex items-stretch gap-2">
+            <StackPanel
+              stack={gs.stack}
+              cards={cards}
+              nameFor={nameFor}
+              onResolve={() => send({ type: "resolveTopOfStack" })}
+              onCounter={() => send({ type: "counterTopOfStack" })}
+              disabled={!canAct || gs.stack.length === 0}
+            />
+            <div className="flex min-w-0 flex-1 flex-col justify-center">
+              <PhaseRibbon
+                step={gs.step}
+                turnNumber={gs.turnNumber}
+                activePlayerName={nameFor(gs.activePlayerId)}
+                isMyTurn={isMyTurn}
+                haveIPriority={haveIPriority}
+                priorityPlayerName={nameFor(gs.priorityPlayerId)}
+                finished={gs.finished}
+                onNextStep={() => send({ type: "nextStep" })}
+                onNextTurn={() => send({ type: "nextTurn" })}
+                onPassPriority={() => send({ type: "passPriority" })}
+              />
+            </div>
+          </div>
+
+          {/* My battlefield */}
+          <div className="space-y-1.5">
+            {renderRow(myRows.creatures, true, "your creatures")}
+            {renderRow(myRows.other, true, "your artifacts & enchantments")}
+            {renderRow(myRows.lands, true, "your lands")}
+          </div>
+
+          {/* My hand fan */}
+          <div
+            className="mt-auto flex min-h-[9.5rem] items-end justify-center pb-1"
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={dropTo("hand")}
+          >
+            {myHand.length === 0 ? (
+              <span className="pb-6 text-[10px] uppercase tracking-wider text-zinc-700">Your hand is empty</span>
+            ) : (
+              <div className="flex items-end">
+                {myHand.map((gc, i) => {
+                  const n = myHand.length;
+                  const angle = (i - (n - 1) / 2) * Math.min(4, 36 / n);
+                  const lift = Math.abs(i - (n - 1) / 2) * Math.min(3, 24 / n);
+                  return (
+                    <div
+                      key={gc.instanceId}
+                      className="-ml-7 transition-transform duration-150 first:ml-0 hover:z-20 hover:-translate-y-4"
+                      style={{ transform: `rotate(${angle}deg) translateY(${lift}px)`, zIndex: selectedHand === gc.instanceId ? 30 : 10 }}
+                    >
+                      <Card
+                        gameCard={gc}
+                        data={cards[gc.cardId]}
+                        size="sm"
+                        selected={selectedHand === gc.instanceId}
+                        draggable={canAct}
+                        onDragStart={(e) => setDragPayload(e, { instanceId: gc.instanceId, from: "hand" })}
+                        onClick={() => setSelectedHand((cur) => (cur === gc.instanceId ? null : gc.instanceId))}
+                        onDoubleClick={() => playFromHand(gc)}
+                        onContextMenu={canAct ? (e) => openMenu(e, handMenu(gc)) : undefined}
+                        className={selectedHand === gc.instanceId ? "-translate-y-3" : ""}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Side rail */}
+        <aside className="scrollbar-slim flex w-64 shrink-0 flex-col gap-2 overflow-y-auto">
+          {/* Opponent panel */}
+          <LifeCounter
+            name={nameFor(opp.playerId)}
+            life={opp.life}
+            poison={opp.poison}
+            connected={room?.players.find((p) => p.id === opp.playerId)?.connected ?? true}
+            isActiveTurn={gs.activePlayerId === opp.playerId}
+            hasPriority={gs.priorityPlayerId === opp.playerId}
+            hasLost={opp.hasLost}
+            editable={false}
+            onLife={() => undefined}
+            onPoison={() => undefined}
+          />
+          <ManaPool pool={opp.manaPool} editable={false} onAdd={() => undefined} onEmpty={() => undefined} />
+          <div className="flex justify-around">
+            <ZonePile label="Library" count={opp.zones.library.length} faceDown accent="emerald" />
+            <ZonePile
+              label="Graveyard"
+              count={opp.zones.graveyard.length}
+              topCard={opp.zones.graveyard[opp.zones.graveyard.length - 1]}
+              topCardData={(() => {
+                const top = opp.zones.graveyard[opp.zones.graveyard.length - 1];
+                return top ? cards[top.cardId] : undefined;
+              })()}
+              onClick={() => setBrowse({ playerId: opp.playerId, zone: "graveyard" })}
+            />
+            <ZonePile
+              label="Exile"
+              count={opp.zones.exile.length}
+              topCard={opp.zones.exile[opp.zones.exile.length - 1]}
+              topCardData={(() => {
+                const top = opp.zones.exile[opp.zones.exile.length - 1];
+                return top ? cards[top.cardId] : undefined;
+              })()}
+              accent="purple"
+              onClick={() => setBrowse({ playerId: opp.playerId, zone: "exile" })}
+            />
+          </div>
+
+          <div className="my-0.5 border-t border-white/[0.06]" />
+
+          {/* My panel */}
+          <LifeCounter
+            name={`${nameFor(me.playerId)}${viewerIsPlayer ? " (you)" : ""}`}
+            life={me.life}
+            poison={me.poison}
+            connected
+            isActiveTurn={gs.activePlayerId === me.playerId}
+            hasPriority={gs.priorityPlayerId === me.playerId}
+            hasLost={me.hasLost}
+            editable={canAct}
+            onLife={(next) => send({ type: "setLife", playerId: me.playerId, life: next })}
+            onPoison={(next) => send({ type: "setPoison", playerId: me.playerId, poison: next })}
+          />
+          <ManaPool
+            pool={me.manaPool}
+            editable={canAct}
+            onAdd={(color, amount) => send({ type: "addMana", color, amount })}
+            onEmpty={() => send({ type: "emptyManaPool" })}
+          />
+          <div className="flex justify-around">
+            <div
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={dropTo("library")}
+            >
+              <ZonePile
+                label="Library"
+                count={me.zones.library.length}
+                faceDown
+                accent="emerald"
+                onClick={canAct ? () => send({ type: "drawCard", count: 1 }) : undefined}
+                onContextMenu={canAct ? (e) => openMenu(e, libraryMenu()) : undefined}
+              />
+            </div>
+            <div onDragOver={(e) => e.preventDefault()} onDrop={dropTo("graveyard")}>
+              <ZonePile
+                label="Graveyard"
+                count={me.zones.graveyard.length}
+                topCard={me.zones.graveyard[me.zones.graveyard.length - 1]}
+                topCardData={(() => {
+                  const top = me.zones.graveyard[me.zones.graveyard.length - 1];
+                  return top ? cards[top.cardId] : undefined;
+                })()}
+                onClick={() => setBrowse({ playerId: me.playerId, zone: "graveyard" })}
+              />
+            </div>
+            <div onDragOver={(e) => e.preventDefault()} onDrop={dropTo("exile")}>
+              <ZonePile
+                label="Exile"
+                count={me.zones.exile.length}
+                topCard={me.zones.exile[me.zones.exile.length - 1]}
+                topCardData={(() => {
+                  const top = me.zones.exile[me.zones.exile.length - 1];
+                  return top ? cards[top.cardId] : undefined;
+                })()}
+                accent="purple"
+                onClick={() => setBrowse({ playerId: me.playerId, zone: "exile" })}
+              />
+            </div>
+          </div>
+
+          {/* Quick actions */}
+          <div className="grid grid-cols-2 gap-1.5">
+            <button type="button" className="btn-ghost !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => send({ type: "drawCard", count: 1 })}>
+              Draw
+            </button>
+            <button type="button" className="btn-ghost !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => send({ type: "untapAll" })}>
+              Untap all
+            </button>
+            <button type="button" className="btn-ghost !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => setTokenOpen(true)}>
+              Create token
+            </button>
+            <button type="button" className="btn-ghost !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => send({ type: "revealHand" })}>
+              Reveal hand
+            </button>
+          </div>
+          <button type="button" className="btn-danger w-full !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => setConcedeOpen(true)}>
+            Concede
+          </button>
+
+          {/* Game log */}
+          <div className="panel flex min-h-0 flex-1 flex-col">
+            <button
+              type="button"
+              className="flex items-center justify-between px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-zinc-400 transition-colors duration-150 hover:text-zinc-200"
+              onClick={() => setLogOpen((v) => !v)}
+            >
+              Game log
+              <svg viewBox="0 0 24 24" className={`h-3 w-3 fill-current transition-transform duration-150 ${logOpen ? "rotate-90" : ""}`}>
+                <path d="M9 5l7 7-7 7V5Z" />
+              </svg>
+            </button>
+            {logOpen && (
+              <div className="scrollbar-slim min-h-[6rem] flex-1 space-y-1 overflow-y-auto border-t border-white/[0.06] p-2.5">
+                {gs.log.length === 0 ? (
+                  <div className="text-[10px] text-zinc-600">Nothing has happened yet.</div>
+                ) : (
+                  [...gs.log].reverse().map((entry) => (
+                    <div key={entry.seq} className="text-[10px] leading-snug text-zinc-400">
+                      {entry.playerId && <span className="font-bold text-zinc-300">{nameFor(entry.playerId)} </span>}
+                      {entry.message}
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        </aside>
+      </div>
+
+      {/* Context menu */}
+      {menu && <ContextMenu {...menu} onClose={() => setMenu(null)} />}
+
+      {/* Mulligan overlay */}
+      {showMulligan && !londonOpen && (
+        <div className="fixed inset-0 z-[75] flex flex-col items-center justify-center gap-5 bg-black/80 p-6 backdrop-blur-sm">
+          <div className="text-center">
+            <h2 className="text-2xl font-black text-zinc-50">Opening hand</h2>
+            <p className="mt-1 text-sm text-zinc-400">
+              {mull.mulls === 0 ? "Keep these seven, or mulligan?" : `Mulligan ${mull.mulls} — you will keep ${Math.max(0, 7 - mull.mulls)} cards.`}
+            </p>
+          </div>
+          <div className="flex flex-wrap justify-center gap-2">
+            {myHand.map((gc) => (
+              <Card key={gc.instanceId} gameCard={gc} data={cards[gc.cardId]} size="md" />
+            ))}
+            {myHand.length === 0 && <div className="text-sm text-zinc-500">No cards — awaiting the deal…</div>}
+          </div>
+          <div className="flex gap-3">
+            <button type="button" className="btn-gold !px-8" onClick={keepHand}>
+              Keep
+            </button>
+            <button type="button" className="btn-ghost !px-6" onClick={takeMulligan} disabled={myHand.length === 0}>
+              Mulligan
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* London bottom-selection */}
+      {londonOpen && (
+        <LondonModal
+          hand={myHand}
+          cards={cards}
+          bottomCount={expectedBottom}
+          onCancel={() => setLondonOpen(false)}
+          onConfirm={(ids) => {
+            send({ type: "keepHand", bottomCount: ids.length, bottomInstanceIds: ids });
+            mull.kept = true;
+            setLondonOpen(false);
+            forceRender((n) => n + 1);
+          }}
+        />
+      )}
+
+      {/* Browse graveyard/exile */}
+      {browse && (
+        <Modal
+          title={`${nameFor(browse.playerId)} — ${browse.zone}`}
+          onClose={() => setBrowse(null)}
+          width="lg"
+          noFooter
+        >
+          {(() => {
+            const owner = browse.playerId === me.playerId ? me : opp;
+            const zoneCards = owner.zones[browse.zone];
+            const mine = browse.playerId === me.playerId && canAct;
+            if (zoneCards.length === 0) {
+              return <div className="py-8 text-center text-sm text-zinc-500">This zone is empty.</div>;
+            }
+            return (
+              <div className="flex flex-wrap gap-2">
+                {[...zoneCards].reverse().map((gc) => (
+                  <Card
+                    key={gc.instanceId}
+                    gameCard={gc}
+                    data={cards[gc.cardId]}
+                    size="sm"
+                    draggable={mine}
+                    onDragStart={(e) => setDragPayload(e, { instanceId: gc.instanceId, from: browse.zone })}
+                    onContextMenu={mine ? (e) => openMenu(e, browsePileMenu(gc, browse.zone)) : (e) => e.preventDefault()}
+                    onClick={
+                      mine
+                        ? () => send({ type: "moveCard", instanceId: gc.instanceId, from: browse.zone, to: "hand" })
+                        : undefined
+                    }
+                    title={mine ? "Click: return to hand · right-click: more" : undefined}
+                  />
+                ))}
+              </div>
+            );
+          })()}
+          {browse.playerId === me.playerId && (
+            <p className="mt-3 text-[11px] text-zinc-600">Click a card to return it to your hand; right-click or drag it out for other zones.</p>
+          )}
+        </Modal>
+      )}
+
+      {/* Scry */}
+      {scryCount !== null && (
+        <ScryModal
+          count={scryCount}
+          library={me.zones.library}
+          cards={cards}
+          onCancel={() => setScryCount(null)}
+          onConfirm={(keep, bottom) => {
+            send({ type: "reorderLibraryTop", instanceIds: keep, toBottom: bottom });
+            setScryCount(null);
+          }}
+        />
+      )}
+
+      {/* Token dialog */}
+      {tokenOpen && <TokenDialog onClose={() => setTokenOpen(false)} onCreate={(a) => { send(a); setTokenOpen(false); }} />}
+
+      {/* Concede confirm */}
+      {concedeOpen && (
+        <Modal
+          title="Concede the game?"
+          onClose={() => setConcedeOpen(false)}
+          onConfirm={() => {
+            send({ type: "concede" });
+            setConcedeOpen(false);
+          }}
+          confirmLabel="Concede"
+          danger
+          width="sm"
+        >
+          <p className="text-sm text-zinc-300">Your opponent will be declared the winner. This cannot be undone.</p>
+        </Modal>
+      )}
+
+      {/* Winner banner */}
+      {gs.finished && (
+        <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/80 p-6 backdrop-blur-sm">
+          <div className="panel w-full max-w-md animate-pop-in p-8 text-center">
+            <svg viewBox="0 0 24 24" className="mx-auto mb-3 h-12 w-12 fill-brass-300"><path d="M5 3h14v2h3v4a5 5 0 0 1-4.5 4.97A6.5 6.5 0 0 1 13 17.4V19h3v2H8v-2h3v-1.6a6.5 6.5 0 0 1-4.5-3.43A5 5 0 0 1 2 9V5h3V3Zm0 4H4v2a3 3 0 0 0 1.6 2.66A11 11 0 0 1 5 7Zm15 0h-1a11 11 0 0 1-.6 4.66A3 3 0 0 0 20 9V7Z" /></svg>
+            <h2 className="text-2xl font-black text-zinc-50">
+              {winnerName ? `${winnerName} wins!` : "Game over"}
+            </h2>
+            {me.hasLost && me.lossReason && <p className="mt-1 text-sm text-zinc-400">{me.lossReason}</p>}
+            {opp.hasLost && opp.lossReason && <p className="mt-1 text-sm text-zinc-400">{opp.lossReason}</p>}
+            <div className="mt-6 flex justify-center gap-2">
+              {viewerIsPlayer && (
+                <button type="button" className="btn-primary" onClick={() => send({ type: "restartGame", seed: randomSeed() })}>
+                  Rematch
+                </button>
+              )}
+              <button type="button" className="btn-ghost" onClick={() => dispatch({ type: "dismissGame", gameId: view.gameId })}>
+                Back to room
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// London bottom-selection modal
+// ---------------------------------------------------------------------------
+
+interface LondonModalProps {
+  hand: GameCard[];
+  cards: Record<string, CardData>;
+  bottomCount: number;
+  onCancel: () => void;
+  onConfirm: (bottomIds: string[]) => void;
+}
+
+function LondonModal({ hand, cards, bottomCount, onCancel, onConfirm }: LondonModalProps): JSX.Element {
+  const [selected, setSelected] = useState<string[]>([]);
+
+  const toggle = (id: string): void => {
+    setSelected((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : cur.length < bottomCount ? [...cur, id] : cur));
+  };
+
+  return (
+    <Modal
+      title={`Put ${bottomCount} card${bottomCount === 1 ? "" : "s"} on the bottom`}
+      onClose={onCancel}
+      onConfirm={() => onConfirm(selected)}
+      confirmLabel={`Keep ${hand.length - selected.length}`}
+      confirmDisabled={selected.length !== bottomCount}
+      width="lg"
+    >
+      <p className="mb-3 text-xs text-zinc-400">
+        London mulligan: choose {bottomCount} card{bottomCount === 1 ? "" : "s"} to put on the bottom of your library.
+        Selected {selected.length}/{bottomCount}.
+      </p>
+      <div className="flex flex-wrap justify-center gap-2">
+        {hand.map((gc) => (
+          <Card
+            key={gc.instanceId}
+            gameCard={gc}
+            data={cards[gc.cardId]}
+            size="sm"
+            selected={selected.includes(gc.instanceId)}
+            dimmed={selected.includes(gc.instanceId)}
+            onClick={() => toggle(gc.instanceId)}
+          />
+        ))}
+      </div>
+    </Modal>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Scry modal — renders from the viewer's (redacted) library order. Card data
+// appears for entries revealed by the preceding `scry` action, otherwise each
+// row shows "Card N" with a back.
+// ---------------------------------------------------------------------------
+
+interface ScryModalProps {
+  count: number;
+  library: GameCard[];
+  cards: Record<string, CardData>;
+  onCancel: () => void;
+  onConfirm: (keepInOrder: string[], toBottom: string[]) => void;
+}
+
+function ScryModal({ count, library, cards, onCancel, onConfirm }: ScryModalProps): JSX.Element {
+  const [order, setOrder] = useState<string[]>(() => library.slice(0, count).map((gc) => gc.instanceId));
+  const [bottomSet, setBottomSet] = useState<ReadonlySet<string>>(new Set());
+
+  const byId = new Map(library.map((gc) => [gc.instanceId, gc]));
+  const kept = order.filter((id) => !bottomSet.has(id));
+  const bottomed = order.filter((id) => bottomSet.has(id));
+
+  const move = (id: string, dir: -1 | 1): void => {
+    setOrder((cur) => {
+      const i = cur.indexOf(id);
+      const j = i + dir;
+      if (i < 0 || j < 0 || j >= cur.length) return cur;
+      const next = [...cur];
+      const a = next[i];
+      const b = next[j];
+      if (a === undefined || b === undefined) return cur;
+      next[i] = b;
+      next[j] = a;
+      return next;
+    });
+  };
+
+  const toggleBottom = (id: string): void => {
+    setBottomSet((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  return (
+    <Modal
+      title={`Scry ${count}`}
+      onClose={onCancel}
+      onConfirm={() => onConfirm(kept, bottomed)}
+      confirmLabel="Done"
+      width="md"
+    >
+      <p className="mb-3 text-xs text-zinc-400">
+        Reorder the top of your library; send cards to the bottom. The first card in the list ends up on top.
+      </p>
+      <div className="space-y-1.5">
+        {order.map((id, i) => {
+          const gc = byId.get(id);
+          const data = gc ? cards[gc.cardId] : undefined;
+          const revealed = gc !== undefined && gc.cardId !== "hidden" && data !== undefined;
+          const isBottom = bottomSet.has(id);
+          return (
+            <div key={id} className={`flex items-center gap-2.5 rounded-lg p-1.5 ${isBottom ? "bg-red-500/5 opacity-70" : "bg-white/[0.03]"}`}>
+              <div className="w-[52px] shrink-0">
+                {revealed && gc ? <Card gameCard={gc} data={data} size="xs" className="!w-full" /> : <div className="aspect-[5/7]"><CardBack /></div>}
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-xs font-semibold text-zinc-100">
+                  {revealed && gc ? nameOf(gc, data) : `Card ${i + 1}`}
+                </div>
+                <div className="text-[10px] text-zinc-500">{isBottom ? "to the bottom" : `stays on top (position ${kept.indexOf(id) + 1})`}</div>
+              </div>
+              <div className="flex shrink-0 gap-1">
+                <button type="button" className="btn-ghost !px-2 !py-1 !text-[10px]" disabled={i === 0} onClick={() => move(id, -1)} aria-label="Move up">
+                  ↑
+                </button>
+                <button type="button" className="btn-ghost !px-2 !py-1 !text-[10px]" disabled={i === order.length - 1} onClick={() => move(id, 1)} aria-label="Move down">
+                  ↓
+                </button>
+                <button
+                  type="button"
+                  className={`btn-ghost !px-2 !py-1 !text-[10px] ${isBottom ? "!border-red-400/40 !text-red-300" : ""}`}
+                  onClick={() => toggleBottom(id)}
+                >
+                  {isBottom ? "Keep" : "Bottom"}
+                </button>
+              </div>
+            </div>
+          );
+        })}
+        {order.length === 0 && <div className="py-6 text-center text-sm text-zinc-500">Library is empty.</div>}
+      </div>
+    </Modal>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Token dialog
+// ---------------------------------------------------------------------------
+
+interface TokenDialogProps {
+  onClose: () => void;
+  onCreate: (action: GameAction) => void;
+}
+
+function TokenDialog({ onClose, onCreate }: TokenDialogProps): JSX.Element {
+  const [name, setName] = useState("Soldier");
+  const [typeLine, setTypeLine] = useState("Token Creature — Soldier");
+  const [power, setPower] = useState("1");
+  const [toughness, setToughness] = useState("1");
+  const [count, setCount] = useState(1);
+  const [tapped, setTapped] = useState(false);
+
+  const create = (): void => {
+    if (name.trim().length === 0) return;
+    onCreate({
+      type: "createToken",
+      name: name.trim(),
+      typeLine: typeLine.trim() || "Token",
+      power: power.trim() || undefined,
+      toughness: toughness.trim() || undefined,
+      count: Math.max(1, count),
+      tapped: tapped || undefined,
+    });
+  };
+
+  return (
+    <Modal title="Create token" onClose={onClose} onConfirm={create} confirmLabel="Create" confirmDisabled={name.trim().length === 0} width="sm">
+      <div className="space-y-3">
+        <div>
+          <label className="label" htmlFor="tok-name">Name</label>
+          <input id="tok-name" className="input" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+        </div>
+        <div>
+          <label className="label" htmlFor="tok-type">Type line</label>
+          <input id="tok-type" className="input" value={typeLine} onChange={(e) => setTypeLine(e.target.value)} />
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          <div>
+            <label className="label" htmlFor="tok-p">Power</label>
+            <input id="tok-p" className="input" value={power} onChange={(e) => setPower(e.target.value)} />
+          </div>
+          <div>
+            <label className="label" htmlFor="tok-t">Toughness</label>
+            <input id="tok-t" className="input" value={toughness} onChange={(e) => setToughness(e.target.value)} />
+          </div>
+          <div>
+            <label className="label" htmlFor="tok-n">Count</label>
+            <input
+              id="tok-n"
+              type="number"
+              min={1}
+              max={20}
+              className="input"
+              value={count}
+              onChange={(e) => setCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
+            />
+          </div>
+        </div>
+        <label className="flex items-center gap-2 text-xs text-zinc-300">
+          <input type="checkbox" className="accent-emerald-500" checked={tapped} onChange={(e) => setTapped(e.target.checked)} />
+          Enters tapped
+        </label>
+      </div>
+    </Modal>
+  );
+}

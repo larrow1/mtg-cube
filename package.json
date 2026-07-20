@@ -1,0 +1,22 @@
+{
+  "name": "mtg-cube",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Upload an MTG cube list, draft it with friends, and play 1v1 matches.",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm-run-all --parallel dev:server dev:web",
+    "dev:server": "npm run dev --workspace=@mtg-cube/server",
+    "dev:web": "npm run dev --workspace=@mtg-cube/web",
+    "test": "npm run test --workspace=@mtg-cube/shared",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "build": "npm run build --workspace=@mtg-cube/web"
+  },
+  "devDependencies": {
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.6.0"
+  }
+}

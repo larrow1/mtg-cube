@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-felt-950 text-zinc-200 antialiased;
+    background-image:
+      radial-gradient(1100px 700px at 50% -12%, rgba(16, 185, 129, 0.09), transparent 60%),
+      radial-gradient(900px 600px at 85% 110%, rgba(5, 150, 105, 0.06), transparent 55%),
+      radial-gradient(700px 500px at 8% 100%, rgba(13, 148, 136, 0.05), transparent 60%);
+    background-attachment: fixed;
+  }
+  ::selection {
+    @apply bg-emerald-500/40 text-white;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-xl border border-white/[0.06] bg-felt-900/80 shadow-[0_1px_0_rgba(255,255,255,0.04)_inset,0_8px_28px_rgba(0,0,0,0.35)] backdrop-blur-sm;
+  }
+  .panel-inset {
+    @apply rounded-lg border border-black/40 bg-felt-950/60 shadow-[0_1px_0_rgba(255,255,255,0.03)];
+  }
+  .btn {
+    @apply inline-flex select-none items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-semibold transition-all duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/70 disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .btn-primary {
+    @apply btn bg-emerald-600 text-white shadow-[0_1px_0_rgba(255,255,255,0.15)_inset,0_2px_8px_rgba(0,0,0,0.4)] hover:bg-emerald-500 active:translate-y-px;
+  }
+  .btn-ghost {
+    @apply btn border border-white/10 bg-white/[0.04] text-zinc-200 hover:border-white/20 hover:bg-white/[0.08] active:translate-y-px;
+  }
+  .btn-danger {
+    @apply btn bg-red-700/90 text-white hover:bg-red-600 active:translate-y-px;
+  }
+  .btn-gold {
+    @apply btn bg-gradient-to-b from-brass-300 to-brass-500 text-felt-950 shadow-[0_1px_0_rgba(255,255,255,0.35)_inset,0_2px_10px_rgba(0,0,0,0.45)] hover:brightness-110 active:translate-y-px;
+  }
+  .input {
+    @apply w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-500 transition-colors duration-150 focus:border-emerald-500/60 focus:outline-none focus:ring-1 focus:ring-emerald-500/40;
+  }
+  .label {
+    @apply mb-1 block text-[11px] font-semibold uppercase tracking-wider text-zinc-400;
+  }
+  .card-back {
+    @apply rounded-[6%] border border-emerald-900/80;
+    background-color: #0b1512;
+    background-image:
+      radial-gradient(circle at 50% 50%, rgba(16, 185, 129, 0.22) 0%, rgba(16, 185, 129, 0.05) 34%, transparent 36%),
+      repeating-linear-gradient(45deg, rgba(16, 185, 129, 0.07) 0 2px, transparent 2px 8px),
+      repeating-linear-gradient(-45deg, rgba(16, 185, 129, 0.07) 0 2px, transparent 2px 8px);
+    box-shadow:
+      0 0 0 1px rgba(0, 0, 0, 0.6),
+      0 2px 6px rgba(0, 0, 0, 0.55),
+      inset 0 0 0 3px rgba(5, 46, 37, 0.9);
+  }
+  .zone-row {
+    @apply flex min-h-[7.5rem] flex-wrap content-start items-start gap-2 rounded-lg border border-white/[0.04] bg-black/20 p-2 transition-colors duration-150;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full border border-white/10 bg-black/60 px-1.5 py-0.5 text-[10px] font-medium leading-none text-zinc-300;
+  }
+}
+
+@layer utilities {
+  .scrollbar-slim {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(52, 211, 153, 0.25) transparent;
+  }
+  .scrollbar-slim::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scrollbar-slim::-webkit-scrollbar-thumb {
+    background: rgba(52, 211, 153, 0.2);
+    border-radius: 8px;
+  }
+  .scrollbar-slim::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .text-shadow {
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  }
+}
