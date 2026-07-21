@@ -460,6 +460,13 @@ export interface GameState {
   activePlayerId: string;
   /** Who currently holds priority. */
   priorityPlayerId: string;
+  /**
+   * How many `passPriority` actions have happened in a row since the stack's
+   * top last changed (capped at 2 — with two players, 2 means both have
+   * passed consecutively with nothing new added to the stack). `resolveTopOfStack`
+   * / `counterTopOfStack` require this to be >= 2 (CR 117.4).
+   */
+  priorityPasses: number;
   turnNumber: number;
   step: TurnStep;
   /** Cards on the shared stack, top last. */

@@ -299,8 +299,9 @@ function parseSpellLine(line: string, self: string): TriggerEffect[] | null {
     ];
   }
 
-  // v7: the two targeted patterns the engine can actually resolve (the
-  // spell-effect stack entry opens the target picker for them).
+  // The two targeted patterns the engine can actually resolve (v9: the
+  // effect applies directly at resolution — cast-time targeting, or the
+  // resolution-time picker as a fallback — no separate effect entry).
   if (/^counter target spell$/i.test(text)) {
     return [{ kind: "counterTarget" }];
   }
