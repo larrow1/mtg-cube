@@ -182,6 +182,7 @@ function LaneColumn({
           picks.map((pick, i) => (
             <div
               key={pick.instanceId}
+              data-draft-pick-instance={pick.instanceId}
               className="relative transition-transform duration-100 hover:z-30 hover:-translate-y-1"
               style={{ marginTop: i === 0 ? 0 : `${overlap}px` }}
             >
@@ -231,13 +232,11 @@ interface PicksTrayProps {
   lanesApi: DraftLanes;
   trayH: number;
   onResize: (h: number) => void;
-  view: "cards" | "list";
-  onView: (v: "cards" | "list") => void;
   onPackPick?: PackPickDrop;
 }
 
 export function PicksTray(props: PicksTrayProps): JSX.Element {
-  const { picks, cards, lanesApi, trayH, onResize, view, onView, onPackPick } = props;
+  const { picks, cards, lanesApi, trayH, onResize, onPackPick } = props;
   const [dragOver, setDragOver] = useState<string | null>(null);
   const [newLaneOver, setNewLaneOver] = useState(false);
 
@@ -279,8 +278,6 @@ export function PicksTray(props: PicksTrayProps): JSX.Element {
         <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Your picks</span>
         <span className="chip">{picks.length}</span>
         <span className="hidden text-[10px] text-zinc-600 sm:inline">drag cards between lanes · click a lane name to rename</span>
-        <div className="flex-1" />
-        <ViewToggle view={view} onView={onView} />
       </div>
       <div className="flex min-h-0 flex-1 pl-3 pb-2">
           <div className="scrollbar-slim flex min-w-0 flex-1 gap-2 overflow-x-auto pr-3">

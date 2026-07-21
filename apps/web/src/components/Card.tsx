@@ -560,6 +560,10 @@ export function Card(props: CardProps): JSX.Element {
       ? (faceImageSmall ?? faceImageNormal ?? data?.imageSmall ?? data?.imageNormal)
       : (faceImageNormal ?? faceImageSmall ?? data?.imageNormal ?? data?.imageSmall);
 
+  useEffect(() => {
+    setImageFailed(false);
+  }, [imgSrc]);
+
   const name = gameCard ? nameOf(gameCard, data) : (face?.name ?? data?.name ?? "Card");
   const pt = gameCard ? powerToughnessOf(gameCard, data) : (data ? (data.power !== undefined && data.toughness !== undefined ? `${data.power}/${data.toughness}` : null) : null);
   const tapped = gameCard?.tapped === true;
@@ -616,7 +620,7 @@ export function Card(props: CardProps): JSX.Element {
         <img
           src={imgSrc}
           alt={name}
-          loading="lazy"
+          loading={size === "md" || size === "lg" ? "eager" : "lazy"}
           draggable={false}
           onError={() => setImageFailed(true)}
           style={ART_IMG_STYLE}
@@ -626,7 +630,7 @@ export function Card(props: CardProps): JSX.Element {
       <img
         src={imgSrc}
         alt={name}
-        loading="lazy"
+        loading={size === "md" || size === "lg" ? "eager" : "lazy"}
         draggable={false}
         onError={() => setImageFailed(true)}
         className="h-full w-full rounded-[6%] object-cover"

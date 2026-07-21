@@ -87,6 +87,7 @@ function CubePanel({ room, isHost }: CubePanelProps): JSX.Element {
   };
 
   const cube = room.cube;
+  const preload = cube && state.cardPreload?.cubeId === cube.id ? state.cardPreload : null;
 
   return (
     <section className="panel p-4">
@@ -121,6 +122,32 @@ function CubePanel({ room, isHost }: CubePanelProps): JSX.Element {
                 </ul>
               )}
             </div>
+          )}
+          {preload && !preload.ready && !preload.error && (
+            <div className="mt-2" aria-live="polite">
+              <div className="mb-1 flex items-center justify-between text-[10px] font-semibold text-sky-200/80">
+                <span>Preparing card artwork…</span>
+                <span className="tabular-nums">{preload.loaded}/{preload.total}</span>
+              </div>
+              <div className="h-1 overflow-hidden rounded-full bg-black/40">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-sky-500 via-cyan-300 to-amber-300 transition-[width] duration-200"
+                  style={{ width: `${preload.total > 0 ? (preload.loaded / preload.total) * 100 : 0}%` }}
+                />
+              </div>
+            </div>
+          )}
+          {preload?.ready && (
+            <p className={`mt-2 text-[10px] ${preload.failed > 0 ? "text-amber-300/80" : "text-emerald-300/80"}`}>
+              {preload.failed > 0
+                ? `${preload.failed} image${preload.failed === 1 ? "" : "s"} will retry if shown.`
+                : "Card artwork ready."}
+            </p>
+          )}
+          {preload?.error && (
+            <p className="mt-2 text-[10px] text-amber-300/80">
+              Artwork preparation was interrupted; cards will load normally during the draft.
+            </p>
           )}
         </div>
       )}
@@ -248,6 +275,8 @@ export function Lobby(): JSX.Element {
 
   const humanCount = room.players.length;
   const ranked = room.ranked;
+  const cardPreload = room.cube && state.cardPreload?.cubeId === room.cube.id ? state.cardPreload : null;
+  const preparingCards = Boolean(room.cube && (!cardPreload || (!cardPreload.ready && !cardPreload.error)));
 
   return (
     <div className="lobby-scene min-h-full px-4 py-5 md:px-6 md:py-6">
@@ -394,11 +423,15 @@ export function Lobby(): JSX.Element {
               <button
                 type="button"
                 className="btn-gold mt-4 w-full !py-2.5"
-                disabled={!room.cube || starting}
+                disabled={!room.cube || starting || preparingCards}
                 onClick={() => void startDraft()}
-                title={room.cube ? "Start the draft" : "Upload a cube first"}
+                title={!room.cube ? "Upload a cube first" : preparingCards ? "Preparing card artwork" : "Start the draft"}
               >
-                {starting ? "Dealing packs…" : "Start draft"}
+                {starting
+                  ? "Dealing packs…"
+                  : preparingCards
+                    ? `Preparing cards${cardPreload ? ` ${cardPreload.loaded}/${cardPreload.total}` : "…"}`
+                    : "Start draft"}
               </button>
             )}
             {isHost && !room.cube && <p className="mt-2 text-center text-[11px] text-zinc-500">Upload a cube to enable the draft.</p>}

@@ -18,7 +18,7 @@ import {
 } from "react";
 import type { Account, DraftView, GameView, QueueState, RatingInfo, RoomState } from "@mtg-cube/shared";
 import { call, socket } from "./socket";
-import { primeCards } from "./lib/cardCache";
+import { preloadCardImages, primeCards } from "./lib/cardCache";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -52,6 +52,15 @@ export interface ToastItem {
   message: string;
 }
 
+export interface CubeCardPreloadState {
+  cubeId: string;
+  loaded: number;
+  total: number;
+  failed: number;
+  ready: boolean;
+  error?: string;
+}
+
 export interface AppState {
   session: Session | null;
   connected: boolean;
@@ -60,6 +69,8 @@ export interface AppState {
   /** Set when an automatic token rejoin was rejected (room gone, seat taken…). */
   rejoinFailed: boolean;
   room: RoomState | null;
+  /** Lobby-time card metadata and artwork preparation for the loaded cube. */
+  cardPreload: CubeCardPreloadState | null;
   draft: DraftView | null;
   game: GameView | null;
   /** GameId the viewer dismissed after it finished (returns to the room UI). */
@@ -82,6 +93,7 @@ export type AppEvent =
   | { type: "sessionCleared" }
   | { type: "rejoinFailed" }
   | { type: "roomState"; room: RoomState }
+  | { type: "cardPreloadState"; preload: CubeCardPreloadState | null }
   | { type: "draftState"; draft: DraftView }
   | { type: "gameState"; game: GameView }
   | { type: "dismissGame"; gameId: string }
@@ -166,6 +178,7 @@ const initialState: AppState = {
   joined: false,
   rejoinFailed: false,
   room: null,
+  cardPreload: null,
   draft: null,
   game: null,
   dismissedGameId: null,
@@ -192,6 +205,7 @@ function reducer(state: AppState, event: AppEvent): AppState {
         joined: false,
         rejoinFailed: false,
         room: null,
+        cardPreload: null,
         draft: null,
         game: null,
         dismissedGameId: null,
@@ -201,6 +215,8 @@ function reducer(state: AppState, event: AppEvent): AppState {
       return { ...state, rejoinFailed: true };
     case "roomState":
       return { ...state, room: event.room };
+    case "cardPreloadState":
+      return { ...state, cardPreload: event.preload };
     case "draftState":
       return { ...state, draft: event.draft };
     case "gameState": {
@@ -281,6 +297,9 @@ export function AppProvider({ children }: { children: ReactNode }): JSX.Element 
   // Latest account, readable from the (mount-once) socket listeners below.
   const accountRef = useRef<AccountState | null>(state.account);
   accountRef.current = state.account;
+  const activeCubeIdRef = useRef<string | null>(null);
+  const catalogLoadsRef = useRef(new Map<string, Promise<void>>());
+  const catalogProgressRef = useRef(new Map<string, CubeCardPreloadState>());
 
   const pushToast = useCallback((message: string, kind: ToastKind = "error") => {
     dispatch({ type: "toast", kind, message });
@@ -333,7 +352,68 @@ export function AppProvider({ children }: { children: ReactNode }): JSX.Element 
       // A dropped socket also drops us from the matchmaking queue server-side.
       dispatch({ type: "queueState", queue: null });
     };
-    const onRoomState = (room: RoomState): void => dispatch({ type: "roomState", room });
+    const onRoomState = (room: RoomState): void => {
+      dispatch({ type: "roomState", room });
+      const cube = room.cube;
+      activeCubeIdRef.current = cube?.id ?? null;
+      if (!cube) {
+        dispatch({ type: "cardPreloadState", preload: null });
+        return;
+      }
+
+      const known = catalogProgressRef.current.get(cube.id);
+      if (known) dispatch({ type: "cardPreloadState", preload: known });
+      if (catalogLoadsRef.current.has(cube.id) || known?.ready) return;
+
+      const initial: CubeCardPreloadState = {
+        cubeId: cube.id,
+        loaded: 0,
+        total: cube.cardCount,
+        failed: 0,
+        ready: false,
+      };
+      catalogProgressRef.current.set(cube.id, initial);
+      dispatch({ type: "cardPreloadState", preload: initial });
+
+      const load = (async (): Promise<void> => {
+        const response = await call("getCubeCardCatalog");
+        if (!response.ok || !response.data) {
+          throw new Error(response.error ?? "Could not prepare the cube's cards");
+        }
+        if (response.data.cubeId !== cube.id) {
+          throw new Error("The cube changed while its cards were being prepared");
+        }
+
+        primeCards(response.data.cards);
+        const result = await preloadCardImages(response.data.cards, (progress) => {
+          const next: CubeCardPreloadState = { cubeId: cube.id, ...progress, ready: false };
+          catalogProgressRef.current.set(cube.id, next);
+          if (activeCubeIdRef.current === cube.id) {
+            dispatch({ type: "cardPreloadState", preload: next });
+          }
+        });
+        const complete: CubeCardPreloadState = { cubeId: cube.id, ...result, ready: true };
+        catalogProgressRef.current.set(cube.id, complete);
+        if (activeCubeIdRef.current === cube.id) {
+          dispatch({ type: "cardPreloadState", preload: complete });
+        }
+      })().catch((err: unknown) => {
+        const failed: CubeCardPreloadState = {
+          cubeId: cube.id,
+          loaded: 0,
+          total: cube.cardCount,
+          failed: 0,
+          ready: false,
+          error: err instanceof Error ? err.message : String(err),
+        };
+        catalogProgressRef.current.set(cube.id, failed);
+        catalogLoadsRef.current.delete(cube.id);
+        if (activeCubeIdRef.current === cube.id) {
+          dispatch({ type: "cardPreloadState", preload: failed });
+        }
+      });
+      catalogLoadsRef.current.set(cube.id, load);
+    };
     const onDraftState = (draft: DraftView): void => dispatch({ type: "draftState", draft });
     const onGameState = (game: GameView): void => dispatch({ type: "gameState", game });
     const onChat = (msg: ChatMessage): void => dispatch({ type: "chat", msg });

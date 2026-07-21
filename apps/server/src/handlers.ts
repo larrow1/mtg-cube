@@ -408,6 +408,18 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
     });
   });
 
+  // -- getCubeCardCatalog --------------------------------------------------
+  // The catalog is deliberately unordered: clients can prepare card images
+  // in the lobby without learning which cards will appear in which packs.
+  socket.on("getCubeCardCatalog", (ack) => {
+    const reply = once<{ cubeId: string; cards: Record<string, CardData> }>(ack);
+    guard(reply, () => {
+      const { room } = getContext(rooms, socket);
+      if (!room.cube) throw new Error("No cube has been loaded");
+      reply({ ok: true, data: { cubeId: room.cube.id, cards: room.cube.cards } });
+    });
+  });
+
   // -- startDraft (host, lobby, cube required) ------------------------------
   socket.on("startDraft", (args, ack) => {
     const reply = once(ack);
