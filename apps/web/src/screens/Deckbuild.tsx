@@ -26,10 +26,10 @@ import {
   cmcBucket,
   colorBucket,
   compareByCmcName,
-  manaPipClasses,
   primaryType,
   type ColorBucket,
 } from "../lib/cards";
+import { ManaSymbol } from "../components/ManaSymbol";
 import { sideboardedInstanceIds } from "../lib/draftLanes";
 import { useBasicLandCards } from "../lib/basicLands";
 import { Card, CardBack, useCardPreview } from "../components/Card";
@@ -613,9 +613,7 @@ export function Deckbuild(): JSX.Element {
                 onMouseLeave={clearPreview}
               />
             ) : (
-              <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-black shadow-card ${manaPipClasses(sym)}`}>
-                {sym}
-              </span>
+              <ManaSymbol symbol={sym} className="pointer-events-none h-5 w-5 shrink-0" />
             )}
             <span className={`min-w-6 text-center text-xs font-bold tabular-nums ${n > 0 ? "text-zinc-100" : "text-zinc-600"}`}>
               x{n}
@@ -696,20 +694,25 @@ export function Deckbuild(): JSX.Element {
               <div className="flex items-center gap-1">
                 {FILTER_PIPS.map((b) => {
                   const active = colorPips.has(b);
-                  const pipClass =
-                    b === "M" ? "bg-gradient-to-br from-yellow-200 to-amber-500 text-amber-950" : manaPipClasses(b);
                   return (
                     <button
                       key={b}
                       type="button"
                       onClick={() => togglePip(b)}
-                      className={`flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-black transition-all duration-150 ${pipClass} ${
+                      className={`flex h-6 w-6 items-center justify-center rounded-full transition-all duration-150 ${
                         active ? "scale-110 shadow-glow-soft ring-1 ring-amber-300/80" : "opacity-35 saturate-50 hover:opacity-70"
                       }`}
                       title={b === "M" ? "Multicolor" : b === "C" ? "Colorless" : b}
                       aria-pressed={active}
                     >
-                      {b}
+                      {b === "M" ? (
+                        // No Manamoji exists for "multicolor" — keep the gold letter pip.
+                        <span className="pointer-events-none flex h-6 w-6 items-center justify-center rounded-full bg-gradient-to-br from-yellow-200 to-amber-500 text-[11px] font-black text-amber-950">
+                          M
+                        </span>
+                      ) : (
+                        <ManaSymbol symbol={b} className="pointer-events-none h-6 w-6" />
+                      )}
                     </button>
                   );
                 })}

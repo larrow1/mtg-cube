@@ -20,13 +20,14 @@ import type {
 import { scriptFor } from "@mtg-cube/shared";
 import { call } from "../socket";
 import { useApp } from "../store";
-import { classifyRow, compareByCmcName, manaPipClasses, nameOf, randomSeed, type RowKind } from "../lib/cards";
+import { classifyRow, compareByCmcName, nameOf, randomSeed, type RowKind } from "../lib/cards";
 import { Card, CardBack } from "../components/Card";
 import { CardGrid } from "../components/CardGrid";
 import { ContextMenu, type ContextMenuState, type MenuItem } from "../components/ContextMenu";
 import { Modal } from "../components/Modal";
 import { LifeCounter } from "../components/LifeCounter";
 import { ManaPool } from "../components/ManaPool";
+import { ManaSymbol } from "../components/ManaSymbol";
 import { PhaseRibbon } from "../components/PhaseRibbon";
 import { RankBadge } from "../components/RankBadge";
 import { StackPanel } from "../components/StackPanel";
@@ -348,7 +349,8 @@ export function Game(): JSX.Element {
     if (!gc.tapped) {
       for (const color of producedColorsOf(gc)) {
         items.push({
-          label: `Tap for ${MANA_COLOR_NAMES[color] ?? color} (${color})`,
+          label: `Tap for ${MANA_COLOR_NAMES[color] ?? color}`,
+          icon: <ManaSymbol symbol={color} className="pointer-events-none h-3.5 w-3.5" />,
           onClick: () => tapForMana(gc, color),
         });
       }
@@ -1204,9 +1206,9 @@ function ManaPickerPopover({ colors, anchor, onPick, onClose }: ManaPickerPopove
             type="button"
             onClick={() => onPick(color)}
             title={`Tap for ${MANA_COLOR_NAMES[color] ?? color}`}
-            className={`flex h-8 w-8 items-center justify-center rounded-full text-xs font-black shadow-card transition-all duration-150 hover:scale-110 active:scale-95 ${manaPipClasses(color)}`}
+            className="flex h-8 w-8 items-center justify-center rounded-full shadow-card transition-all duration-150 hover:scale-110 active:scale-95"
           >
-            {color}
+            <ManaSymbol symbol={color} className="pointer-events-none h-8 w-8" />
           </button>
         ))}
       </div>
@@ -1246,11 +1248,11 @@ function FloatingManaStrip({ pool, editable, onSpend }: FloatingManaStripProps):
               disabled={!editable}
               onClick={() => onSpend(color)}
               title={editable ? `${n} ${MANA_COLOR_NAMES[color] ?? color} — click to spend one` : `${n} ${MANA_COLOR_NAMES[color] ?? color}`}
-              className={`relative flex h-9 w-9 animate-pop-in items-center justify-center rounded-full text-sm font-black shadow-[0_0_10px_rgba(251,191,36,0.35)] transition-all duration-150 disabled:cursor-default ${manaPipClasses(color)} ${
+              className={`relative flex h-9 w-9 animate-pop-in items-center justify-center rounded-full shadow-[0_0_10px_rgba(251,191,36,0.35)] transition-all duration-150 disabled:cursor-default ${
                 editable ? "hover:scale-110 active:scale-95" : ""
               }`}
             >
-              {color}
+              <ManaSymbol symbol={color} className="pointer-events-none h-9 w-9" />
               <span
                 key={n}
                 className="animate-count-pop absolute -right-1.5 -top-1.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-felt-950 px-1 text-[10px] font-bold text-brass-300 ring-1 ring-amber-200/40"

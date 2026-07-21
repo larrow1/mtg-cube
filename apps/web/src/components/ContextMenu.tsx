@@ -2,7 +2,7 @@
  * Right-click context menu, clamped to the viewport. Closes on click-away,
  * Esc, scroll, or another context-menu open.
  */
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 
 export interface MenuItem {
   label: string;
@@ -13,6 +13,8 @@ export interface MenuItem {
   separator?: boolean;
   /** Non-interactive heading row. */
   heading?: boolean;
+  /** Optional leading icon node (e.g. a mana symbol). */
+  icon?: ReactNode;
 }
 
 export interface ContextMenuState {
@@ -82,13 +84,14 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps): JSX.Ele
                   onClose();
                 }
               }}
-              className={`block w-full px-3 py-1.5 text-left text-xs transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
+              className={`flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
                 item.danger
                   ? "text-red-400 hover:bg-red-500/15"
                   : "text-zinc-200 hover:bg-amber-400/15"
               }`}
             >
-              {item.label}
+              {item.icon}
+              <span className="min-w-0 flex-1">{item.label}</span>
             </button>
           )}
         </div>

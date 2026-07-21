@@ -14,7 +14,6 @@ import {
   cmcBucket,
   colorBucket,
   compareByCmcName,
-  manaPipClasses,
   parseManaCost,
   primaryType,
   type ColorBucket,
@@ -154,11 +153,6 @@ export function ColorSplit({
   const shown = order.filter((b) => (counts.get(b) ?? 0) > 0);
   if (shown.length === 0) return null;
 
-  const pipClass = (b: ColorBucket): string => {
-    if (b === "L") return "bg-orange-900 text-orange-200 border border-orange-500/40";
-    return manaPipClasses(b);
-  };
-
   return (
     <div className="panel-inset p-3">
       <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-zinc-400">{label}</div>
@@ -168,7 +162,8 @@ export function ColorSplit({
             {b === "W" || b === "U" || b === "B" || b === "R" || b === "G" || b === "C" ? (
               <ManaSymbol symbol={b} className="h-5 w-5" />
             ) : (
-              <span className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-black shadow-card ${pipClass(b)}`}>
+              // "L" (lands) has no mana symbol — keep the orange letter pip.
+              <span className="flex h-5 w-5 items-center justify-center rounded-full border border-orange-500/40 bg-orange-900 text-[10px] font-black text-orange-200 shadow-card">
                 {b}
               </span>
             )}

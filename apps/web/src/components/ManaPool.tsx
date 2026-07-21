@@ -1,7 +1,7 @@
 /**
  * WUBRG+C mana pool pips. Click adds one, right-click removes one.
  */
-import { manaPipClasses } from "../lib/cards";
+import { ManaSymbol } from "./ManaSymbol";
 
 const MANA_ORDER = ["W", "U", "B", "R", "G", "C"] as const;
 
@@ -30,9 +30,9 @@ export function ManaPool({ pool, editable, onAdd, onEmpty }: ManaPoolProps): JSX
                 if (editable && n > 0) onAdd(color, -1);
               }}
               title={editable ? `${color}: ${n} — click to add, right-click to remove` : `${color}: ${n}`}
-              className={`relative flex h-7 w-7 items-center justify-center rounded-full text-xs font-black transition-all duration-150 disabled:cursor-default ${manaPipClasses(color)} ${n === 0 ? "opacity-35" : "shadow-card"} ${editable ? "hover:scale-110 active:scale-95" : ""}`}
+              className={`relative flex h-7 w-7 items-center justify-center rounded-full transition-all duration-150 disabled:cursor-default ${n === 0 ? "opacity-35" : "shadow-card"} ${editable ? "hover:scale-110 active:scale-95" : ""}`}
             >
-              {color}
+              <ManaSymbol symbol={color} className="pointer-events-none h-7 w-7" />
               {n > 0 && (
                 <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-felt-950 px-0.5 text-[9px] font-bold text-brass-300 ring-1 ring-amber-200/30">
                   {n}
