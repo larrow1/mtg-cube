@@ -32,8 +32,10 @@ import { LifeCounter } from "../components/LifeCounter";
 import { ManaPool } from "../components/ManaPool";
 import { ManaSymbol } from "../components/ManaSymbol";
 import { PhaseRibbon } from "../components/PhaseRibbon";
+import { PlayerAvatar } from "../components/PlayerAvatar";
 import { RankBadge } from "../components/RankBadge";
 import { StackPanel } from "../components/StackPanel";
+import { TargetArrows, type ArrowSpec } from "../components/TargetArrows";
 import { ZonePile } from "../components/ZonePile";
 
 // ---------------------------------------------------------------------------
@@ -542,6 +544,31 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
     return true;
   };
 
+  // v8.1: drag-to-target — dropping a targeted hand spell onto a battlefield
+  // card, a player avatar, or a stack spell casts it AT that target.
+  const dropCastOnTarget = (target: TargetRef) => (e: DragEvent<HTMLElement>): void => {
+    const payload = readDragPayload(e);
+    if (!payload || payload.from !== "hand" || !canAct) return;
+    const gc = me.zones.hand.find((c) => c.instanceId === payload.instanceId);
+    if (!gc) return;
+    const kinds = spellTargetKinds(cards[gc.cardId]);
+    if (!kinds.includes(target.kind)) return; // not this spell's kind of target — zone drops may still apply
+    e.preventDefault();
+    e.stopPropagation();
+    send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "stack", target });
+    setPendingCast(null);
+    setSelectedHand(null);
+  };
+  /** Player avatars glow while a player-legal target is being chosen. */
+  const playerTargetMode = pendingCast
+    ? pendingCast.kinds.includes("player")
+    : targetingTrigger !== null && topTargetKinds.includes("player");
+  const pickPlayerTarget = (playerId: string): void => {
+    const target: TargetRef = { kind: "player", playerId };
+    if (pendingCast) castWithTarget(target);
+    else if (targetingTrigger) resolveWithTarget(target);
+  };
+
   const resolveWithTarget = (target: TargetRef): void => {
     send({ type: "resolveTopOfStack", target });
     setTargetingTrigger(null);
@@ -890,8 +917,13 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
         <span className="self-center px-2 text-[9px] font-semibold uppercase tracking-wider text-zinc-500/70">{label}</span>
       ) : (
         rowCards.map((gc) => (
-          <Card
+          <div
             key={gc.instanceId}
+            data-battlefield-id={gc.instanceId}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={dropCastOnTarget({ kind: "permanent", instanceId: gc.instanceId })}
+          >
+          <Card
             gameCard={gc}
             data={cards[gc.cardId]}
             size="sm"
@@ -916,10 +948,34 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
             // like the old portrait cards) — trade margin axes accordingly.
             className={gc.tapped ? "my-4 -mx-2" : ""}
           />
+          </div>
         ))
       )}
     </div>
   );
+
+  // v8.1: targeting arrows — persistent ones from each stack entry to its
+  // chosen target, plus a live cursor arrow while a target is being chosen.
+  const arrowSpecs: ArrowSpec[] = [];
+  for (const entry of gs.stack) {
+    const t = entry.chosenTarget;
+    if (!t) continue;
+    arrowSpecs.push({
+      id: `t-${entry.instanceId}`,
+      from: `[data-stack-id="${entry.instanceId}"]`,
+      to:
+        t.kind === "player"
+          ? `[data-player-avatar="${t.playerId}"]`
+          : t.kind === "stack"
+            ? `[data-stack-id="${t.instanceId}"]`
+            : `[data-battlefield-id="${t.instanceId}"]`,
+    });
+  }
+  if (pendingCast) {
+    arrowSpecs.push({ id: "live", from: `[data-hand-id="${pendingCast.instanceId}"]` });
+  } else if (targetingTrigger && topOfStack) {
+    arrowSpecs.push({ id: "live", from: `[data-stack-id="${topOfStack.instanceId}"]` });
+  }
 
   const winnerName = gs.winnerId ? nameFor(gs.winnerId) : null;
 
@@ -941,6 +997,9 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
       {room?.sandbox && viewerIsPlayer && (
         <SandboxToolbar meId={me.playerId} oppId={opp.playerId} oppName={nameFor(opp.playerId)} />
       )}
+
+      {/* v8.1: targeting arrows overlay */}
+      <TargetArrows specs={arrowSpecs} />
 
       {/* v8: cast-time target picker — choose, then the spell is cast */}
       {pendingCast && (
@@ -1108,6 +1167,11 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
                     : permanents.get(t.instanceId);
                 return c ? nameOf(c, cards[c.cardId]) : "(target gone)";
               }}
+              onDropOnEntry={(instanceId, e) => {
+                const entry = gs.stack.find((c) => c.instanceId === instanceId);
+                if (!entry || entry.isTrigger) return;
+                dropCastOnTarget({ kind: "stack", instanceId })(e);
+              }}
             />
             <div className="flex min-w-0 flex-1 flex-col justify-center gap-1">
               <div className="flex items-center justify-center gap-2">
@@ -1185,6 +1249,7 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
                     return (
                       <div
                         key={gc.instanceId}
+                        data-hand-id={gc.instanceId}
                         className="-ml-7 transition-transform duration-150 first:ml-0 hover:z-20 hover:-translate-y-4"
                         style={{ transform: `rotate(${angle}deg) translateY(${lift}px)`, zIndex: selectedHand === gc.instanceId ? 30 : 10 }}
                       >
@@ -1212,6 +1277,15 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
         {/* Side rail */}
         <aside className="scrollbar-slim flex w-64 shrink-0 flex-col gap-2 overflow-y-auto">
           {/* Opponent panel */}
+          <div className="flex items-center gap-2">
+            <PlayerAvatar
+              playerId={opp.playerId}
+              name={nameFor(opp.playerId)}
+              targetable={playerTargetMode && canAct}
+              onPick={() => pickPlayerTarget(opp.playerId)}
+              onDropCard={dropCastOnTarget({ kind: "player", playerId: opp.playerId })}
+            />
+            <div className="min-w-0 flex-1">
           <LifeCounter
             name={nameFor(opp.playerId)}
             life={opp.life}
@@ -1224,6 +1298,8 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
             onLife={() => undefined}
             onPoison={() => undefined}
           />
+            </div>
+          </div>
           <ManaPool pool={opp.manaPool} editable={false} onAdd={() => undefined} onEmpty={() => undefined} />
           <div className="flex justify-around">
             <ZonePile label="Library" count={opp.zones.library.length} faceDown accent="emerald" />
@@ -1253,6 +1329,15 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
           <div className="my-0.5 border-t border-amber-100/[0.08]" />
 
           {/* My panel */}
+          <div className="flex items-center gap-2">
+            <PlayerAvatar
+              playerId={me.playerId}
+              name={nameFor(me.playerId)}
+              targetable={playerTargetMode && canAct}
+              onPick={() => pickPlayerTarget(me.playerId)}
+              onDropCard={dropCastOnTarget({ kind: "player", playerId: me.playerId })}
+            />
+            <div className="min-w-0 flex-1">
           <LifeCounter
             name={`${nameFor(me.playerId)}${viewerIsPlayer ? " (you)" : ""}`}
             life={me.life}
@@ -1265,6 +1350,8 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
             onLife={(next) => send({ type: "setLife", playerId: me.playerId, life: next })}
             onPoison={(next) => send({ type: "setPoison", playerId: me.playerId, poison: next })}
           />
+            </div>
+          </div>
           <ManaPool
             pool={me.manaPool}
             editable={canAct}

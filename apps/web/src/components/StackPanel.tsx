@@ -31,9 +31,11 @@ interface StackPanelProps {
   onPickTarget?: (instanceId: string) => void;
   /** v8: renders a chosenTarget as a human label ("Goldfish", "Runeclaw Bear"). */
   targetLabelFor?: (target: TargetRef) => string;
+  /** v8.1: a hand card was dropped on a stack entry (counterspell drag). */
+  onDropOnEntry?: (instanceId: string, e: React.DragEvent<HTMLDivElement>) => void;
 }
 
-export function StackPanel({ stack, cards, nameFor, viewerId, onResolve, onDecline, disabled, resolveDisabled, resolveTitle, targetableIds, onPickTarget, targetLabelFor }: StackPanelProps): JSX.Element {
+export function StackPanel({ stack, cards, nameFor, viewerId, onResolve, onDecline, disabled, resolveDisabled, resolveTitle, targetableIds, onPickTarget, targetLabelFor, onDropOnEntry }: StackPanelProps): JSX.Element {
   const reversed = [...stack].reverse(); // render top of stack first
 
   // Trigger entries not present in the previous view pop in with an amber
@@ -84,6 +86,7 @@ export function StackPanel({ stack, cards, nameFor, viewerId, onResolve, onDecli
                 return (
                   <div
                     key={gc.instanceId}
+                    data-stack-id={gc.instanceId}
                     className={`rounded-lg border border-amber-400/40 bg-amber-400/10 p-1.5 shadow-[0_0_14px_rgba(251,191,36,0.18)] ${
                       fresh ? "animate-trigger-pop" : ""
                     } ${isTop ? "ring-1 ring-brass-400/60" : ""}`}
@@ -138,6 +141,9 @@ export function StackPanel({ stack, cards, nameFor, viewerId, onResolve, onDecli
               return (
                 <div
                   key={gc.instanceId}
+                  data-stack-id={gc.instanceId}
+                  onDragOver={onDropOnEntry ? (e) => e.preventDefault() : undefined}
+                  onDrop={onDropOnEntry ? (e) => onDropOnEntry(gc.instanceId, e) : undefined}
                   className={`flex items-center gap-2 rounded-lg p-1 ${
                     targetable
                       ? "cursor-pointer bg-red-500/10 ring-1 ring-red-400/70 shadow-[0_0_10px_rgba(248,113,113,0.3)] hover:bg-red-500/20"
