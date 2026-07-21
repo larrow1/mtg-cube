@@ -286,7 +286,6 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
   const [selectedHand, setSelectedHand] = useState<string | null>(null);
   const [browse, setBrowse] = useState<{ playerId: string; zone: "graveyard" | "exile" } | null>(null);
-  const [tokenOpen, setTokenOpen] = useState(false);
   const [scryCount, setScryCount] = useState<number | null>(null);
   const [concedeOpen, setConcedeOpen] = useState(false);
   const [endMatchOpen, setEndMatchOpen] = useState(false);
@@ -300,6 +299,13 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
   const lastAutoSeq = useRef(-1);
   /** v6: instanceId of the top-of-stack trigger awaiting a target choice. */
   const [targetingTrigger, setTargetingTrigger] = useState<string | null>(null);
+  /** v8: a targeted spell waiting for its cast-time target (CR 601.2c). */
+  const [pendingCast, setPendingCast] = useState<{
+    instanceId: string;
+    name: string;
+    kinds: TargetRef["kind"][];
+    override?: boolean;
+  } | null>(null);
   const [, forceRender] = useState(0);
 
   // Esc cancels attach/block targeting modes, the mana picker and the hand selection.
@@ -311,6 +317,7 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
         setManaPicker(null);
         setSelectedHand(null);
         setTargetingTrigger(null);
+        setPendingCast(null);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -336,7 +343,7 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
     if (!autoMode || !view || !session) return;
     const gs = view.state;
     const cards = view.cards;
-    if (gs.finished || gs.pendingSearch || gs.stack.length > 0) return;
+    if (gs.finished || gs.pendingSearch) return;
     const me = gs.players.find((p) => p.playerId === session.playerId);
     const opp = gs.players.find((p) => p.playerId !== session.playerId);
     if (!me || !opp) return;
@@ -385,7 +392,24 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
     };
 
     let action: GameAction | null = null;
-    if (gs.activePlayerId === me.playerId) {
+    if (gs.stack.length > 0) {
+      // v8: the stack is priority-driven (CR 117.4 house flow). Holding
+      // priority with no response: pass; once the opponent's pass comes back,
+      // resolve the top. Entries still awaiting a target wait for a click.
+      if (gs.priorityPlayerId === me.playerId && !canActNow) {
+        const top = gs.stack[gs.stack.length - 1]!;
+        const topAwaitsTarget =
+          top.isTrigger === true && effectNeedsTarget(top.triggerEffect) && !top.chosenTarget;
+        const last = gs.log[gs.log.length - 1];
+        const oppJustPassed = last?.message === "passed priority" && last.playerId === opp.playerId;
+        if (oppJustPassed) {
+          if (!topAwaitsTarget) action = { type: "resolveTopOfStack" };
+          // else: the controller must pick a target by hand
+        } else {
+          action = { type: "passPriority" };
+        }
+      }
+    } else if (gs.activePlayerId === me.playerId) {
       if (!canActNow) {
         const AUTO_STEPS = ["untap", "upkeep", "draw", "beginCombat", "endCombat", "end", "cleanup"];
         if (AUTO_STEPS.includes(gs.step)) action = { type: "nextStep" };
@@ -481,10 +505,43 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
 
   // v6/v7: targeted resolution — the controller picks a target (battlefield
   // card, a player button, or a highlighted stack spell) then resolves.
+  // v8: entries carrying a cast-time target resolve without a new pick.
   const topOfStack = gs.stack[gs.stack.length - 1];
-  const topNeedsTarget = topOfStack?.isTrigger === true && effectNeedsTarget(topOfStack.triggerEffect);
+  const topNeedsTarget =
+    topOfStack?.isTrigger === true &&
+    effectNeedsTarget(topOfStack.triggerEffect) &&
+    topOfStack.chosenTarget === undefined;
   const iControlTop = topOfStack !== undefined && topOfStack.controllerId === me.playerId;
   const topTargetKinds = topNeedsTarget ? effectTargetKinds(topOfStack!.triggerEffect) : [];
+
+  // v8: cast-time targeting (CR 601.2c) — targeted spells pick their target
+  // BEFORE the cast; the choice rides on the stack entry.
+  const spellTargetKinds = (data: CardData | undefined): TargetRef["kind"][] => {
+    const effects = data ? scriptFor(data)?.onResolve?.effects ?? [] : [];
+    const kinds = new Set<TargetRef["kind"]>();
+    for (const e of effects) for (const k of effectTargetKinds(e)) kinds.add(k);
+    return [...kinds];
+  };
+  const castWithTarget = (target: TargetRef): void => {
+    if (!pendingCast) return;
+    send({
+      type: "moveCard",
+      instanceId: pendingCast.instanceId,
+      from: "hand",
+      to: "stack",
+      override: pendingCast.override === true ? true : undefined,
+      target,
+    });
+    setPendingCast(null);
+  };
+  /** True when the cast was intercepted for target selection first. */
+  const beginCast = (gc: GameCard, override = false): boolean => {
+    const kinds = spellTargetKinds(cards[gc.cardId]);
+    if (kinds.length === 0) return false;
+    setPendingCast({ instanceId: gc.instanceId, name: nameOf(gc, cards[gc.cardId]), kinds, override });
+    return true;
+  };
+
   const resolveWithTarget = (target: TargetRef): void => {
     send({ type: "resolveTopOfStack", target });
     setTargetingTrigger(null);
@@ -659,11 +716,11 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
         ? [{ label: "Play to battlefield", onClick: () => send({ type: "moveCard" as const, instanceId: gc.instanceId, from: "hand" as const, to: "battlefield" as const }) }]
         : []),
       { label: "Play face down", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "battlefield", faceDown: true }) },
-      { label: "Cast (put on stack)", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "stack" }) },
+      { label: "Cast (put on stack)", onClick: () => { if (!beginCast(gc)) send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "stack" }); } },
       // v5 escape hatches: additional-land effects / alternative & reduced costs.
       isLand
         ? { label: "Play as additional land (override)", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "battlefield", override: true }) }
-        : { label: "Cast without paying (override)", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "stack", override: true }) },
+        : { label: "Cast without paying (override)", onClick: () => { if (!beginCast(gc, true)) send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "stack", override: true }); } },
       { label: "Discard", separator: true, onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "graveyard" }) },
       { label: "Exile", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "exile" }) },
       { label: "Top of library", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "library" }) },
@@ -708,6 +765,10 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
 
   const clickMyBattlefieldCard = (gc: GameCard, e: ReactMouseEvent<HTMLDivElement>): void => {
     if (!canAct) return;
+    if (pendingCast && pendingCast.kinds.includes("permanent")) {
+      castWithTarget({ kind: "permanent", instanceId: gc.instanceId });
+      return;
+    }
     if (targetingTrigger && topTargetKinds.includes("permanent")) {
       resolveWithTarget({ kind: "permanent", instanceId: gc.instanceId });
       return;
@@ -741,6 +802,10 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
   };
 
   const clickOppBattlefieldCard = (gc: GameCard): void => {
+    if (pendingCast && canAct && pendingCast.kinds.includes("permanent")) {
+      castWithTarget({ kind: "permanent", instanceId: gc.instanceId });
+      return;
+    }
     if (targetingTrigger && canAct && topTargetKinds.includes("permanent")) {
       resolveWithTarget({ kind: "permanent", instanceId: gc.instanceId });
       return;
@@ -760,6 +825,11 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
     lastHandPlay.current = Date.now();
     const tl = (cards[gc.cardId]?.typeLine ?? "").toLowerCase();
     const to: ZoneName = tl.includes("land") ? "battlefield" : "stack";
+    // v8: targeted spells pick their target first; the cast follows the click.
+    if (to === "stack" && beginCast(gc)) {
+      setSelectedHand(null);
+      return;
+    }
     send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to });
     setSelectedHand(null);
   };
@@ -872,8 +942,44 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
         <SandboxToolbar meId={me.playerId} oppId={opp.playerId} oppName={nameFor(opp.playerId)} />
       )}
 
+      {/* v8: cast-time target picker — choose, then the spell is cast */}
+      {pendingCast && (
+        <div className="fixed left-1/2 top-2 z-[60] flex -translate-x-1/2 animate-fade-in items-center gap-2 rounded-full border border-red-400/50 bg-felt-900 px-4 py-1.5 text-xs font-semibold text-red-200 shadow-card-lg">
+          <span>
+            {pendingCast.kinds.includes("stack")
+              ? `Choose a spell for ${pendingCast.name} to counter — click a highlighted spell on the stack`
+              : `Choose a target for ${pendingCast.name} — click any battlefield card, or:`}
+          </span>
+          {pendingCast.kinds.includes("player") && (
+            <>
+              <button
+                type="button"
+                className="rounded-full border border-red-400/50 bg-red-500/15 px-2.5 py-0.5 text-[10px] font-bold text-red-200 hover:bg-red-500/30"
+                onClick={() => castWithTarget({ kind: "player", playerId: opp.playerId })}
+              >
+                {nameFor(opp.playerId)}
+              </button>
+              <button
+                type="button"
+                className="rounded-full border border-red-400/50 bg-red-500/15 px-2.5 py-0.5 text-[10px] font-bold text-red-200 hover:bg-red-500/30"
+                onClick={() => castWithTarget({ kind: "player", playerId: me.playerId })}
+              >
+                yourself
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] hover:bg-white/20"
+            onClick={() => setPendingCast(null)}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
       {/* v6/v7: target picker for the resolving trigger / spell effect */}
-      {targetingTrigger && topOfStack && (
+      {targetingTrigger && !pendingCast && topOfStack && (
         <div className="fixed left-1/2 top-2 z-[60] flex -translate-x-1/2 animate-fade-in items-center gap-2 rounded-full border border-red-400/50 bg-felt-900 px-4 py-1.5 text-xs font-semibold text-red-200 shadow-card-lg">
           <span>
             {topTargetKinds.includes("stack")
@@ -968,7 +1074,6 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
                   send({ type: "resolveTopOfStack" });
                 }
               }}
-              onCounter={() => send({ type: "counterTopOfStack" })}
               onDecline={(instanceId) => send({ type: "declineTrigger", instanceId })}
               disabled={!canAct || gs.stack.length === 0}
               resolveDisabled={topNeedsTarget && !iControlTop}
@@ -982,9 +1087,27 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
               targetableIds={
                 targetingTrigger && topTargetKinds.includes("stack")
                   ? new Set(gs.stack.filter((c) => !c.isTrigger).map((c) => c.instanceId))
-                  : undefined
+                  : pendingCast?.kinds.includes("stack")
+                    ? new Set(
+                        gs.stack
+                          .filter((c) => !c.isTrigger && c.instanceId !== pendingCast.instanceId)
+                          .map((c) => c.instanceId)
+                      )
+                    : undefined
               }
-              onPickTarget={(instanceId) => resolveWithTarget({ kind: "stack", instanceId })}
+              onPickTarget={(instanceId) =>
+                pendingCast
+                  ? castWithTarget({ kind: "stack", instanceId })
+                  : resolveWithTarget({ kind: "stack", instanceId })
+              }
+              targetLabelFor={(t) => {
+                if (t.kind === "player") return nameFor(t.playerId);
+                const c =
+                  t.kind === "stack"
+                    ? gs.stack.find((x) => x.instanceId === t.instanceId)
+                    : permanents.get(t.instanceId);
+                return c ? nameOf(c, cards[c.cardId]) : "(target gone)";
+              }}
             />
             <div className="flex min-w-0 flex-1 flex-col justify-center gap-1">
               <div className="flex items-center justify-center gap-2">
@@ -1188,19 +1311,9 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
             </div>
           </div>
 
-          {/* Quick actions (v4: no free Draw — draws come from the draw step
-              and card effects; the library menu keeps a confirmed override) */}
-          <div className="grid grid-cols-2 gap-1.5">
-            <button type="button" className="btn-ghost !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => send({ type: "untapAll" })}>
-              Untap all
-            </button>
-            <button type="button" className="btn-ghost !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => setTokenOpen(true)}>
-              Create token
-            </button>
-            <button type="button" className="btn-ghost col-span-2 !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => send({ type: "revealHand" })}>
-              Reveal hand
-            </button>
-          </div>
+          {/* v8: no quick-action buttons — untapping happens at the untap
+              step, tokens come from scripted effects/amass, and free draws
+              stay behind the library menu's confirmed override. */}
           <button
             type="button"
             className="btn-ghost w-full !py-1.5 !text-[11px]"
@@ -1373,7 +1486,6 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
       )}
 
       {/* Token dialog */}
-      {tokenOpen && <TokenDialog onClose={() => setTokenOpen(false)} onCreate={(a) => { send(a); setTokenOpen(false); }} />}
 
       {/* Concede confirm */}
       {concedeOpen && (
@@ -1848,77 +1960,5 @@ function SearchLibraryModal({ pending, library, cards, onComplete }: SearchLibra
         </div>
       </div>
     </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Token dialog
-// ---------------------------------------------------------------------------
-
-interface TokenDialogProps {
-  onClose: () => void;
-  onCreate: (action: GameAction) => void;
-}
-
-function TokenDialog({ onClose, onCreate }: TokenDialogProps): JSX.Element {
-  const [name, setName] = useState("Soldier");
-  const [typeLine, setTypeLine] = useState("Token Creature — Soldier");
-  const [power, setPower] = useState("1");
-  const [toughness, setToughness] = useState("1");
-  const [count, setCount] = useState(1);
-  const [tapped, setTapped] = useState(false);
-
-  const create = (): void => {
-    if (name.trim().length === 0) return;
-    onCreate({
-      type: "createToken",
-      name: name.trim(),
-      typeLine: typeLine.trim() || "Token",
-      power: power.trim() || undefined,
-      toughness: toughness.trim() || undefined,
-      count: Math.max(1, count),
-      tapped: tapped || undefined,
-    });
-  };
-
-  return (
-    <Modal title="Create token" onClose={onClose} onConfirm={create} confirmLabel="Create" confirmDisabled={name.trim().length === 0} width="sm">
-      <div className="space-y-3">
-        <div>
-          <label className="label" htmlFor="tok-name">Name</label>
-          <input id="tok-name" className="input" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
-        </div>
-        <div>
-          <label className="label" htmlFor="tok-type">Type line</label>
-          <input id="tok-type" className="input" value={typeLine} onChange={(e) => setTypeLine(e.target.value)} />
-        </div>
-        <div className="grid grid-cols-3 gap-2">
-          <div>
-            <label className="label" htmlFor="tok-p">Power</label>
-            <input id="tok-p" className="input" value={power} onChange={(e) => setPower(e.target.value)} />
-          </div>
-          <div>
-            <label className="label" htmlFor="tok-t">Toughness</label>
-            <input id="tok-t" className="input" value={toughness} onChange={(e) => setToughness(e.target.value)} />
-          </div>
-          <div>
-            <label className="label" htmlFor="tok-n">Count</label>
-            <input
-              id="tok-n"
-              type="number"
-              min={1}
-              max={20}
-              className="input"
-              value={count}
-              onChange={(e) => setCount(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
-            />
-          </div>
-        </div>
-        <label className="flex items-center gap-2 text-xs text-zinc-300">
-          <input type="checkbox" className="accent-amber-400" checked={tapped} onChange={(e) => setTapped(e.target.checked)} />
-          Enters tapped
-        </label>
-      </div>
-    </Modal>
   );
 }

@@ -2071,3 +2071,112 @@ describe("stack-first casting & counterspells (v7)", () => {
     expect(s.log.some((e) => /goes to the stack first/.test(e.message))).toBe(true);
   });
 });
+
+describe("cast-time targets (v8)", () => {
+  const bolt: CardData = {
+    id: "bolt", name: "Lightning Bolt", manaCost: "{R}", cmc: 1, typeLine: "Instant",
+    colors: [], colorIdentity: [], layout: "normal",
+  };
+  const csp: CardData = {
+    id: "csp", name: "Counterspell", manaCost: "{U}{U}", cmc: 2, typeLine: "Instant",
+    colors: [], colorIdentity: [], layout: "normal",
+  };
+  const ctxOf = () => ({
+    cards: { bolt, csp },
+    scripts: {
+      bolt: { triggers: [], onResolve: { effects: [{ kind: "damageAnyTarget", amount: 3 }] } } as CardScript,
+      csp: { triggers: [], onResolve: { effects: [{ kind: "counterTarget" }] } } as CardScript,
+    },
+  });
+
+  function withHand(cardId: string, instanceId: string, owner = "p1") {
+    const g = newGame();
+    const c = mkCard(owner, 990);
+    c.cardId = cardId;
+    c.instanceId = instanceId;
+    player(g, owner).zones.hand.push(c);
+    return g;
+  }
+
+  it("casting with a target stores chosenTarget, logs it, and resolves without re-picking", () => {
+    const ctx = ctxOf();
+    const g = withHand("bolt", "bolt1");
+    let s = applyAction(
+      g, "p1",
+      { type: "moveCard", instanceId: "bolt1", from: "hand", to: "stack", override: true, target: { kind: "player", playerId: "p2" } },
+      0, ctx
+    );
+    expect(s.stack[0]!.chosenTarget).toEqual({ kind: "player", playerId: "p2" });
+    expect(s.log.some((e) => /chose .* as the target of Lightning Bolt/.test(e.message))).toBe(true);
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx); // spell -> effect entry
+    expect(s.stack[0]!.chosenTarget).toEqual({ kind: "player", playerId: "p2" }); // inherited
+    // Either player may resolve a pre-targeted entry; no action.target needed.
+    s = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(player(s, "p2").life).toBe(17);
+  });
+
+  it("a stale chosen target fizzles at resolution (CR 608.2b)", () => {
+    const ctx = ctxOf();
+    const g = withHand("bolt", "bolt1");
+    const bear = mkCard("p2", 991);
+    player(g, "p2").zones.battlefield.push(bear);
+    let s = applyAction(
+      g, "p1",
+      { type: "moveCard", instanceId: "bolt1", from: "hand", to: "stack", override: true, target: { kind: "permanent", instanceId: bear.instanceId } },
+      0, ctx
+    );
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx); // effect entry, target = bear
+    // The bear leaves the battlefield before the effect resolves.
+    s = applyAction(s, "p2", { type: "moveCard", instanceId: bear.instanceId, from: "battlefield", to: "graveyard" }, 0, ctx);
+    const before = JSON.stringify([player(s, "p1").life, player(s, "p2").life]);
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(JSON.stringify([player(s, "p1").life, player(s, "p2").life])).toBe(before); // nobody took damage
+    expect(s.log.some((e) => /is gone — the effect fizzles/.test(e.message))).toBe(true);
+  });
+
+  it("rejects an illegal cast target (kind mismatch and self-target)", () => {
+    const ctx = ctxOf();
+    const g = withHand("csp", "csp1", "p2");
+    // Counterspell targets the stack only — a player is illegal at cast time.
+    expect(() =>
+      applyAction(
+        g, "p2",
+        { type: "moveCard", instanceId: "csp1", from: "hand", to: "stack", override: true, target: { kind: "player", playerId: "p1" } },
+        0, ctx
+      )
+    ).toThrow(/targets stack/);
+    // And a spell cannot target itself.
+    expect(() =>
+      applyAction(
+        g, "p2",
+        { type: "moveCard", instanceId: "csp1", from: "hand", to: "stack", override: true, target: { kind: "stack", instanceId: "csp1" } },
+        0, ctx
+      )
+    ).toThrow(/cannot target itself/);
+  });
+
+  it("a pre-targeted Counterspell counters on resolution with no further clicks", () => {
+    const ctx = ctxOf();
+    const g = withHand("bolt", "bolt1");
+    const cspCard = mkCard("p2", 992);
+    cspCard.cardId = "csp";
+    cspCard.instanceId = "csp1";
+    player(g, "p2").zones.hand.push(cspCard);
+    // p1 casts Bolt at p2's face; p2 responds, targeting the Bolt at cast time.
+    let s = applyAction(
+      g, "p1",
+      { type: "moveCard", instanceId: "bolt1", from: "hand", to: "stack", override: true, target: { kind: "player", playerId: "p2" } },
+      0, ctx
+    );
+    s = applyAction(
+      s, "p2",
+      { type: "moveCard", instanceId: "csp1", from: "hand", to: "stack", override: true, target: { kind: "stack", instanceId: "bolt1" } },
+      0, ctx
+    );
+    s = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx); // csp -> effect entry (pre-targeted)
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx); // either player resolves it
+    expect(s.stack).toHaveLength(0); // bolt countered, nothing left
+    expect(player(s, "p1").zones.graveyard.some((c) => c.instanceId === "bolt1")).toBe(true);
+    expect(player(s, "p2").life).toBe(20); // the bolt never resolved
+  });
+});

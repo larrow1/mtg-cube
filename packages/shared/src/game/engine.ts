@@ -656,37 +656,31 @@ export function applyAction(
       if (card.isTrigger) {
         // v6: targeted triggers — the CONTROLLER chooses a legal target at
         // resolution (house rule; real Magic picks at stack time, CR 603.3d).
+        // v8: entries carrying a cast-time chosenTarget resolve without a new
+        // choice (either player may click); a stale chosen target fizzles.
         let target: TargetRef | undefined;
         if (effectNeedsTarget(card.triggerEffect)) {
-          if (card.controllerId !== actorId) {
-            throw new EngineError("Only the trigger's controller may resolve it (they choose its target)");
-          }
-          target = action.target;
-          if (!target) {
+          if (action.target) {
+            if (card.controllerId !== actorId) {
+              throw new EngineError("Only the trigger's controller may resolve it (they choose its target)");
+            }
+            validateTarget(s, action.target, effectTargetKinds(card.triggerEffect));
+            target = action.target;
+          } else if (card.chosenTarget) {
+            if (targetStillLegal(s, card.chosenTarget)) {
+              target = card.chosenTarget;
+            } else {
+              logs.push(
+                `the chosen target for ${cardLabel(card)} is gone — the effect fizzles (CR 608.2b)`
+              );
+            }
+          } else {
+            if (card.controllerId !== actorId) {
+              throw new EngineError("Only the trigger's controller may resolve it (they choose its target)");
+            }
             throw new EngineError(
               `The trigger from ${cardLabel(card)} needs a target — choose a creature, player, or other permanent`
             );
-          }
-          const allowedKinds = effectTargetKinds(card.triggerEffect);
-          if (!allowedKinds.includes(target.kind)) {
-            throw new EngineError(
-              `That effect targets ${allowedKinds.join("/")} — a ${target.kind} is not a legal target`
-            );
-          }
-          if (target.kind === "player") {
-            const pid = target.playerId;
-            if (!s.players.some((p) => p.playerId === pid)) {
-              throw new EngineError(`Unknown target player "${pid}"`);
-            }
-          } else if (target.kind === "stack") {
-            const targetId = target.instanceId;
-            const spell = s.stack.find((c) => c.instanceId === targetId);
-            if (!spell) throw new EngineError(`Target ${targetId} is not on the stack`);
-            if (spell.isTrigger) {
-              throw new EngineError("Only spells can be targeted on the stack (abilities use the Counter button)");
-            }
-          } else if (!findOnAnyBattlefield(s, target.instanceId)) {
-            throw new EngineError(`Target ${target.instanceId} is not on the battlefield`);
           }
         }
         resolveTrigger(s, card, logs, target);
@@ -701,6 +695,7 @@ export function applyAction(
         const owner = s.players.find((p) => p.playerId === card.ownerId) ?? actor;
         const spellName = cardLabel(card);
         const spellController = card.controllerId;
+        const castTarget = card.chosenTarget; // captured before resetCardState clears it
         resetCardState(card);
         owner.zones.graveyard.push(card);
         const effects = ctx.scripts?.[card.cardId]?.onResolve?.effects;
@@ -731,6 +726,7 @@ export function applyAction(
             triggerOptional: false,
             triggerSourceId: card.instanceId,
           };
+          if (castTarget) entry.chosenTarget = castTarget; // v8: inherit the cast-time target
           s.stack.push(entry);
           logs.push(
             `resolved ${spellName} — its effect went on the stack (the card is in the graveyard)`
@@ -971,6 +967,7 @@ function resetCardState(card: GameCard): void {
   card.attacking = false;
   card.blocking = null;
   card.sortIndex = 0;
+  delete card.chosenTarget; // a cast-time target dies with the stack entry
 }
 
 /** Detach every card that was attached to `instanceId`. */
@@ -1073,6 +1070,50 @@ function pushTriggers(
     s.stack.push(trigger);
     logs.push(`trigger from ${cardLabel(source)} went on the stack: "${t.description}"`);
   }
+}
+
+/** Throw unless `target` is a currently-legal target of an allowed kind. */
+function validateTarget(s: GameState, target: TargetRef, allowedKinds: TargetRef["kind"][]): void {
+  if (allowedKinds.length > 0 && !allowedKinds.includes(target.kind)) {
+    throw new EngineError(
+      `That effect targets ${allowedKinds.join("/")} — a ${target.kind} is not a legal target`
+    );
+  }
+  if (target.kind === "player") {
+    const pid = target.playerId;
+    if (!s.players.some((p) => p.playerId === pid)) {
+      throw new EngineError(`Unknown target player "${pid}"`);
+    }
+  } else if (target.kind === "stack") {
+    const targetId = target.instanceId;
+    const spell = s.stack.find((c) => c.instanceId === targetId);
+    if (!spell) throw new EngineError(`Target ${targetId} is not on the stack`);
+    if (spell.isTrigger) {
+      throw new EngineError("Only spells can be targeted on the stack");
+    }
+  } else if (!findOnAnyBattlefield(s, target.instanceId)) {
+    throw new EngineError(`Target ${target.instanceId} is not on the battlefield`);
+  }
+}
+
+/** Is a previously-chosen target still legal (CR 608.2b re-check)? */
+function targetStillLegal(s: GameState, target: TargetRef): boolean {
+  if (target.kind === "player") return s.players.some((p) => p.playerId === target.playerId);
+  if (target.kind === "stack") {
+    const spell = s.stack.find((c) => c.instanceId === target.instanceId);
+    return spell !== undefined && spell.isTrigger !== true;
+  }
+  return findOnAnyBattlefield(s, target.instanceId) !== undefined;
+}
+
+/** Human-readable label for a target, for cast/stack logs. */
+function targetLabel(s: GameState, target: TargetRef): string {
+  if (target.kind === "player") return playerLabel(target.playerId);
+  const card =
+    target.kind === "stack"
+      ? s.stack.find((c) => c.instanceId === target.instanceId)
+      : findOnAnyBattlefield(s, target.instanceId);
+  return card ? cardLabel(card) : target.instanceId;
 }
 
 /** Does an effect (recursing seq) require a TargetRef to resolve? */
@@ -1424,6 +1465,18 @@ function applyMoveCard(
     case "stack":
       card.controllerId = actor.playerId;
       s.stack.push(card);
+      // v8: a target chosen at cast time (CR 601.2c) rides on the entry.
+      if (action.target) {
+        if (action.target.kind === "stack" && action.target.instanceId === card.instanceId) {
+          throw new EngineError("A spell cannot target itself");
+        }
+        const spellEffects = ctx.scripts?.[card.cardId]?.onResolve?.effects ?? [];
+        const kinds = new Set<TargetRef["kind"]>();
+        for (const e of spellEffects) for (const k of effectTargetKinds(e)) kinds.add(k);
+        validateTarget(s, action.target, [...kinds]);
+        card.chosenTarget = action.target;
+        logs.push(`chose ${targetLabel(s, action.target)} as the target of ${cardLabel(card)}`);
+      }
       break;
     case "library":
       if (action.toBottom) actor.zones.library.push(card);

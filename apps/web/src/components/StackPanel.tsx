@@ -8,7 +8,7 @@
  * is unmissable.
  */
 import { useEffect, useMemo, useRef } from "react";
-import type { CardData, GameCard } from "@mtg-cube/shared";
+import type { CardData, GameCard, TargetRef } from "@mtg-cube/shared";
 import { Card } from "./Card";
 import { nameOf } from "../lib/cards";
 
@@ -19,7 +19,6 @@ interface StackPanelProps {
   /** The viewing player's id (undefined for spectators) — gates Decline. */
   viewerId?: string;
   onResolve: () => void;
-  onCounter: () => void;
   onDecline: (instanceId: string) => void;
   disabled: boolean;
   /** v6: extra gate for the trigger Resolve button (targeted triggers are
@@ -30,9 +29,11 @@ interface StackPanelProps {
    *  are clickable and highlighted. */
   targetableIds?: ReadonlySet<string>;
   onPickTarget?: (instanceId: string) => void;
+  /** v8: renders a chosenTarget as a human label ("Goldfish", "Runeclaw Bear"). */
+  targetLabelFor?: (target: TargetRef) => string;
 }
 
-export function StackPanel({ stack, cards, nameFor, viewerId, onResolve, onCounter, onDecline, disabled, resolveDisabled, resolveTitle, targetableIds, onPickTarget }: StackPanelProps): JSX.Element {
+export function StackPanel({ stack, cards, nameFor, viewerId, onResolve, onDecline, disabled, resolveDisabled, resolveTitle, targetableIds, onPickTarget, targetLabelFor }: StackPanelProps): JSX.Element {
   const reversed = [...stack].reverse(); // render top of stack first
 
   // Trigger entries not present in the previous view pop in with an amber
@@ -110,6 +111,11 @@ export function StackPanel({ stack, cards, nameFor, viewerId, onResolve, onCount
                             {gc.triggerText}
                           </div>
                         )}
+                        {gc.chosenTarget && targetLabelFor && (
+                          <div className="mt-0.5 truncate text-[9px] font-semibold text-red-300">
+                            → {targetLabelFor(gc.chosenTarget)}
+                          </div>
+                        )}
                         <div className="mt-0.5 flex items-center justify-between gap-1">
                           <span className="truncate text-[9px] text-zinc-500">{nameFor(gc.controllerId)}</span>
                           {!isTop && canDecline(gc) && (
@@ -146,6 +152,9 @@ export function StackPanel({ stack, cards, nameFor, viewerId, onResolve, onCount
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-[11px] font-semibold text-zinc-100">{nameOf(gc, cards[gc.cardId])}</div>
                     <div className="truncate text-[9px] text-zinc-500">{nameFor(gc.controllerId)}</div>
+                    {gc.chosenTarget && targetLabelFor && (
+                      <div className="truncate text-[9px] font-semibold text-red-300">→ {targetLabelFor(gc.chosenTarget)}</div>
+                    )}
                     {isTop && <div className="text-[9px] font-bold uppercase tracking-wide text-brass-300">top</div>}
                   </div>
                 </div>
@@ -176,14 +185,11 @@ export function StackPanel({ stack, cards, nameFor, viewerId, onResolve, onCount
                 )}
               </>
             ) : (
-              <>
-                <button type="button" className="btn-primary flex-1 !px-2 !py-1.5 !text-[11px]" onClick={onResolve} disabled={disabled} title="Resolve the top of the stack">
-                  Resolve
-                </button>
-                <button type="button" className="btn-ghost flex-1 !px-2 !py-1.5 !text-[11px]" onClick={onCounter} disabled={disabled} title="Counter the top of the stack (to graveyard)">
-                  Counter
-                </button>
-              </>
+              // v8: no Counter button — countering is done by casting a
+              // counterspell (or ability) in response, like the tabletop.
+              <button type="button" className="btn-primary flex-1 !px-2 !py-1.5 !text-[11px]" onClick={onResolve} disabled={disabled} title="Resolve the top of the stack">
+                Resolve
+              </button>
             )}
           </div>
         </>

@@ -85,7 +85,10 @@ casting (nonland hand->battlefield redirects through the stack for a real
 response window), spell-effect stack entries (instant/sorcery resolution
 pushes its effect as an entry, card to graveyard), counterTarget + stack
 TargetRef (Counterspell and Lightning Bolt fully scripted via inference);
-245 shared tests;
+v8 cast-time targets (chosenTarget rides the stack entry, stale targets
+fizzle per CR 608.2b), priority-driven auto stack resolution, Counter/
+Untap-all/Create-token/Reveal-hand buttons removed (card-driven play);
+249 shared tests;
 Arena-style UI (draft lanes/drag-to-pick, deck builder, battlefield art
 tiles with color frames + keyword chips, mana symbols).
 

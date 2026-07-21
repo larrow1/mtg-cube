@@ -434,6 +434,11 @@ export interface GameCard {
   triggerOptional?: boolean;
   /** instanceId of the permanent whose ability triggered (may have left play). */
   triggerSourceId?: string;
+  /**
+   * v8: the target chosen when this spell was CAST (CR 601.2c), carried onto
+   * its effect entry at resolution. Stale targets fizzle (CR 608.2b).
+   */
+  chosenTarget?: TargetRef;
 }
 
 export interface PlayerGameState {
@@ -530,7 +535,9 @@ export type GameAction =
    * payment / allows an additional land drop, loudly logged (alternative
    * costs, cost reducers, extra-land effects).
    */
-  | { type: "moveCard"; instanceId: string; from: ZoneName; to: ZoneName; toBottom?: boolean; faceDown?: boolean; override?: boolean }
+  /** v8: `target` (cast path only) pre-picks the spell's target (CR 601.2c) —
+   *  validated, stored as chosenTarget, and used at resolution. */
+  | { type: "moveCard"; instanceId: string; from: ZoneName; to: ZoneName; toBottom?: boolean; faceDown?: boolean; override?: boolean; target?: TargetRef }
   | { type: "tapCard"; instanceId: string; tapped: boolean }
   /** Tap a mana source and add `color` to your pool in one validated action
    *  (color must be among the card's producedMana; card must be untapped). */
