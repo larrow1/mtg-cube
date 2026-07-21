@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { QueueState } from "@mtg-cube/shared";
 import { call } from "../socket";
 import { useApp } from "../store";
+import { AccountMenu } from "../components/AccountMenu";
 import { RankBadge } from "../components/RankBadge";
 import { useVisualTheme } from "../components/VisualThemeProvider";
 import { VISUAL_THEMES, visualThemePreview } from "../lib/visualThemes";
@@ -199,7 +200,7 @@ function SandboxPanel(): JSX.Element | null {
 }
 
 export function Home(): JSX.Element {
-  const { state, dispatch, pushToast, signOut } = useApp();
+  const { state, dispatch, pushToast } = useApp();
   const { theme: activeThemeId, setTheme } = useVisualTheme();
   const [name, setName] = useState(() => state.session?.name ?? loadName());
   const [code, setCode] = useState("");
@@ -255,26 +256,11 @@ export function Home(): JSX.Element {
           <h1 className="text-4xl font-black tracking-tight text-zinc-50">
             MTG <span className="bg-gradient-to-r from-sky-300 via-brass-300 to-amber-400 bg-clip-text text-transparent">Cube</span>
           </h1>
-          {state.account ? (
-            <button
-              type="button"
-              className="btn-ghost mt-3 !rounded-full !px-5 !py-1.5 !text-xs"
-              onClick={() => {
-                signOut();
-                pushToast("Signed out — see you on the ladder", "info");
-              }}
-            >
-              Sign out
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="btn-ghost mt-3 !rounded-full !px-5 !py-1.5 !text-xs"
-              onClick={() => dispatch({ type: "openAuth" })}
-            >
-              Sign in
-            </button>
-          )}
+          {/* Full account menu (Profile / My cubes / Admin portal / Sign out) —
+              the TopBar hides itself on Home, so this is the only entry. */}
+          <div className="mt-3 flex justify-center">
+            <AccountMenu />
+          </div>
         </div>
 
         {!state.connected && (
