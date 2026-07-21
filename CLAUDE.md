@@ -96,11 +96,14 @@ v10 whiteboard effect pipeline (effects compile to EffectTask lists →
 interceptTasks hook → executor; single arriveOnBattlefield choke point;
 entersTapped/entersWithCounters replacement rules — tap-lands just work);
 v11 real engine-enforced stack priority (`GameState.priorityPasses`;
-resolveTopOfStack/counterTopOfStack throw until both players pass in
-succession, CR 117.4-117.5; casting grants the caster priority) and direct
-spell-effect resolution (an instant/sorcery's onResolve effect applies in
-the SAME resolveTopOfStack action, CR 608 — no more synthetic effect entry;
-Auto mode reads priorityPasses instead of guessing from the log);
+resolveTopOfStack throws until both players pass in succession, CR
+117.4-117.5; casting grants the caster priority) and direct spell-effect
+resolution (an instant/sorcery's onResolve effect applies in the SAME
+resolveTopOfStack action, CR 608 — no more synthetic effect entry); v12 the
+second passPriority auto-resolves the top of the stack itself (CR 117.4 —
+resolution isn't a separate click) unless it still needs a fresh target
+choice; counterTopOfStack's priority gate was removed (manual escape hatch,
+would otherwise be unreachable) and Auto mode simplifies to "just pass";
 310 shared tests;
 Arena-style UI (draft lanes/drag-to-pick, deck builder, battlefield art
 tiles with color frames + keyword chips, mana symbols).

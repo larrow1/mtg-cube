@@ -18,6 +18,7 @@ import type {
   ZoneName,
 } from "../src/types.js";
 import { applyAction, createGame } from "../src/game/engine.js";
+import type { ActionContext } from "../src/game/engine.js";
 
 // ---------------------------------------------------------------------------
 // Helpers (modeled on test/game.test.ts)
@@ -70,9 +71,9 @@ function other(s: GameState, id: string): string {
  * passed priority in succession (CR 117.4). Keyed off `s.priorityPlayerId`
  * since who passes first depends on who last touched the stack.
  */
-function bothPass(s: GameState): GameState {
-  const s1 = applyAction(s, s.priorityPlayerId, { type: "passPriority" });
-  return applyAction(s1, s1.priorityPlayerId, { type: "passPriority" });
+function bothPass(s: GameState, ctx?: ActionContext): GameState {
+  const s1 = applyAction(s, s.priorityPlayerId, { type: "passPriority" }, 0, ctx);
+  return applyAction(s1, s1.priorityPlayerId, { type: "passPriority" }, 0, ctx);
 }
 
 /** Put a bespoke card (cardId/instanceId) into a player's zone. */
@@ -156,16 +157,14 @@ describe("v9 zoneChange other/entersBattlefield observers", () => {
     // Cast (hand -> stack), then resolve — arrival happens at resolution.
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: "bear1", from: "hand", to: "stack" }, 0, ctx);
     expect(triggersFrom(s, "w1")).toHaveLength(0); // casting alone is not an arrival
-    s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    s = bothPass(s, ctx); // auto-resolves; ctx needed for its ETB observer to fire
     expect(player(s, "p1").zones.battlefield.map((c) => c.instanceId)).toContain("bear1");
     const trig = triggersFrom(s, "w1");
     expect(trig).toHaveLength(1);
     expect(trig[0]!.controllerId).toBe("p1");
     expect(trig[0]!.cardId).toBe("watch");
-    // Resolving the observer trigger gains ITS controller the life.
+    // Both pass again; the observer trigger auto-resolves for ITS controller.
     s = bothPass(s);
-    s = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx);
     expect(player(s, "p1").life).toBe(21);
   });
 
@@ -173,8 +172,7 @@ describe("v9 zoneChange other/entersBattlefield observers", () => {
     const { g, ctx } = setup();
     put(g, "p2", "hand", "bear", "bear2");
     let s = applyAction(g, "p2", { type: "moveCard", instanceId: "bear2", from: "hand", to: "stack" }, 0, ctx);
-    s = bothPass(s);
-    s = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx);
+    s = bothPass(s, ctx);
     expect(player(s, "p2").zones.battlefield.map((c) => c.instanceId)).toContain("bear2");
     expect(triggersFrom(s, "w1")).toHaveLength(0);
   });
@@ -191,8 +189,7 @@ describe("v9 zoneChange other/entersBattlefield observers", () => {
     // Creature typeLine: hand -> battlefield redirects through the stack (v7).
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: "w2", from: "hand", to: "battlefield" }, 0, ctx);
     expect(s.stack.map((c) => c.instanceId)).toContain("w2");
-    s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    s = bothPass(s, ctx);
     expect(player(s, "p1").zones.battlefield.map((c) => c.instanceId)).toContain("w2");
     expect(s.stack.filter((c) => c.isTrigger)).toHaveLength(0);
   });
@@ -491,8 +488,7 @@ describe("v9 chained events within one action", () => {
     expect(triggersFrom(s, "wall1")).toHaveLength(1);
     const handBefore = player(s, "p1").zones.hand.length;
     // Resolving the draw-2 trigger draws twice in ONE action -> two watcher triggers.
-    s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    s = bothPass(s, ctx);
     expect(player(s, "p1").zones.hand).toHaveLength(handBefore + 2);
     expect(triggersFrom(s, "sheol1")).toHaveLength(2);
     expect(s.stack.filter((c) => c.isTrigger)).toHaveLength(2);
@@ -527,8 +523,7 @@ describe("v10 entersTapped replacement", () => {
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: "slp1", from: "hand", to: "stack" }, 0, ctx);
     const onStack = s.stack.find((c) => c.instanceId === "slp1")!;
     expect(onStack.tapped).toBe(false); // replacement applies on ARRIVAL, not on the stack
-    s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    s = bothPass(s, ctx);
     const beast = player(s, "p1").zones.battlefield.find((c) => c.instanceId === "slp1")!;
     expect(beast.tapped).toBe(true);
     expect(s.log.some((e) => /enters the battlefield tapped/.test(e.message))).toBe(true);
@@ -568,8 +563,7 @@ describe("v10 draw coalescing log parity", () => {
       },
     };
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: "whisp1", from: "hand", to: "battlefield" }, 0, ctx);
-    s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    s = bothPass(s, ctx);
     expect(logCount(s, /drew 2 cards/)).toBe(1);
     expect(logCount(s, /drew 1 card\b/)).toBe(0);
   });
@@ -589,8 +583,7 @@ describe("v10 existing effect behavior unchanged (spot checks)", () => {
       },
     };
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: "heal1", from: "hand", to: "battlefield" }, 0, ctx);
-    s = bothPass(s);
-    s = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx); // either player may click
+    s = bothPass(s, ctx); // auto-resolves once both have passed
     expect(player(s, "p1").life).toBe(24);
     expect(player(s, "p2").life).toBe(20);
   });
@@ -611,8 +604,7 @@ describe("v10 existing effect behavior unchanged (spot checks)", () => {
     expect(s.stack).toHaveLength(1);
     // Source dies while its trigger waits on the stack.
     s = applyAction(s, "p1", { type: "moveCard", instanceId: "grow1", from: "battlefield", to: "graveyard" }, 0, ctx);
-    s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    s = bothPass(s, ctx);
     expect(s.log.some((e) => /fizzled: its source is no longer on the battlefield/.test(e.message))).toBe(true);
     expect(player(s, "p1").zones.graveyard.find((c) => c.instanceId === "grow1")!.counters).toEqual({});
   });
@@ -634,8 +626,9 @@ describe("v10 existing effect behavior unchanged (spot checks)", () => {
     s = applyAction(s, "p2", { type: "moveCard", instanceId: "csp1", from: "hand", to: "stack" }, 0, ctx);
     expect(s.stack.map((c) => c.instanceId)).toEqual(["bear1", "csp1"]);
     // Counterspell resolves in ONE action: card to graveyard AND the bear is
-    // countered immediately — no intermediate stack entry.
-    s = bothPass(s);
+    // countered immediately — no intermediate stack entry. ctx forwarded so
+    // auto-resolve sees it still needs a target and stops for it.
+    s = bothPass(s, ctx);
     s = applyAction(s, "p2", { type: "resolveTopOfStack", target: { kind: "stack", instanceId: "bear1" } }, 0, ctx);
     expect(player(s, "p2").zones.graveyard.some((c) => c.instanceId === "csp1")).toBe(true);
     expect(s.stack).toHaveLength(0);
@@ -663,8 +656,7 @@ describe("trigger pseudo-card shape (new-style `when` triggers)", () => {
       },
     };
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: "bear1", from: "hand", to: "stack" }, 0, ctx);
-    s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    s = bothPass(s, ctx);
     const trig = triggersFrom(s, "w1")[0]!;
     expect(trig.isTrigger).toBe(true);
     expect(trig.instanceId).toMatch(/^tr\d+-\d+$/);
