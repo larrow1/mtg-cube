@@ -193,7 +193,15 @@ export function StackPanel({ stack, cards, nameFor, viewerId, onResolve, onDecli
             ) : (
               // v8: no Counter button — countering is done by casting a
               // counterspell (or ability) in response, like the tabletop.
-              <button type="button" className="btn-primary flex-1 !px-2 !py-1.5 !text-[11px]" onClick={onResolve} disabled={disabled} title="Resolve the top of the stack">
+              // v11: a plain spell can also need resolveDisabled/resolveTitle
+              // (a resolution-time target, or a pending priority-pass gate).
+              <button
+                type="button"
+                className="btn-primary flex-1 !px-2 !py-1.5 !text-[11px]"
+                onClick={onResolve}
+                disabled={disabled || resolveDisabled === true}
+                title={resolveTitle ?? "Resolve the top of the stack"}
+              >
                 Resolve
               </button>
             )}

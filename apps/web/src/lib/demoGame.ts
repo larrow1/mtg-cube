@@ -111,7 +111,7 @@ export const demoGameView: GameView = {
   gameId: "demo-game",
   viewerId: me,
   state: {
-    id: "demo-game", players: [playerOne, playerTwo], activePlayerId: me, priorityPlayerId: me,
+    id: "demo-game", players: [playerOne, playerTwo], activePlayerId: me, priorityPlayerId: me, priorityPasses: 0,
     turnNumber: 6, step: "main1", stack: [], startingPlayerId: me, finished: false, winnerId: null, seq: 42,
     log: [
       { seq: 42, playerId: me, message: "UI Explorer entered their first main phase.", ts: Date.now() },

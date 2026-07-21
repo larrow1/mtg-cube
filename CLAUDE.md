@@ -82,22 +82,26 @@ resolution, client target-picker banner), opponentDraws observer event
 (Bowmasters-style, draw-step first draw exempt), amass (CR 701.47a) and seq
 composite effects — Orcish Bowmasters fully automated; v7 stack-first
 casting (nonland hand->battlefield redirects through the stack for a real
-response window), spell-effect stack entries (instant/sorcery resolution
-pushes its effect as an entry, card to graveyard), counterTarget + stack
-TargetRef (Counterspell and Lightning Bolt fully scripted via inference);
-v8 cast-time targets (chosenTarget rides the stack entry, stale targets
-fizzle per CR 608.2b), priority-driven auto stack resolution, Counter/
-Untap-all/Create-token/Reveal-hand buttons removed (card-driven play);
-v9 Arena-GRE architecture (engine emits GameEvents, ONE matching pass turns
-declarative TriggerConditions into stack triggers — landfall, other-enters/
-dies, begin-of-combat, team attacks, becameTapped, draw/discard watchers now
-expressible; UNSUPPORTED_TRIGGER_CARDS 79→46) + scriptFor golden-snapshot
-blast-radius audit (test/scriptAudit.test.ts, regenerate with
-UPDATE_SCRIPT_AUDIT=1 and review the diff card-by-card);
+response window), counterTarget + stack TargetRef (Counterspell and
+Lightning Bolt fully scripted via inference); v8 cast-time targets
+(chosenTarget rides the stack entry, stale targets fizzle per CR 608.2b),
+Counter/Untap-all/Create-token/Reveal-hand buttons removed (card-driven
+play); v9 Arena-GRE architecture (engine emits GameEvents, ONE matching pass
+turns declarative TriggerConditions into stack triggers — landfall,
+other-enters/dies, begin-of-combat, team attacks, becameTapped,
+draw/discard watchers now expressible; UNSUPPORTED_TRIGGER_CARDS 79→46) +
+scriptFor golden-snapshot blast-radius audit (test/scriptAudit.test.ts,
+regenerate with UPDATE_SCRIPT_AUDIT=1 and review the diff card-by-card);
 v10 whiteboard effect pipeline (effects compile to EffectTask lists →
 interceptTasks hook → executor; single arriveOnBattlefield choke point;
 entersTapped/entersWithCounters replacement rules — tap-lands just work);
-305 shared tests;
+v11 real engine-enforced stack priority (`GameState.priorityPasses`;
+resolveTopOfStack/counterTopOfStack throw until both players pass in
+succession, CR 117.4-117.5; casting grants the caster priority) and direct
+spell-effect resolution (an instant/sorcery's onResolve effect applies in
+the SAME resolveTopOfStack action, CR 608 — no more synthetic effect entry;
+Auto mode reads priorityPasses instead of guessing from the log);
+310 shared tests;
 Arena-style UI (draft lanes/drag-to-pick, deck builder, battlefield art
 tiles with color frames + keyword chips, mana symbols).
 

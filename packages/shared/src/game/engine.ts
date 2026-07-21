@@ -219,6 +219,7 @@ export function createGame(
     players: states,
     activePlayerId: startingPlayerId,
     priorityPlayerId: startingPlayerId,
+    priorityPasses: 0,
     turnNumber: 1,
     step: "untap",
     stack: [],
@@ -278,6 +279,12 @@ export function applyAction(
   const actor = s.players[actorIdx]!;
   const opponent = s.players[actorIdx === 0 ? 1 : 0]!;
   const logs: string[] = [];
+  // v11: track consecutive priority passes since the stack's top last changed
+  // (CR 117.4). Anything that pushes a new object onto the stack — a cast,
+  // a trigger matched by runTriggerMatching below, the admin spawnCard-to-stack
+  // path — voids a pending pass sequence; this single diff check covers all
+  // of them, checked once runTriggerMatching has had its say (see below).
+  const stackLenBefore = s.stack.length;
 
   switch (action.type) {
     case "drawCard": {
@@ -679,44 +686,28 @@ export function applyAction(
         throw new EngineError("You do not have priority");
       }
       s.priorityPlayerId = opponent.playerId;
+      s.priorityPasses = Math.min(2, s.priorityPasses + 1);
       logs.push("passed priority");
       break;
     }
 
     case "resolveTopOfStack": {
+      if (s.stack.length > 0 && s.priorityPasses < 2) {
+        throw new EngineError(
+          "Both players must pass priority in succession before the stack resolves (CR 117.4) — pass priority first"
+        );
+      }
       const card = s.stack.pop();
       if (!card) throw new EngineError("The stack is empty");
+      // v11 (CR 117.5): the active player receives priority after a resolution.
+      s.priorityPasses = 0;
+      s.priorityPlayerId = s.activePlayerId;
       if (card.isTrigger) {
         // v6: targeted triggers — the CONTROLLER chooses a legal target at
         // resolution (house rule; real Magic picks at stack time, CR 603.3d).
         // v8: entries carrying a cast-time chosenTarget resolve without a new
         // choice (either player may click); a stale chosen target fizzles.
-        let target: TargetRef | undefined;
-        if (effectNeedsTarget(card.triggerEffect)) {
-          if (action.target) {
-            if (card.controllerId !== actorId) {
-              throw new EngineError("Only the trigger's controller may resolve it (they choose its target)");
-            }
-            validateTarget(s, action.target, effectTargetKinds(card.triggerEffect));
-            target = action.target;
-          } else if (card.chosenTarget) {
-            if (targetStillLegal(s, card.chosenTarget)) {
-              target = card.chosenTarget;
-            } else {
-              logs.push(
-                `the chosen target for ${cardLabel(card)} is gone — the effect fizzles (CR 608.2b)`
-              );
-            }
-          } else {
-            if (card.controllerId !== actorId) {
-              throw new EngineError("Only the trigger's controller may resolve it (they choose its target)");
-            }
-            throw new EngineError(
-              `The trigger from ${cardLabel(card)} needs a target — choose a creature, player, or other permanent`
-            );
-          }
-        }
-        resolveTrigger(s, card, logs, target);
+        resolveTrigger(s, card, logs, actorId, action);
         break;
       }
       // v4: with card data, instants/sorceries (front-face type line) resolve
@@ -733,37 +724,17 @@ export function applyAction(
         owner.zones.graveyard.push(card);
         const effects = ctx.scripts?.[card.cardId]?.onResolve?.effects;
         if (effects && effects.length > 0) {
-          // v7: the spell's EFFECT becomes its own stack entry (house model —
-          // the card is already in the graveyard); resolving the entry applies
-          // the effects through the trigger executor, target picker included.
+          // v11: the spell's effect applies immediately as part of THIS
+          // resolution (CR 608) — no more synthetic effect entry on the stack.
           const effect: TriggerEffect =
             effects.length === 1 ? effects[0]! : { kind: "seq", effects };
-          const entry: GameCard = {
-            instanceId: `se${s.seq + 1}-${triggerCounter++}`,
-            cardId: card.cardId,
-            ownerId: spellController,
-            controllerId: spellController,
-            tapped: false,
-            faceDown: false,
-            faceIndex: 0,
-            counters: {},
-            attachedTo: null,
-            isToken: false,
-            damage: 0,
-            attacking: false,
-            blocking: null,
-            sortIndex: 0,
-            isTrigger: true,
-            triggerText: ctx.cards?.[card.cardId]?.oracleText ?? `Effect of ${spellName}`,
-            triggerEffect: effect,
-            triggerOptional: false,
-            triggerSourceId: card.instanceId,
-          };
-          if (castTarget) entry.chosenTarget = castTarget; // v8: inherit the cast-time target
-          s.stack.push(entry);
-          logs.push(
-            `resolved ${spellName} — its effect went on the stack (the card is in the graveyard)`
+          const controller = s.players.find((p) => p.playerId === spellController) ?? actor;
+          const spellOpponent = s.players.find((p) => p.playerId !== spellController) ?? opponent;
+          const target = resolveEffectTarget(
+            s, effect, castTarget, spellController, actorId, action, spellName, logs
           );
+          logs.push(`resolved ${spellName} (now in the graveyard)`);
+          applyEffect(s, controller, spellOpponent, effect, spellName, undefined, logs, target);
         } else {
           logs.push(
             `resolved ${cardLabel(card)} — carry out its effects by hand (it was put into the graveyard)`
@@ -778,8 +749,16 @@ export function applyAction(
     }
 
     case "counterTopOfStack": {
+      if (s.stack.length > 0 && s.priorityPasses < 2) {
+        throw new EngineError(
+          "Both players must pass priority in succession before the stack resolves (CR 117.4) — pass priority first"
+        );
+      }
       const card = s.stack.pop();
       if (!card) throw new EngineError("The stack is empty");
+      // v11 (CR 117.5): the active player receives priority after a resolution.
+      s.priorityPasses = 0;
+      s.priorityPlayerId = s.activePlayerId;
       if (card.isTrigger) {
         // Triggers are pseudo-cards: countering one simply removes it.
         logs.push(`countered the triggered ability from ${cardLabel(card)}`);
@@ -915,6 +894,10 @@ export function applyAction(
 
   // v9: the matching pass — buffered events become trigger pseudo-cards.
   runTriggerMatching(s, logs);
+  // v11 (priority): anything that grew the stack during this action — a cast,
+  // or a trigger matched just above — voids a pending priority-pass sequence
+  // (CR 117.4).
+  if (s.stack.length > stackLenBefore) s.priorityPasses = 0;
 
   s.seq += 1;
   for (const message of logs) {
@@ -1417,12 +1400,56 @@ export function effectTargetKinds(effect: TriggerEffect | undefined): TargetRef[
 }
 
 /**
+ * v11: resolve the TargetRef for an effect at resolution time — shared by
+ * trigger resolution and instant/sorcery resolution (Lightning Bolt,
+ * Counterspell). If the effect needs a target: a FRESH `action.target`
+ * requires the actor to be `controllerId` (they choose it); a cast-time
+ * `chosenTarget` (v8) resolves for EITHER player, fizzling (logged) if it's
+ * no longer legal (CR 608.2b); with neither, only the controller may act,
+ * and they must supply one.
+ */
+function resolveEffectTarget(
+  s: GameState,
+  effect: TriggerEffect | undefined,
+  chosenTarget: TargetRef | undefined,
+  controllerId: string,
+  actorId: string,
+  action: Extract<GameAction, { type: "resolveTopOfStack" }>,
+  label: string,
+  logs: string[]
+): TargetRef | undefined {
+  if (!effectNeedsTarget(effect)) return undefined;
+  if (action.target) {
+    if (controllerId !== actorId) {
+      throw new EngineError("Only its controller may resolve it (they choose its target)");
+    }
+    validateTarget(s, action.target, effectTargetKinds(effect));
+    return action.target;
+  }
+  if (chosenTarget) {
+    if (targetStillLegal(s, chosenTarget)) return chosenTarget;
+    logs.push(`the chosen target for ${label} is gone — the effect fizzles (CR 608.2b)`);
+    return undefined;
+  }
+  if (controllerId !== actorId) {
+    throw new EngineError("Only its controller may resolve it (they choose its target)");
+  }
+  throw new EngineError(`${label} needs a target — choose a creature, player, or other permanent`);
+}
+
+/**
  * Apply a resolving trigger's effect for its CONTROLLER (not the actor —
  * either player may click resolve, except targeted triggers, which only the
  * controller resolves). State-based checks after the action pick up any
  * resulting loss.
  */
-function resolveTrigger(s: GameState, trigger: GameCard, logs: string[], target?: TargetRef): void {
+function resolveTrigger(
+  s: GameState,
+  trigger: GameCard,
+  logs: string[],
+  actorId: string,
+  action: Extract<GameAction, { type: "resolveTopOfStack" }>
+): void {
   const controller = s.players.find((p) => p.playerId === trigger.controllerId);
   const opponent = s.players.find((p) => p.playerId !== trigger.controllerId);
   if (!controller || !opponent) {
@@ -1433,6 +1460,10 @@ function resolveTrigger(s: GameState, trigger: GameCard, logs: string[], target?
     kind: "manual" as const,
     note: trigger.triggerText ?? "unknown trigger",
   };
+  const target = resolveEffectTarget(
+    s, effect, trigger.chosenTarget, trigger.controllerId, actorId, action,
+    `the trigger from ${cardLabel(trigger)}`, logs
+  );
   applyEffect(s, controller, opponent, effect, `${cardLabel(trigger)} trigger`, trigger.triggerSourceId, logs, target);
 }
 
@@ -1853,6 +1884,9 @@ function applyMoveCard(
     case "stack":
       card.controllerId = actor.playerId;
       s.stack.push(card);
+      // v11: the caster retains priority after casting (CR 117.3b/601.2i) —
+      // both players must still explicitly pass before it resolves.
+      s.priorityPlayerId = actor.playerId;
       // v8: a target chosen at cast time (CR 601.2c) rides on the entry.
       if (action.target) {
         if (action.target.kind === "stack" && action.target.instanceId === card.instanceId) {
@@ -2074,6 +2108,7 @@ function castFilterMatches(
 function enterStep(s: GameState, step: TurnStep, logs: string[]): void {
   s.step = step;
   s.priorityPlayerId = s.activePlayerId;
+  s.priorityPasses = 0;
   // Floating mana empties at EVERY step boundary, for both players.
   for (const p of s.players) p.manaPool = {};
   const active = s.players.find((p) => p.playerId === s.activePlayerId)!;
@@ -2135,6 +2170,7 @@ function advanceTurn(s: GameState, logs: string[]): void {
   const next = s.players.find((p) => p.playerId !== s.activePlayerId)!;
   s.activePlayerId = next.playerId;
   s.priorityPlayerId = next.playerId;
+  s.priorityPasses = 0;
   if (next.playerId === s.startingPlayerId) s.turnNumber += 1;
   current.landsPlayedThisTurn = 0;
   next.landsPlayedThisTurn = 0;
@@ -2192,6 +2228,7 @@ function restartGame(s: GameState, seed: string, logs: string[]): void {
   s.startingPlayerId = newStarter.playerId;
   s.activePlayerId = newStarter.playerId;
   s.priorityPlayerId = newStarter.playerId;
+  s.priorityPasses = 0;
   s.turnNumber = 1;
   s.step = "untap";
   s.finished = false;

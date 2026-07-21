@@ -18,6 +18,7 @@ import type {
   SearchFilter,
   SpawnZone,
   TargetRef,
+  TriggerEffect,
   ZoneName,
 } from "@mtg-cube/shared";
 import { canPayFor, effectNeedsTarget, effectTargetKinds, hasInstantSpeed, scriptFor } from "@mtg-cube/shared";
@@ -69,6 +70,21 @@ function getMull(view: GameView): MullMemory {
 
 function sortRow(cards: GameCard[]): GameCard[] {
   return [...cards].sort((a, b) => a.sortIndex - b.sortIndex || a.instanceId.localeCompare(b.instanceId));
+}
+
+/**
+ * v11: the effective TriggerEffect for a stack entry. Real triggers carry one
+ * directly; a plain spell card resolves straight from its onResolve script
+ * (no more synthetic effect entry), so it can also need a resolution-time
+ * target when cast without a pre-chosen one.
+ */
+function stackEffectOf(gc: GameCard, cards: Record<string, CardData>): TriggerEffect | undefined {
+  if (gc.isTrigger) return gc.triggerEffect;
+  const data = cards[gc.cardId];
+  if (!data) return undefined;
+  const effects = scriptFor(data)?.onResolve?.effects;
+  if (!effects || effects.length === 0) return undefined;
+  return effects.length === 1 ? effects[0] : { kind: "seq", effects };
 }
 
 function splitRows(battlefield: GameCard[], cards: Record<string, CardData>): Record<RowKind, GameCard[]> {
@@ -395,16 +411,15 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
 
     let action: GameAction | null = null;
     if (gs.stack.length > 0) {
-      // v8: the stack is priority-driven (CR 117.4 house flow). Holding
-      // priority with no response: pass; once the opponent's pass comes back,
-      // resolve the top. Entries still awaiting a target wait for a click.
+      // v11: the stack is priority-driven and engine-enforced (CR 117.4) —
+      // resolveTopOfStack/counterTopOfStack are rejected until both players
+      // have passed in succession (gs.priorityPasses reaches 2). Holding
+      // priority with no response: pass; once both have passed, resolve the
+      // top. Entries still awaiting a target wait for a click.
       if (gs.priorityPlayerId === me.playerId && !canActNow) {
         const top = gs.stack[gs.stack.length - 1]!;
-        const topAwaitsTarget =
-          top.isTrigger === true && effectNeedsTarget(top.triggerEffect) && !top.chosenTarget;
-        const last = gs.log[gs.log.length - 1];
-        const oppJustPassed = last?.message === "passed priority" && last.playerId === opp.playerId;
-        if (oppJustPassed) {
+        const topAwaitsTarget = effectNeedsTarget(stackEffectOf(top, cards)) && !top.chosenTarget;
+        if (gs.priorityPasses >= 2) {
           if (!topAwaitsTarget) action = { type: "resolveTopOfStack" };
           // else: the controller must pick a target by hand
         } else {
@@ -508,13 +523,14 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
   // v6/v7: targeted resolution — the controller picks a target (battlefield
   // card, a player button, or a highlighted stack spell) then resolves.
   // v8: entries carrying a cast-time target resolve without a new pick.
+  // v11: a plain spell card can also need one (resolution applies its effect
+  // directly — no more synthetic effect entry), not just trigger entries.
   const topOfStack = gs.stack[gs.stack.length - 1];
+  const topEffect = topOfStack ? stackEffectOf(topOfStack, cards) : undefined;
   const topNeedsTarget =
-    topOfStack?.isTrigger === true &&
-    effectNeedsTarget(topOfStack.triggerEffect) &&
-    topOfStack.chosenTarget === undefined;
+    topOfStack !== undefined && effectNeedsTarget(topEffect) && topOfStack.chosenTarget === undefined;
   const iControlTop = topOfStack !== undefined && topOfStack.controllerId === me.playerId;
-  const topTargetKinds = topNeedsTarget ? effectTargetKinds(topOfStack!.triggerEffect) : [];
+  const topTargetKinds = topNeedsTarget ? effectTargetKinds(topEffect) : [];
 
   // v8: cast-time targeting (CR 601.2c) — targeted spells pick their target
   // BEFORE the cast; the choice rides on the stack entry.
@@ -1135,13 +1151,15 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
               }}
               onDecline={(instanceId) => send({ type: "declineTrigger", instanceId })}
               disabled={!canAct || gs.stack.length === 0}
-              resolveDisabled={topNeedsTarget && !iControlTop}
+              resolveDisabled={(topNeedsTarget && !iControlTop) || gs.priorityPasses < 2}
               resolveTitle={
-                topNeedsTarget
-                  ? iControlTop
-                    ? "Choose a target, then it resolves"
-                    : "The trigger's controller chooses its target"
-                  : undefined
+                gs.priorityPasses < 2
+                  ? "Both players must pass priority before this resolves (CR 117.4)"
+                  : topNeedsTarget
+                    ? iControlTop
+                      ? "Choose a target, then it resolves"
+                      : "The trigger's controller chooses its target"
+                    : undefined
               }
               targetableIds={
                 targetingTrigger && topTargetKinds.includes("stack")
