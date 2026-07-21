@@ -4,11 +4,11 @@
  * rail (life/poison/mana/piles/log). Every interaction is exactly one
  * `gameAction` emit — no optimistic local mutation; rejected actions toast.
  */
-import { useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
 import type { CardData, GameAction, GameCard, GameView, PlayerGameState, ZoneName } from "@mtg-cube/shared";
 import { call } from "../socket";
 import { useApp } from "../store";
-import { classifyRow, nameOf, randomSeed, type RowKind } from "../lib/cards";
+import { classifyRow, manaPipClasses, nameOf, randomSeed, type RowKind } from "../lib/cards";
 import { Card, CardBack } from "../components/Card";
 import { ContextMenu, type ContextMenuState, type MenuItem } from "../components/ContextMenu";
 import { Modal } from "../components/Modal";
@@ -71,6 +71,25 @@ function setDragPayload(e: DragEvent, payload: DragPayload): void {
   e.dataTransfer.effectAllowed = "move";
 }
 
+/** WUBRG+C display order for produced-mana pips. */
+const MANA_ORDER = ["W", "U", "B", "R", "G", "C"] as const;
+
+const MANA_COLOR_NAMES: Record<string, string> = {
+  W: "White",
+  U: "Blue",
+  B: "Black",
+  R: "Red",
+  G: "Green",
+  C: "Colorless",
+};
+
+/** Anchor rect (viewport space) for the tap-for-mana color picker. */
+interface ManaPickerState {
+  instanceId: string;
+  colors: string[];
+  anchor: { left: number; right: number; top: number; bottom: number };
+}
+
 function readDragPayload(e: DragEvent): DragPayload | null {
   try {
     const raw = e.dataTransfer.getData("text/plain");
@@ -105,15 +124,17 @@ export function Game(): JSX.Element {
   const [londonOpen, setLondonOpen] = useState(false);
   const [attachSource, setAttachSource] = useState<string | null>(null);
   const [blockSource, setBlockSource] = useState<string | null>(null);
+  const [manaPicker, setManaPicker] = useState<ManaPickerState | null>(null);
   const [logOpen, setLogOpen] = useState(true);
   const [, forceRender] = useState(0);
 
-  // Esc cancels attach/block targeting modes and the hand selection.
+  // Esc cancels attach/block targeting modes, the mana picker and the hand selection.
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === "Escape") {
         setAttachSource(null);
         setBlockSource(null);
+        setManaPicker(null);
         setSelectedHand(null);
       }
     };
@@ -180,6 +201,23 @@ export function Game(): JSX.Element {
     return target ? nameOf(target, cards[target.cardId]) : undefined;
   };
 
+  /**
+   * Colors this battlefield card can tap for (WUBRG+C order). Tokens have no
+   * CardData and face-down cards must not leak their identity — both produce
+   * nothing here and keep the plain tap toggle.
+   */
+  const producedColorsOf = (gc: GameCard): string[] => {
+    if (gc.isToken || gc.faceDown) return [];
+    const produced = cards[gc.cardId]?.producedMana;
+    if (!produced || produced.length === 0) return [];
+    return MANA_ORDER.filter((c) => produced.includes(c));
+  };
+
+  const tapForMana = (gc: GameCard, color: string): void => {
+    send({ type: "tapForMana", instanceId: gc.instanceId, color });
+    setManaPicker(null);
+  };
+
   // -------------------------------------------------------------------------
   // Context-menu builders (my cards only — opponent cards are untouchable v1)
   // -------------------------------------------------------------------------
@@ -235,6 +273,14 @@ export function Game(): JSX.Element {
         onClick: () => send({ type: "tapCard", instanceId: gc.instanceId, tapped: !gc.tapped }),
       },
     ];
+    if (!gc.tapped) {
+      for (const color of producedColorsOf(gc)) {
+        items.push({
+          label: `Tap for ${MANA_COLOR_NAMES[color] ?? color} (${color})`,
+          onClick: () => tapForMana(gc, color),
+        });
+      }
+    }
     if (canAttackToggle) {
       items.push({
         label: gc.attacking ? "Remove from combat" : "Attack",
@@ -324,13 +370,31 @@ export function Game(): JSX.Element {
   // Click handlers
   // -------------------------------------------------------------------------
 
-  const clickMyBattlefieldCard = (gc: GameCard): void => {
+  const clickMyBattlefieldCard = (gc: GameCard, e: ReactMouseEvent<HTMLDivElement>): void => {
     if (!canAct) return;
     if (attachSource) {
       if (attachSource !== gc.instanceId) {
         send({ type: "attach", instanceId: attachSource, targetInstanceId: gc.instanceId });
       }
       setAttachSource(null);
+      return;
+    }
+    // Untapped mana producers tap for mana on plain click: one color goes
+    // straight through, several open the color picker. Tapped cards untap as
+    // before; the plain tap toggle stays reachable via the context menu.
+    const produced = gc.tapped ? [] : producedColorsOf(gc);
+    const only = produced[0];
+    if (produced.length === 1 && only !== undefined) {
+      tapForMana(gc, only);
+      return;
+    }
+    if (produced.length > 1) {
+      const r = e.currentTarget.getBoundingClientRect();
+      setManaPicker({
+        instanceId: gc.instanceId,
+        colors: produced,
+        anchor: { left: r.left, right: r.right, top: r.top, bottom: r.bottom },
+      });
       return;
     }
     send({ type: "tapCard", instanceId: gc.instanceId, tapped: !gc.tapped });
@@ -423,7 +487,7 @@ export function Game(): JSX.Element {
             dimmed={!mine && blockSource !== null && !gc.attacking}
             draggable={mine && canAct}
             onDragStart={(e) => setDragPayload(e, { instanceId: gc.instanceId, from: "battlefield" })}
-            onClick={mine ? () => clickMyBattlefieldCard(gc) : () => clickOppBattlefieldCard(gc)}
+            onClick={mine ? (e) => clickMyBattlefieldCard(gc, e) : () => clickOppBattlefieldCard(gc)}
             onContextMenu={mine && canAct ? (e) => openMenu(e, battlefieldMenu(gc)) : (e) => e.preventDefault()}
             className={gc.tapped ? "mx-3" : ""}
           />
@@ -500,8 +564,10 @@ export function Game(): JSX.Element {
               stack={gs.stack}
               cards={cards}
               nameFor={nameFor}
+              viewerId={viewerIsPlayer ? me.playerId : undefined}
               onResolve={() => send({ type: "resolveTopOfStack" })}
               onCounter={() => send({ type: "counterTopOfStack" })}
+              onDecline={(instanceId) => send({ type: "declineTrigger", instanceId })}
               disabled={!canAct || gs.stack.length === 0}
             />
             <div className="flex min-w-0 flex-1 flex-col justify-center gap-1">
@@ -532,43 +598,52 @@ export function Game(): JSX.Element {
             {renderRow(myRows.lands, true, "your lands")}
           </div>
 
-          {/* My hand fan */}
-          <div
-            className="mt-auto flex min-h-[9.5rem] items-end justify-center pb-1"
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={dropTo("hand")}
-          >
-            {myHand.length === 0 ? (
-              <span className="pb-6 text-[10px] uppercase tracking-wider text-zinc-500/70">Your hand is empty</span>
-            ) : (
-              <div className="flex items-end">
-                {myHand.map((gc, i) => {
-                  const n = myHand.length;
-                  const angle = (i - (n - 1) / 2) * Math.min(4, 36 / n);
-                  const lift = Math.abs(i - (n - 1) / 2) * Math.min(3, 24 / n);
-                  return (
-                    <div
-                      key={gc.instanceId}
-                      className="-ml-7 transition-transform duration-150 first:ml-0 hover:z-20 hover:-translate-y-4"
-                      style={{ transform: `rotate(${angle}deg) translateY(${lift}px)`, zIndex: selectedHand === gc.instanceId ? 30 : 10 }}
-                    >
-                      <Card
-                        gameCard={gc}
-                        data={cards[gc.cardId]}
-                        size="sm"
-                        selected={selectedHand === gc.instanceId}
-                        draggable={canAct}
-                        onDragStart={(e) => setDragPayload(e, { instanceId: gc.instanceId, from: "hand" })}
-                        onClick={() => setSelectedHand((cur) => (cur === gc.instanceId ? null : gc.instanceId))}
-                        onDoubleClick={() => playFromHand(gc)}
-                        onContextMenu={canAct ? (e) => openMenu(e, handMenu(gc)) : undefined}
-                        className={selectedHand === gc.instanceId ? "-translate-y-3" : ""}
-                      />
-                    </div>
-                  );
-                })}
-              </div>
+          {/* My hand fan (with the floating mana strip docked just above it) */}
+          <div className="relative mt-auto">
+            {viewerIsPlayer && (
+              <FloatingManaStrip
+                pool={me.manaPool}
+                editable={canAct}
+                onSpend={(color) => send({ type: "addMana", color, amount: -1 })}
+              />
             )}
+            <div
+              className="flex min-h-[9.5rem] items-end justify-center pb-1"
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={dropTo("hand")}
+            >
+              {myHand.length === 0 ? (
+                <span className="pb-6 text-[10px] uppercase tracking-wider text-zinc-500/70">Your hand is empty</span>
+              ) : (
+                <div className="flex items-end">
+                  {myHand.map((gc, i) => {
+                    const n = myHand.length;
+                    const angle = (i - (n - 1) / 2) * Math.min(4, 36 / n);
+                    const lift = Math.abs(i - (n - 1) / 2) * Math.min(3, 24 / n);
+                    return (
+                      <div
+                        key={gc.instanceId}
+                        className="-ml-7 transition-transform duration-150 first:ml-0 hover:z-20 hover:-translate-y-4"
+                        style={{ transform: `rotate(${angle}deg) translateY(${lift}px)`, zIndex: selectedHand === gc.instanceId ? 30 : 10 }}
+                      >
+                        <Card
+                          gameCard={gc}
+                          data={cards[gc.cardId]}
+                          size="sm"
+                          selected={selectedHand === gc.instanceId}
+                          draggable={canAct}
+                          onDragStart={(e) => setDragPayload(e, { instanceId: gc.instanceId, from: "hand" })}
+                          onClick={() => setSelectedHand((cur) => (cur === gc.instanceId ? null : gc.instanceId))}
+                          onDoubleClick={() => playFromHand(gc)}
+                          onContextMenu={canAct ? (e) => openMenu(e, handMenu(gc)) : undefined}
+                          className={selectedHand === gc.instanceId ? "-translate-y-3" : ""}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -747,6 +822,19 @@ export function Game(): JSX.Element {
 
       {/* Context menu */}
       {menu && <ContextMenu {...menu} onClose={() => setMenu(null)} />}
+
+      {/* Tap-for-mana color picker */}
+      {manaPicker && (
+        <ManaPickerPopover
+          colors={manaPicker.colors}
+          anchor={manaPicker.anchor}
+          onPick={(color) => {
+            send({ type: "tapForMana", instanceId: manaPicker.instanceId, color });
+            setManaPicker(null);
+          }}
+          onClose={() => setManaPicker(null)}
+        />
+      )}
 
       {/* Mulligan overlay */}
       {showMulligan && !londonOpen && (
@@ -931,6 +1019,132 @@ export function Game(): JSX.Element {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tap-for-mana color picker — a small anchored popover with one pip per
+// produced color. Closes on pick, click-away or Esc (ContextMenu-style).
+// ---------------------------------------------------------------------------
+
+interface ManaPickerPopoverProps {
+  colors: string[];
+  anchor: { left: number; right: number; top: number; bottom: number };
+  onPick: (color: string) => void;
+  onClose: () => void;
+}
+
+function ManaPickerPopover({ colors, anchor, onPick, onClose }: ManaPickerPopoverProps): JSX.Element {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+
+  // Center above the card; flip below when cramped; clamp into the viewport.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    let left = (anchor.left + anchor.right) / 2 - rect.width / 2;
+    left = Math.max(4, Math.min(left, window.innerWidth - rect.width - 4));
+    let top = anchor.top - rect.height - 8;
+    if (top < 4) top = Math.min(anchor.bottom + 8, window.innerHeight - rect.height - 4);
+    setPos({ left, top });
+  }, [anchor]);
+
+  useLayoutEffect(() => {
+    const close = (): void => onClose();
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") onClose();
+    };
+    // Defer so the opening click doesn't instantly close it.
+    const id = window.setTimeout(() => {
+      window.addEventListener("mousedown", close);
+      window.addEventListener("scroll", close, true);
+      window.addEventListener("keydown", onKey);
+    }, 0);
+    return () => {
+      window.clearTimeout(id);
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      ref={ref}
+      style={pos ? { left: pos.left, top: pos.top } : { left: anchor.left, top: -9999 }}
+      className="fixed z-[90] animate-pop-in rounded-full border border-amber-300/30 bg-felt-850/95 px-2 py-1.5 shadow-card-lg backdrop-blur-sm"
+      onMouseDown={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      <div className="flex items-center gap-1.5">
+        {colors.map((color) => (
+          <button
+            key={color}
+            type="button"
+            onClick={() => onPick(color)}
+            title={`Tap for ${MANA_COLOR_NAMES[color] ?? color}`}
+            className={`flex h-8 w-8 items-center justify-center rounded-full text-xs font-black shadow-card transition-all duration-150 hover:scale-110 active:scale-95 ${manaPipClasses(color)}`}
+          >
+            {color}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Floating mana strip — docked above the hand fan whenever your pool holds
+// mana. Mirrors the side-rail ManaPool; clicking a pip spends one.
+// ---------------------------------------------------------------------------
+
+interface FloatingManaStripProps {
+  pool: Record<string, number>;
+  editable: boolean;
+  onSpend: (color: string) => void;
+}
+
+function FloatingManaStrip({ pool, editable, onSpend }: FloatingManaStripProps): JSX.Element {
+  const entries = MANA_ORDER.map((c) => [c, pool[c] ?? 0] as const).filter(([, n]) => n > 0);
+  const total = entries.reduce((sum, [, n]) => sum + n, 0);
+  // Always mounted, absolutely positioned: pops in/out via CSS transitions
+  // without shifting the hand fan.
+  return (
+    <div
+      className={`absolute bottom-full left-1/2 z-30 mb-1 -translate-x-1/2 transition-all duration-200 ease-out ${
+        total > 0 ? "translate-y-0 scale-100 opacity-100" : "pointer-events-none translate-y-2 scale-75 opacity-0"
+      }`}
+      aria-hidden={total === 0}
+    >
+      <div className="flex flex-col items-center gap-1">
+        <div className="flex items-center gap-1.5 rounded-full border border-amber-300/25 bg-felt-950/85 px-3 py-1.5 shadow-[0_0_18px_rgba(251,191,36,0.22),0_8px_24px_rgba(8,6,30,0.5)] backdrop-blur-sm">
+          {entries.map(([color, n]) => (
+            <button
+              key={color}
+              type="button"
+              disabled={!editable}
+              onClick={() => onSpend(color)}
+              title={editable ? `${n} ${MANA_COLOR_NAMES[color] ?? color} — click to spend one` : `${n} ${MANA_COLOR_NAMES[color] ?? color}`}
+              className={`relative flex h-9 w-9 animate-pop-in items-center justify-center rounded-full text-sm font-black shadow-[0_0_10px_rgba(251,191,36,0.35)] transition-all duration-150 disabled:cursor-default ${manaPipClasses(color)} ${
+                editable ? "hover:scale-110 active:scale-95" : ""
+              }`}
+            >
+              {color}
+              <span
+                key={n}
+                className="animate-count-pop absolute -right-1.5 -top-1.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-felt-950 px-1 text-[10px] font-bold text-brass-300 ring-1 ring-amber-200/40"
+              >
+                {n}
+              </span>
+            </button>
+          ))}
+        </div>
+        <span className="rounded-full bg-felt-950/70 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-zinc-500">
+          Empties at end of step
+        </span>
+      </div>
     </div>
   );
 }

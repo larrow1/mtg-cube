@@ -11,17 +11,31 @@
  * Stack semantics (the engine has no CardData, so it cannot inspect
  * typeLines):
  *  - `resolveTopOfStack` pops the top of the stack onto its CONTROLLER's
- *    battlefield (the permanent case).
- *  - `counterTopOfStack` pops the top of the stack into its OWNER's graveyard.
+ *    battlefield (the permanent case), or — for trigger pseudo-cards —
+ *    applies the trigger's effect mechanically.
+ *  - `counterTopOfStack` pops the top of the stack into its OWNER's graveyard
+ *    (triggers are simply removed).
  *  - Instants/sorceries that resolve and finish are handled by the client
  *    sending `moveCard {from:"stack", to:"graveyard"}` (or exile), which is
  *    fully supported.
+ *
+ * Triggered abilities (v3): when the server passes `scripts` in the
+ * ActionContext, cards entering the battlefield (moveCard or
+ * resolveTopOfStack), dying (battlefield -> graveyard), or sitting on the
+ * active player's battlefield as the upkeep step begins push trigger
+ * pseudo-cards onto the stack (`isTrigger`, instanceId `tr{seq}-{n}`). They
+ * only ever live on the stack: resolve applies the effect, counter removes
+ * them, declineTrigger (controller + optional only) removes them from any
+ * position, restartGame drops them, and moveCard refuses to touch them.
  */
 import type {
+  CardData,
+  CardScript,
   GameAction,
   GameCard,
   GameState,
   PlayerGameState,
+  TriggerEvent,
   TurnStep,
   ZoneName,
 } from "../types.js";
@@ -54,18 +68,30 @@ export interface GamePlayerSetup {
 }
 
 /**
- * Optional display-name lookups so log entries read "Lightning Bolt" and
- * "Nissa" instead of raw ids. Purely cosmetic — never affects rules.
+ * Per-action context the server passes alongside every applyAction call.
+ * `cardNames`/`playerNames` are cosmetic (log labels); `cards`/`scripts` are
+ * rules-relevant: `cards` validates tapForMana against producedMana and
+ * `scripts` drives trigger emission. All optional — a context-less engine
+ * still enforces every v1 rule, it just emits no triggers and rejects
+ * tapForMana.
  */
 export interface ActionContext {
   /** cardId -> card name */
   cardNames?: Record<string, string>;
   /** playerId -> player name */
   playerNames?: Record<string, string>;
+  /** cardId -> static card data (tapForMana validation). */
+  cards?: Record<string, CardData>;
+  /** cardId -> triggered-ability script (trigger emission). */
+  scripts?: Record<string, CardScript>;
 }
 
 // Set per applyAction call (synchronous), read by log helpers.
 let ctx: ActionContext = {};
+
+// Per-action counter giving trigger pseudo-cards unique ids `tr{seq}-{n}`
+// (seq is unique per action; n disambiguates multiple triggers in one action).
+let triggerCounter = 0;
 
 function playerLabel(playerId: string): string {
   return ctx.playerNames?.[playerId] ?? playerId;
@@ -176,6 +202,7 @@ export function applyAction(
   context: ActionContext = {}
 ): GameState {
   ctx = context;
+  triggerCounter = 0;
   const actorIdx = state.players.findIndex((p) => p.playerId === actorId);
   if (actorIdx === -1) throw new EngineError(`Unknown player "${actorId}"`);
   if (state.finished && action.type !== "restartGame") {
@@ -207,6 +234,38 @@ export function applyAction(
       const card = findControlled(actor, action.instanceId, ["battlefield"]);
       card.tapped = action.tapped;
       logs.push(`${action.tapped ? "tapped" : "untapped"} ${cardLabel(card)}`);
+      break;
+    }
+
+    case "tapForMana": {
+      const card = findControlled(actor, action.instanceId, ["battlefield"]);
+      if (card.tapped) throw new EngineError(`${cardLabel(card)} is already tapped`);
+      const produced = ctx.cards?.[card.cardId]?.producedMana;
+      if (!produced || produced.length === 0) {
+        throw new EngineError(`${cardLabel(card)} is not a mana source`);
+      }
+      if (!produced.includes(action.color)) {
+        throw new EngineError(
+          `${cardLabel(card)} cannot produce ${action.color} (produces ${produced.join("/")})`
+        );
+      }
+      card.tapped = true;
+      actor.manaPool[action.color] = (actor.manaPool[action.color] ?? 0) + 1;
+      logs.push(`tapped ${cardLabel(card)} for {${action.color}}`);
+      break;
+    }
+
+    case "declineTrigger": {
+      const idx = s.stack.findIndex((c) => c.instanceId === action.instanceId);
+      if (idx === -1) throw new EngineError(`Trigger ${action.instanceId} is not on the stack`);
+      const trigger = s.stack[idx]!;
+      if (!trigger.isTrigger) throw new EngineError("Only triggered abilities can be declined");
+      if (trigger.controllerId !== actorId) {
+        throw new EngineError("Only the trigger's controller may decline it");
+      }
+      if (!trigger.triggerOptional) throw new EngineError("That trigger is not optional");
+      s.stack.splice(idx, 1);
+      logs.push(`declined the optional trigger from ${cardLabel(trigger)}`);
       break;
     }
 
@@ -315,31 +374,7 @@ export function applyAction(
       if (!Number.isInteger(count) || count < 1 || count > 100) {
         throw new EngineError(`token count must be an integer between 1 and 100 (got ${count})`);
       }
-      const seq = s.seq + 1;
-      for (let i = 0; i < count; i++) {
-        const token: GameCard = {
-          instanceId: count === 1 ? `t${seq}` : `t${seq}_${i}`,
-          cardId: "token",
-          ownerId: actorId,
-          controllerId: actorId,
-          tapped: action.tapped ?? false,
-          faceDown: false,
-          faceIndex: 0,
-          counters: {},
-          attachedTo: null,
-          isToken: true,
-          tokenName: action.name,
-          tokenTypeLine: action.typeLine,
-          damage: 0,
-          attacking: false,
-          blocking: null,
-          sortIndex: actor.zones.battlefield.length,
-        };
-        if (action.power !== undefined) token.tokenPower = action.power;
-        if (action.toughness !== undefined) token.tokenToughness = action.toughness;
-        actor.zones.battlefield.push(token);
-      }
-      logs.push(`created ${count} ${action.name} token${count === 1 ? "" : "s"}`);
+      spawnTokens(s, actor, { ...action, count, tapped: action.tapped ?? false }, logs);
       break;
     }
 
@@ -448,17 +483,25 @@ export function applyAction(
     case "resolveTopOfStack": {
       const card = s.stack.pop();
       if (!card) throw new EngineError("The stack is empty");
+      if (card.isTrigger) {
+        resolveTrigger(s, card, logs);
+        break;
+      }
       const controller = s.players.find((p) => p.playerId === card.controllerId) ?? actor;
       card.sortIndex = controller.zones.battlefield.length;
       controller.zones.battlefield.push(card);
       logs.push(`resolved ${cardLabel(card)} onto the battlefield`);
+      pushTriggers(s, card, controller.playerId, "etb", logs);
       break;
     }
 
     case "counterTopOfStack": {
       const card = s.stack.pop();
       if (!card) throw new EngineError("The stack is empty");
-      if (card.isToken) {
+      if (card.isTrigger) {
+        // Triggers are pseudo-cards: countering one simply removes it.
+        logs.push(`countered the triggered ability from ${cardLabel(card)}`);
+      } else if (card.isToken) {
         logs.push(`countered ${cardLabel(card)} (token ceased to exist)`);
       } else {
         const owner = s.players.find((p) => p.playerId === card.ownerId) ?? actor;
@@ -638,6 +681,187 @@ function detachFrom(s: GameState, instanceId: string): void {
   }
 }
 
+/**
+ * Create `count` tokens on `owner`'s battlefield. Shared by the createToken
+ * action and token-creating trigger effects; ids `t{seq}` / `t{seq}_{i}` are
+ * unique because seq is unique per action and at most one token batch is
+ * created per action.
+ */
+function spawnTokens(
+  s: GameState,
+  owner: PlayerGameState,
+  opts: { name: string; typeLine: string; power?: string; toughness?: string; count: number; tapped: boolean },
+  logs: string[],
+  logPrefix = ""
+): void {
+  const seq = s.seq + 1;
+  for (let i = 0; i < opts.count; i++) {
+    const token: GameCard = {
+      instanceId: opts.count === 1 ? `t${seq}` : `t${seq}_${i}`,
+      cardId: "token",
+      ownerId: owner.playerId,
+      controllerId: owner.playerId,
+      tapped: opts.tapped,
+      faceDown: false,
+      faceIndex: 0,
+      counters: {},
+      attachedTo: null,
+      isToken: true,
+      tokenName: opts.name,
+      tokenTypeLine: opts.typeLine,
+      damage: 0,
+      attacking: false,
+      blocking: null,
+      sortIndex: owner.zones.battlefield.length,
+    };
+    if (opts.power !== undefined) token.tokenPower = opts.power;
+    if (opts.toughness !== undefined) token.tokenToughness = opts.toughness;
+    owner.zones.battlefield.push(token);
+  }
+  logs.push(`${logPrefix}created ${opts.count} ${opts.name} token${opts.count === 1 ? "" : "s"}`);
+}
+
+/**
+ * Push every scripted trigger of `event` on `source` onto the stack as a
+ * pseudo-card controlled by `controllerId`. No-op without a scripts context,
+ * for tokens (no CardData), and for cards whose script lacks the event.
+ */
+function pushTriggers(
+  s: GameState,
+  source: GameCard,
+  controllerId: string,
+  event: TriggerEvent,
+  logs: string[]
+): void {
+  if (source.isToken || source.isTrigger) return;
+  const script = ctx.scripts?.[source.cardId];
+  if (!script) return;
+  for (const t of script.triggers) {
+    if (t.event !== event) continue;
+    const trigger: GameCard = {
+      instanceId: `tr${s.seq + 1}-${triggerCounter++}`,
+      // cardId points at the SOURCE card so clients can render its image.
+      cardId: source.cardId,
+      ownerId: controllerId,
+      controllerId,
+      tapped: false,
+      faceDown: false,
+      faceIndex: 0,
+      counters: {},
+      attachedTo: null,
+      isToken: false,
+      damage: 0,
+      attacking: false,
+      blocking: null,
+      sortIndex: 0,
+      isTrigger: true,
+      triggerText: t.description,
+      triggerEffect: t.effect,
+      triggerOptional: t.optional,
+      triggerSourceId: source.instanceId,
+    };
+    s.stack.push(trigger);
+    logs.push(`trigger from ${cardLabel(source)} went on the stack: "${t.description}"`);
+  }
+}
+
+/**
+ * Apply a resolving trigger's effect for its CONTROLLER (not the actor —
+ * either player may click resolve). State-based checks after the action pick
+ * up any resulting loss.
+ */
+function resolveTrigger(s: GameState, trigger: GameCard, logs: string[]): void {
+  const controller = s.players.find((p) => p.playerId === trigger.controllerId);
+  const opponent = s.players.find((p) => p.playerId !== trigger.controllerId);
+  if (!controller || !opponent) {
+    logs.push(`a trigger from ${cardLabel(trigger)} resolved with no effect (unknown controller)`);
+    return;
+  }
+  const effect = trigger.triggerEffect ?? {
+    kind: "manual" as const,
+    note: trigger.triggerText ?? "unknown trigger",
+  };
+  const label = cardLabel(trigger);
+  const who = playerLabel(controller.playerId);
+
+  switch (effect.kind) {
+    case "draw": {
+      const drawn = drawCards(controller, effect.count);
+      logs.push(`resolved ${label} trigger: ${who} drew ${drawn} card${drawn === 1 ? "" : "s"}`);
+      break;
+    }
+    case "gainLife": {
+      controller.life += effect.amount;
+      logs.push(`resolved ${label} trigger: ${who} gained ${effect.amount} life`);
+      break;
+    }
+    case "loseLife": {
+      controller.life -= effect.amount;
+      logs.push(`resolved ${label} trigger: ${who} lost ${effect.amount} life`);
+      break;
+    }
+    case "eachOpponentLosesLife": {
+      opponent.life -= effect.amount;
+      logs.push(
+        `resolved ${label} trigger: ${playerLabel(opponent.playerId)} lost ${effect.amount} life`
+      );
+      break;
+    }
+    case "damageOpponent": {
+      opponent.life -= effect.amount;
+      logs.push(
+        `resolved ${label} trigger: dealt ${effect.amount} damage to ${playerLabel(opponent.playerId)}`
+      );
+      break;
+    }
+    case "addCounters": {
+      // Counters land on the SOURCE permanent — if it already left its
+      // controller's battlefield, the trigger fizzles (logged, no effect).
+      const source = trigger.triggerSourceId
+        ? controller.zones.battlefield.find((c) => c.instanceId === trigger.triggerSourceId)
+        : undefined;
+      if (!source) {
+        logs.push(`${label} trigger fizzled: its source is no longer on the battlefield`);
+        break;
+      }
+      source.counters[effect.counterType] = (source.counters[effect.counterType] ?? 0) + effect.count;
+      logs.push(
+        `resolved ${label} trigger: put ${effect.count} ${effect.counterType} counter${
+          effect.count === 1 ? "" : "s"
+        } on ${cardLabel(source)}`
+      );
+      break;
+    }
+    case "createToken": {
+      spawnTokens(
+        s,
+        controller,
+        {
+          name: effect.name,
+          typeLine: effect.typeLine,
+          ...(effect.power !== undefined ? { power: effect.power } : {}),
+          ...(effect.toughness !== undefined ? { toughness: effect.toughness } : {}),
+          count: effect.count,
+          tapped: false,
+        },
+        logs,
+        `resolved ${label} trigger: `
+      );
+      break;
+    }
+    case "scry": {
+      // Log-only, like the scry action: the client follows up with
+      // scry/reorderLibraryTop to actually look and reorder.
+      logs.push(`resolved ${label} trigger: ${who} scries ${effect.count} (use scry to finish)`);
+      break;
+    }
+    case "manual": {
+      logs.push(`resolved ${label} trigger — carry it out by hand: ${effect.note}`);
+      break;
+    }
+  }
+}
+
 function applyMoveCard(
   s: GameState,
   actor: PlayerGameState,
@@ -673,6 +897,11 @@ function applyMoveCard(
     const idx = s.stack.findIndex((c) => c.instanceId === instanceId);
     if (idx === -1) throw new EngineError(`Card ${instanceId} is not on the stack`);
     const found = s.stack[idx]!;
+    if (found.isTrigger) {
+      throw new EngineError(
+        "Triggered abilities cannot be moved; resolve, counter, or decline them"
+      );
+    }
     if (found.ownerId !== actor.playerId && !(found.isToken && found.controllerId === actor.playerId)) {
       throw new EngineError(`You do not own ${instanceId} (you may only move cards you own, or tokens you control)`);
     }
@@ -722,12 +951,23 @@ function applyMoveCard(
 
   const dest = to === "library" ? (action.toBottom ? "the bottom of their library" : "their library") : to;
   logs.push(`moved ${moveLabel(card, from, to)} from ${from} to ${dest}`);
+
+  // Triggered abilities: entering the battlefield fires ETB triggers;
+  // battlefield -> graveyard fires dies triggers. (Tokens that ceased to
+  // exist returned above and have no scripts anyway.)
+  if (to === "battlefield") {
+    pushTriggers(s, card, card.controllerId, "etb", logs);
+  } else if (wasOnBattlefield && to === "graveyard") {
+    pushTriggers(s, card, actor.playerId, "dies", logs);
+  }
 }
 
 /** Advance to the next step within the turn, applying turn-based effects. */
 function enterStep(s: GameState, step: TurnStep, logs: string[]): void {
   s.step = step;
   s.priorityPlayerId = s.activePlayerId;
+  // Floating mana empties at EVERY step boundary, for both players.
+  for (const p of s.players) p.manaPool = {};
   const active = s.players.find((p) => p.playerId === s.activePlayerId)!;
 
   if (step === "untap") {
@@ -741,16 +981,22 @@ function enterStep(s: GameState, step: TurnStep, logs: string[]): void {
     }
   } else if (step === "cleanup") {
     for (const p of s.players) {
-      p.manaPool = {};
       for (const c of p.zones.battlefield) c.damage = 0;
     }
   }
   logs.push(`moved to the ${step} step`);
+
+  // Upkeep triggers for the active player's permanents, in sortIndex order.
+  if (step === "upkeep") {
+    const permanents = [...active.zones.battlefield].sort((a, b) => a.sortIndex - b.sortIndex);
+    for (const c of permanents) pushTriggers(s, c, c.controllerId, "upkeep", logs);
+  }
 }
 
 /** End the current turn: swap active player, apply untap-step effects. */
 function advanceTurn(s: GameState, logs: string[]): void {
-  // Cleanup semantics apply even when the turn is ended early via nextTurn.
+  // Cleanup semantics apply even when the turn is ended early via nextTurn
+  // (mana pools also empty here — every step transition clears them).
   for (const p of s.players) {
     p.manaPool = {};
     for (const c of p.zones.battlefield) {
@@ -781,10 +1027,11 @@ function advanceTurn(s: GameState, logs: string[]): void {
 function restartGame(s: GameState, seed: string, logs: string[]): void {
   const rng = createRng(seed);
 
-  // Collect owned, non-token cards from the shared stack first.
+  // Collect owned, non-token cards from the shared stack first (trigger
+  // pseudo-cards are not real cards and simply vanish on restart).
   const stackByOwner = new Map<string, GameCard[]>();
   for (const c of s.stack) {
-    if (c.isToken) continue;
+    if (c.isToken || c.isTrigger) continue;
     const list = stackByOwner.get(c.ownerId) ?? [];
     list.push(c);
     stackByOwner.set(c.ownerId, list);

@@ -15,10 +15,12 @@ import {
   getDraftView,
   openNextPacks,
   runBotPicks,
+  scriptFor,
   shuffle,
 } from "@mtg-cube/shared";
 import type {
   CardData,
+  CardScript,
   ClientToServerEvents,
   DraftConfig,
   DraftState,
@@ -365,7 +367,13 @@ export function startMatchInRoom(io: AppServer, room: Room, idA: string, idB: st
     ],
     nanoid(16)
   );
-  const match: Match = { id: matchId, playerIds: [idA, idB], game, cardLookup };
+  const match: Match = {
+    id: matchId,
+    playerIds: [idA, idB],
+    game,
+    cardLookup,
+    scripts: buildMatchScripts(cardLookup),
+  };
   room.matches.set(matchId, match);
   room.phase = "playing";
   room.touch();
@@ -376,6 +384,16 @@ export function startMatchInRoom(io: AppServer, room: Room, idA: string, idB: st
       `${playerA.name} vs ${playerB.name}`
   );
   return matchId;
+}
+
+/** Triggered-ability scripts for every card that can appear in a match. */
+function buildMatchScripts(cardLookup: Record<string, CardData>): Record<string, CardScript> {
+  const scripts: Record<string, CardScript> = {};
+  for (const [id, card] of Object.entries(cardLookup)) {
+    const script = scriptFor(card);
+    if (script) scripts[id] = script;
+  }
+  return scripts;
 }
 
 // ---------------------------------------------------------------------------
@@ -401,7 +419,15 @@ export function applyGameActionServer(
   for (const [id, card] of Object.entries(match.cardLookup)) cardNames[id] = card.name;
   const playerNames: Record<string, string> = {};
   for (const p of room.players.values()) playerNames[p.id] = p.name;
-  const next = applyAction(match.game, actorId, action, Date.now(), { cardNames, playerNames });
+  // Scripts are built once per match and cached (??= covers matches created
+  // before this field existed, e.g. across a hot-reload).
+  const scripts = (match.scripts ??= buildMatchScripts(match.cardLookup));
+  const next = applyAction(match.game, actorId, action, Date.now(), {
+    cards: match.cardLookup,
+    scripts,
+    cardNames,
+    playerNames,
+  });
 
   // The pure engine can't call Date.now(); stamp new log entries here.
   const now = Date.now();

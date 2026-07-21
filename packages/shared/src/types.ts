@@ -260,6 +260,40 @@ export interface Deck {
 export const BASIC_LAND_NAMES = ["Plains", "Island", "Swamp", "Mountain", "Forest"] as const;
 
 // ---------------------------------------------------------------------------
+// Card scripts — structured logic for triggered abilities. Scripts come from
+// oracle-text inference plus a per-card override registry (shared/cardScripts)
+// and are applied by the game engine; unparseable-but-recognized triggers fall
+// back to `manual` so nothing is silently missed.
+// ---------------------------------------------------------------------------
+
+export type TriggerEvent = "etb" | "dies" | "upkeep";
+
+export type TriggerEffect =
+  | { kind: "draw"; count: number }
+  | { kind: "gainLife"; amount: number }
+  | { kind: "loseLife"; amount: number }
+  | { kind: "eachOpponentLosesLife"; amount: number }
+  | { kind: "damageOpponent"; amount: number }
+  | { kind: "addCounters"; counterType: string; count: number }
+  | { kind: "createToken"; name: string; typeLine: string; power?: string; toughness?: string; count: number }
+  | { kind: "scry"; count: number }
+  /** Recognized trigger with no automated effect: resolve = log; do it by hand. */
+  | { kind: "manual"; note: string };
+
+export interface CardTrigger {
+  event: TriggerEvent;
+  /** "You may…" triggers can be declined by their controller. */
+  optional: boolean;
+  /** Human-readable ability text shown on the stack. */
+  description: string;
+  effect: TriggerEffect;
+}
+
+export interface CardScript {
+  triggers: CardTrigger[];
+}
+
+// ---------------------------------------------------------------------------
 // Game (1v1 match)
 // ---------------------------------------------------------------------------
 
@@ -312,6 +346,17 @@ export interface GameCard {
   blocking: string | null;
   /** Client-driven ordering hint within a battlefield row. */
   sortIndex: number;
+  /**
+   * Trigger pseudo-objects: engine-created stack entries representing a
+   * triggered ability (not a real card). They only ever live on the stack;
+   * resolving applies `triggerEffect`, declining (optional only) removes them.
+   */
+  isTrigger?: boolean;
+  triggerText?: string;
+  triggerEffect?: TriggerEffect;
+  triggerOptional?: boolean;
+  /** instanceId of the permanent whose ability triggered (may have left play). */
+  triggerSourceId?: string;
 }
 
 export interface PlayerGameState {
@@ -374,6 +419,11 @@ export type GameAction =
   | { type: "drawCard"; count?: number }
   | { type: "moveCard"; instanceId: string; from: ZoneName; to: ZoneName; toBottom?: boolean; faceDown?: boolean }
   | { type: "tapCard"; instanceId: string; tapped: boolean }
+  /** Tap a mana source and add `color` to your pool in one validated action
+   *  (color must be among the card's producedMana; card must be untapped). */
+  | { type: "tapForMana"; instanceId: string; color: string }
+  /** Remove an optional ("you may") trigger you control from the stack. */
+  | { type: "declineTrigger"; instanceId: string }
   | { type: "untapAll" }
   | { type: "setLife"; playerId: string; life: number }
   | { type: "setPoison"; playerId: string; poison: number }

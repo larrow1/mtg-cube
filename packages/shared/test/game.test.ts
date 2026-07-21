@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { GameCard, GameState } from "../src/types.js";
+import type { CardData, CardScript, GameCard, GameState, TriggerEffect, TriggerEvent } from "../src/types.js";
 import { EngineError, applyAction, createGame } from "../src/game/engine.js";
 
 function mkCard(owner: string, i: number): GameCard {
@@ -47,6 +47,29 @@ function other(s: GameState, id: string): string {
 /** First instanceId in a player's hand. */
 function handCard(s: GameState, id: string): string {
   return player(s, id).zones.hand[0]!.instanceId;
+}
+
+/** One-trigger CardScript for engine tests. */
+function mkScript(event: TriggerEvent, effect: TriggerEffect, optional = false): CardScript {
+  return { triggers: [{ event, optional, description: `test ${event} trigger`, effect }] };
+}
+
+/** Minimal CardData (only tapForMana reads it — via producedMana). */
+function mkCardData(id: string, producedMana?: string[]): CardData {
+  return {
+    id,
+    name: `Card ${id}`,
+    cmc: 0,
+    typeLine: "Land",
+    colors: [],
+    colorIdentity: [],
+    layout: "normal",
+    ...(producedMana ? { producedMana } : {}),
+  };
+}
+
+function lastLog(s: GameState): string {
+  return s.log[s.log.length - 1]!.message;
 }
 
 describe("createGame", () => {
@@ -286,7 +309,8 @@ describe("turn structure", () => {
     expect(s.step).toBe("draw");
     expect(player(s, active).zones.hand).toHaveLength(7);
 
-    // Walk to cleanup; mana + damage clear there.
+    // Mana pools empty at every step boundary (v3 rule), so floating mana
+    // never survives a walk to cleanup; damage also clears at cleanup.
     s = applyAction(s, active, { type: "addMana", color: "R", amount: 2 });
     while (s.step !== "cleanup") s = applyAction(s, active, { type: "nextStep" });
     expect(player(s, active).manaPool).toEqual({});
@@ -549,5 +573,329 @@ describe("revealHand", () => {
     const s = applyAction(g, "p1", { type: "revealHand" });
     expect(s.log[s.log.length - 1]!.message).toMatch(/revealed their hand \(7 cards\)/);
     expect(player(s, "p1").zones).toEqual(player(g, "p1").zones);
+  });
+});
+
+describe("triggered abilities", () => {
+  it("ETB via moveCard pushes a trigger pseudo-card; resolving draws for the controller", () => {
+    const g = newGame();
+    const id = handCard(g, "p1");
+    const cardId = player(g, "p1").zones.hand[0]!.cardId;
+    const ctx = { scripts: { [cardId]: mkScript("etb", { kind: "draw", count: 1 }) } };
+
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
+    expect(s.stack).toHaveLength(1);
+    const trigger = s.stack[0]!;
+    expect(trigger.isTrigger).toBe(true);
+    expect(trigger.instanceId).toMatch(/^tr\d+-0$/);
+    expect(trigger.cardId).toBe(cardId);
+    expect(trigger.controllerId).toBe("p1");
+    expect(trigger.triggerSourceId).toBe(id);
+    expect(trigger.triggerOptional).toBe(false);
+
+    // Either player may resolve; the effect applies to the CONTROLLER.
+    const handBefore = player(s, "p1").zones.hand.length;
+    s = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(s.stack).toHaveLength(0);
+    expect(player(s, "p1").zones.hand).toHaveLength(handBefore + 1);
+    expect(player(s, "p1").zones.battlefield.map((c) => c.instanceId)).toEqual([id]);
+  });
+
+  it("ETB fires when a permanent resolves from the stack too", () => {
+    const g = newGame();
+    const id = handCard(g, "p1");
+    const cardId = player(g, "p1").zones.hand[0]!.cardId;
+    const ctx = { scripts: { [cardId]: mkScript("etb", { kind: "gainLife", amount: 4 }) } };
+
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "stack" }, 0, ctx);
+    expect(s.stack).toHaveLength(1);
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    // The permanent landed and its ETB trigger replaced it on the stack.
+    expect(player(s, "p1").zones.battlefield.map((c) => c.instanceId)).toEqual([id]);
+    expect(s.stack).toHaveLength(1);
+    expect(s.stack[0]!.isTrigger).toBe(true);
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(player(s, "p1").life).toBe(24);
+  });
+
+  it("no scripts context means no triggers", () => {
+    const g = newGame();
+    const id = handCard(g, "p1");
+    const s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" });
+    expect(s.stack).toHaveLength(0);
+  });
+
+  it("dies triggers fire on battlefield -> graveyard", () => {
+    const g = newGame();
+    const id = handCard(g, "p1");
+    const cardId = player(g, "p1").zones.hand[0]!.cardId;
+    const ctx = { scripts: { [cardId]: mkScript("dies", { kind: "eachOpponentLosesLife", amount: 2 }) } };
+
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
+    expect(s.stack).toHaveLength(0); // dies-only script: nothing on ETB
+    s = applyAction(s, "p1", { type: "moveCard", instanceId: id, from: "battlefield", to: "graveyard" }, 0, ctx);
+    expect(s.stack).toHaveLength(1);
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(player(s, "p2").life).toBe(18);
+  });
+
+  it("upkeep triggers fire for the active player's permanents only, in sortIndex order", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    const inactive = other(g, active);
+    const first = handCard(g, active);
+    const firstCardId = player(g, active).zones.hand[0]!.cardId;
+    let s = applyAction(g, active, { type: "moveCard", instanceId: first, from: "hand", to: "battlefield" });
+    const second = handCard(s, active);
+    const secondCardId = player(s, active).zones.hand[0]!.cardId;
+    s = applyAction(s, active, { type: "moveCard", instanceId: second, from: "hand", to: "battlefield" });
+    const theirs = handCard(s, inactive);
+    const theirsCardId = player(s, inactive).zones.hand[0]!.cardId;
+    s = applyAction(s, inactive, { type: "moveCard", instanceId: theirs, from: "hand", to: "battlefield" });
+
+    const ctx = {
+      scripts: {
+        [firstCardId]: mkScript("upkeep", { kind: "scry", count: 1 }),
+        [secondCardId]: mkScript("upkeep", { kind: "gainLife", amount: 1 }),
+        [theirsCardId]: mkScript("upkeep", { kind: "draw", count: 1 }),
+      },
+    };
+    s = applyAction(s, active, { type: "nextStep" }, 0, ctx); // untap -> upkeep
+    expect(s.step).toBe("upkeep");
+    // Only the active player's two permanents triggered, in battlefield order.
+    expect(s.stack).toHaveLength(2);
+    expect(s.stack.map((c) => c.triggerSourceId)).toEqual([first, second]);
+    expect(s.stack.every((c) => c.isTrigger && c.controllerId === active)).toBe(true);
+  });
+
+  it("optional triggers can be declined by their controller at any stack position", () => {
+    const g = newGame();
+    const optionalId = handCard(g, "p1");
+    const optionalCardId = player(g, "p1").zones.hand[0]!.cardId;
+    const ctx1 = { scripts: { [optionalCardId]: mkScript("etb", { kind: "draw", count: 1 }, true) } };
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: optionalId, from: "hand", to: "battlefield" }, 0, ctx1);
+    const optionalTrigger = s.stack[0]!.instanceId;
+    expect(s.stack[0]!.triggerOptional).toBe(true);
+
+    // Pile a second (mandatory) trigger on top so the optional one is buried.
+    const mandatoryId = handCard(s, "p1");
+    const mandatoryCardId = player(s, "p1").zones.hand[0]!.cardId;
+    const ctx2 = { scripts: { [mandatoryCardId]: mkScript("etb", { kind: "gainLife", amount: 1 }) } };
+    s = applyAction(s, "p1", { type: "moveCard", instanceId: mandatoryId, from: "hand", to: "battlefield" }, 0, ctx2);
+    expect(s.stack).toHaveLength(2);
+
+    // Non-controller cannot decline; mandatory triggers cannot be declined.
+    expect(() => applyAction(s, "p2", { type: "declineTrigger", instanceId: optionalTrigger })).toThrow(
+      /controller/
+    );
+    expect(() => applyAction(s, "p1", { type: "declineTrigger", instanceId: s.stack[1]!.instanceId })).toThrow(
+      /not optional/
+    );
+    expect(() => applyAction(s, "p1", { type: "declineTrigger", instanceId: "ghost" })).toThrow(EngineError);
+    // Declining a real card on the stack is rejected too.
+    const spell = handCard(s, "p1");
+    const s2 = applyAction(s, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "stack" });
+    expect(() => applyAction(s2, "p1", { type: "declineTrigger", instanceId: spell })).toThrow(
+      /triggered abilities/i
+    );
+
+    // Controller declines the buried optional trigger; the other one remains.
+    s = applyAction(s, "p1", { type: "declineTrigger", instanceId: optionalTrigger });
+    expect(s.stack).toHaveLength(1);
+    expect(s.stack[0]!.triggerSourceId).toBe(mandatoryId);
+    expect(lastLog(s)).toMatch(/declined/);
+  });
+
+  it("addCounters resolves onto the source, or fizzles when it left the battlefield", () => {
+    const g = newGame();
+    const id = handCard(g, "p1");
+    const cardId = player(g, "p1").zones.hand[0]!.cardId;
+    const ctx = {
+      scripts: { [cardId]: mkScript("etb", { kind: "addCounters", counterType: "+1/+1", count: 2 }) },
+    };
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
+    expect(s.stack).toHaveLength(1);
+
+    // Happy path: source still on the battlefield.
+    const resolved = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(player(resolved, "p1").zones.battlefield[0]!.counters).toEqual({ "+1/+1": 2 });
+
+    // Fizzle: source left the battlefield while the trigger waited.
+    s = applyAction(s, "p1", { type: "moveCard", instanceId: id, from: "battlefield", to: "graveyard" }, 0, ctx);
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(lastLog(s)).toMatch(/fizzled/);
+    expect(player(s, "p1").zones.graveyard[0]!.counters).toEqual({});
+  });
+
+  it("token triggers use the token machinery (tokens land on the controller's battlefield)", () => {
+    const g = newGame();
+    const id = handCard(g, "p1");
+    const cardId = player(g, "p1").zones.hand[0]!.cardId;
+    const ctx = {
+      scripts: {
+        [cardId]: mkScript("dies", {
+          kind: "createToken",
+          name: "Zombie",
+          typeLine: "Token Creature — Zombie",
+          power: "2",
+          toughness: "2",
+          count: 2,
+        }),
+      },
+    };
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
+    s = applyAction(s, "p1", { type: "moveCard", instanceId: id, from: "battlefield", to: "graveyard" }, 0, ctx);
+    s = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx);
+    const tokens = player(s, "p1").zones.battlefield;
+    expect(tokens).toHaveLength(2);
+    expect(tokens.every((t) => t.isToken && t.tokenName === "Zombie" && t.tokenPower === "2")).toBe(true);
+  });
+
+  it("damageOpponent hits the controller's opponent and can end the game", () => {
+    const g = newGame();
+    const id = handCard(g, "p1");
+    const cardId = player(g, "p1").zones.hand[0]!.cardId;
+    const ctx = { scripts: { [cardId]: mkScript("etb", { kind: "damageOpponent", amount: 3 }) } };
+    let s = applyAction(g, "p2", { type: "setLife", playerId: "p2", life: 3 });
+    s = applyAction(s, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(player(s, "p2").life).toBe(0);
+    expect(s.finished).toBe(true);
+    expect(s.winnerId).toBe("p1");
+  });
+
+  it("manual and scry trigger effects are log-only", () => {
+    const g = newGame();
+    const id = handCard(g, "p1");
+    const cardId = player(g, "p1").zones.hand[0]!.cardId;
+    const ctx = { scripts: { [cardId]: mkScript("etb", { kind: "manual", note: "do the thing" }) } };
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
+    const zonesBefore = structuredClone(player(s, "p1").zones);
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(lastLog(s)).toMatch(/do the thing/);
+    expect(player(s, "p1").zones).toEqual(zonesBefore);
+  });
+
+  it("counterTopOfStack removes a trigger without touching graveyards", () => {
+    const g = newGame();
+    const id = handCard(g, "p1");
+    const cardId = player(g, "p1").zones.hand[0]!.cardId;
+    const ctx = { scripts: { [cardId]: mkScript("etb", { kind: "draw", count: 1 }) } };
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
+    const handBefore = player(s, "p1").zones.hand.length;
+    s = applyAction(s, "p2", { type: "counterTopOfStack" }, 0, ctx);
+    expect(s.stack).toHaveLength(0);
+    expect(player(s, "p1").zones.graveyard).toHaveLength(0);
+    expect(player(s, "p1").zones.hand).toHaveLength(handBefore);
+    expect(lastLog(s)).toMatch(/countered the triggered ability/);
+  });
+
+  it("trigger pseudo-cards cannot be moved with moveCard", () => {
+    const g = newGame();
+    const id = handCard(g, "p1");
+    const cardId = player(g, "p1").zones.hand[0]!.cardId;
+    const ctx = { scripts: { [cardId]: mkScript("etb", { kind: "draw", count: 1 }) } };
+    const s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
+    const trigger = s.stack[0]!.instanceId;
+    expect(() =>
+      applyAction(s, "p1", { type: "moveCard", instanceId: trigger, from: "stack", to: "graveyard" })
+    ).toThrow(/resolve, counter, or decline/);
+  });
+
+  it("restartGame drops pending triggers and recollects only real cards", () => {
+    const g = newGame();
+    const id = handCard(g, "p1");
+    const cardId = player(g, "p1").zones.hand[0]!.cardId;
+    const ctx = { scripts: { [cardId]: mkScript("etb", { kind: "draw", count: 1 }) } };
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
+    expect(s.stack).toHaveLength(1);
+    s = applyAction(s, "p1", { type: "restartGame", seed: "again" }, 0, ctx);
+    expect(s.stack).toHaveLength(0);
+    for (const p of s.players) {
+      const all = [...p.zones.hand, ...p.zones.library];
+      expect(all).toHaveLength(40);
+      expect(all.some((c) => c.isTrigger)).toBe(false);
+    }
+  });
+});
+
+describe("tapForMana", () => {
+  /** Fresh game with p1's first hand card on the battlefield + its CardData. */
+  function withSource(producedMana?: string[]) {
+    const g = newGame();
+    const id = handCard(g, "p1");
+    const cardId = player(g, "p1").zones.hand[0]!.cardId;
+    const ctx = { cards: { [cardId]: mkCardData(cardId, producedMana) } };
+    const s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
+    return { s, id, ctx };
+  }
+
+  it("taps the source and adds one mana of the chosen color", () => {
+    const { s, id, ctx } = withSource(["G", "W"]);
+    const next = applyAction(s, "p1", { type: "tapForMana", instanceId: id, color: "G" }, 0, ctx);
+    expect(player(next, "p1").zones.battlefield[0]!.tapped).toBe(true);
+    expect(player(next, "p1").manaPool).toEqual({ G: 1 });
+    expect(lastLog(next)).toMatch(/tapped .* for \{G\}/);
+  });
+
+  it("allows colorless when the card produces it", () => {
+    const { s, id, ctx } = withSource(["C"]);
+    const next = applyAction(s, "p1", { type: "tapForMana", instanceId: id, color: "C" }, 0, ctx);
+    expect(player(next, "p1").manaPool).toEqual({ C: 1 });
+  });
+
+  it("rejects colors the card does not produce", () => {
+    const { s, id, ctx } = withSource(["G"]);
+    expect(() => applyAction(s, "p1", { type: "tapForMana", instanceId: id, color: "U" }, 0, ctx)).toThrow(
+      /cannot produce U/
+    );
+  });
+
+  it("rejects already-tapped sources", () => {
+    const { s, id, ctx } = withSource(["G"]);
+    const tapped = applyAction(s, "p1", { type: "tapCard", instanceId: id, tapped: true });
+    expect(() => applyAction(tapped, "p1", { type: "tapForMana", instanceId: id, color: "G" }, 0, ctx)).toThrow(
+      /already tapped/
+    );
+  });
+
+  it("rejects non-sources and missing card context", () => {
+    // producedMana missing entirely.
+    const noMana = withSource();
+    expect(() =>
+      applyAction(noMana.s, "p1", { type: "tapForMana", instanceId: noMana.id, color: "G" }, 0, noMana.ctx)
+    ).toThrow(/not a mana source/);
+    // No cards context at all.
+    expect(() =>
+      applyAction(noMana.s, "p1", { type: "tapForMana", instanceId: noMana.id, color: "G" })
+    ).toThrow(/not a mana source/);
+  });
+
+  it("only works on your own battlefield cards", () => {
+    const { s, id, ctx } = withSource(["G"]);
+    expect(() => applyAction(s, "p2", { type: "tapForMana", instanceId: id, color: "G" }, 0, ctx)).toThrow(
+      EngineError
+    );
+  });
+});
+
+describe("mana pools empty on every step transition", () => {
+  it("nextStep clears both players' pools", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    const inactive = other(g, active);
+    let s = applyAction(g, active, { type: "addMana", color: "R", amount: 2 });
+    s = applyAction(s, inactive, { type: "addMana", color: "U", amount: 1 });
+    s = applyAction(s, active, { type: "nextStep" });
+    expect(player(s, active).manaPool).toEqual({});
+    expect(player(s, inactive).manaPool).toEqual({});
+  });
+
+  it("nextTurn clears pools too", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    let s = applyAction(g, active, { type: "addMana", color: "G", amount: 3 });
+    s = applyAction(s, active, { type: "nextTurn" });
+    expect(player(s, active).manaPool).toEqual({});
   });
 });

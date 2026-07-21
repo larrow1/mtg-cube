@@ -6,6 +6,7 @@
 import { customAlphabet, nanoid } from "nanoid";
 import type {
   CardData,
+  CardScript,
   Cube,
   DraftCard,
   DraftConfig,
@@ -43,6 +44,8 @@ export interface Match {
   game: GameState;
   /** CardData for every card that can appear in this match (deck cards + basics). */
   cardLookup: Record<string, CardData>;
+  /** Triggered-ability scripts, built once per match from cardLookup. */
+  scripts?: Record<string, CardScript>;
   /** Ranked only: Elo change per player id, filled in when the match ends. */
   ratingDeltas?: Record<string, number>;
 }
