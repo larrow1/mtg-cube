@@ -298,15 +298,19 @@ describe("inferScript — oracle-text templates (real card texts)", () => {
   it("cards with no trigger clauses yield null", () => {
     expect(inferScript(card("Grizzly Bears", undefined))).toBeNull();
     expect(inferScript(card("Wind Drake", "Flying"))).toBeNull();
-    // Trigger conditions we do not model are ignored, not guessed at.
+    // Trigger conditions we still do not model are ignored, not guessed at.
+    expect(
+      inferScript(card("Clue Payoff", "Whenever you sacrifice a Clue, put a +1/+1 counter on this creature."))
+    ).toBeNull();
+    // P/T filters are not expressible (Sword of the Meek).
     expect(
       inferScript(
-        card("Lotus Cobra", "Landfall — Whenever a land you control enters, add one mana of any color.")
+        card(
+          "Sword of the Meek",
+          "Whenever a 1/1 creature you control enters, you may return this card from your graveyard to the battlefield, then attach it to that creature.",
+          { typeLine: "Artifact — Equipment" }
+        )
       )
-    ).toBeNull();
-    // "each opponent's upkeep" is NOT eachUpkeep (it would misfire on yours).
-    expect(
-      inferScript(card("Abhorrent Oculus", "At the beginning of each opponent's upkeep, manifest dread."))
     ).toBeNull();
   });
 
@@ -891,8 +895,8 @@ describe("UNSUPPORTED_TRIGGER_CARDS — documented gaps", () => {
       expect(reason.length).toBeGreaterThan(10);
     }
     // A few sentinel entries that must stay documented.
-    expect(UNSUPPORTED_TRIGGER_CARDS["Sheoldred, the Apocalypse"]).toMatch(/draw/i);
-    expect(UNSUPPORTED_TRIGGER_CARDS["Lotus Cobra"]).toMatch(/landfall/i);
+    expect(UNSUPPORTED_TRIGGER_CARDS["Magda, Brazen Outlaw"]).toMatch(/tapped/i);
+    expect(UNSUPPORTED_TRIGGER_CARDS["Vaultborn Tyrant"]).toMatch(/power/i);
     expect(UNSUPPORTED_TRIGGER_CARDS["Urza's Saga"]).toMatch(/saga/i);
   });
 });
@@ -923,5 +927,599 @@ describe("v6: Orcish Bowmasters & amass", () => {
       card("Amass Test", "When Amass Test enters the battlefield, amass Orcs 1.")
     );
     expect(script?.triggers[0]?.effect).toEqual({ kind: "amass", subtype: "Orc", count: 1 });
+  });
+});
+
+describe("v9: declarative trigger conditions (inference templates)", () => {
+  it('"~ or another <type> you control enters" -> selfOrOther (Kappa Cannoneer wording)', () => {
+    const script = inferScript(
+      card(
+        "Kappa Test",
+        "Whenever this creature or another artifact you control enters, put a +1/+1 counter on this creature. It can't be blocked this turn."
+      )
+    );
+    expect(script?.triggers).toEqual([
+      {
+        event: "etb",
+        when: {
+          on: "zoneChange",
+          which: "selfOrOther",
+          move: "entersBattlefield",
+          controller: "you",
+          card: { types: ["Artifact"] },
+        },
+        optional: false,
+        description:
+          "Whenever this creature or another artifact you control enters, put a +1/+1 counter on this creature. It can't be blocked this turn.",
+        effect: {
+          kind: "manual",
+          note: "put a +1/+1 counter on this creature. It can't be blocked this turn",
+        },
+      },
+    ]);
+  });
+
+  it('"~ or another <subtype> creature you control enters" -> subtype filter (Pyrogoyf wording)', () => {
+    const script = inferScript(
+      card(
+        "Pyrogoyf",
+        "Whenever this creature or another Lhurgoyf creature you control enters, that creature deals damage equal to its power to any target."
+      )
+    );
+    expect(script?.triggers[0]!.when).toEqual({
+      on: "zoneChange",
+      which: "selfOrOther",
+      move: "entersBattlefield",
+      controller: "you",
+      card: { types: ["Creature"], subtype: "Lhurgoyf" },
+    });
+  });
+
+  it("the power-N rider does NOT match selfOrOther (Vaultborn Tyrant keeps its override)", () => {
+    const script = inferScript(
+      card(
+        "Vaultborn Tyrant",
+        "Trample\nWhenever this creature or another creature you control with power 4 or greater enters, you gain 3 life and draw a card.\nWhen this creature dies, if it's not a token, create a token that's a copy of it, except it's an artifact in addition to its other types."
+      )
+    );
+    // Only the dies line parses; the power-rider enters line yields nothing.
+    expect(script?.triggers.map((t) => t.event)).toEqual(["dies"]);
+    expect(script?.triggers[0]!.when).toBeUndefined();
+  });
+
+  it('"another creature you control enters" + "you attack": Guide of Souls fully detected', () => {
+    const script = inferScript(
+      card(
+        "Guide of Souls",
+        "Whenever another creature you control enters, you gain 1 life and get {E} (an energy counter).\nWhenever you attack, you may pay {E}{E}{E}. When you do, put two +1/+1 counters and a flying counter on target attacking creature. It becomes an Angel in addition to its other types."
+      )
+    );
+    expect(script?.triggers).toHaveLength(2);
+    expect(script?.triggers[0]).toMatchObject({
+      event: "etb",
+      when: {
+        on: "zoneChange",
+        which: "other",
+        move: "entersBattlefield",
+        controller: "you",
+        card: { types: ["Creature"] },
+      },
+      optional: false,
+      effect: { kind: "manual", note: "you gain 1 life and get {E}" },
+    });
+    expect(script?.triggers[1]).toMatchObject({
+      event: "attack",
+      when: { on: "attackDeclared", which: "team" },
+      optional: true, // "you may pay {E}{E}{E}"
+      effect: { kind: "manual" },
+    });
+    // The team deviation is surfaced on the stack description.
+    expect(script?.triggers[1]!.description).toMatch(/first attacker/i);
+  });
+
+  it('"another nontoken artifact you control enters": Ultron, Artificial Malevolence', () => {
+    const script = inferScript(
+      card(
+        "Ultron, Artificial Malevolence",
+        "Whenever another nontoken artifact you control enters, you may pay {2}. If you do, create a token that's a copy of it. If the token isn't a creature, it becomes a 2/2 Robot Villain creature in addition to its other types."
+      )
+    );
+    expect(script?.triggers[0]).toMatchObject({
+      event: "etb",
+      when: {
+        on: "zoneChange",
+        which: "other",
+        move: "entersBattlefield",
+        controller: "you",
+        card: { types: ["Artifact"], nontoken: true },
+      },
+      optional: true,
+      effect: { kind: "manual" },
+    });
+  });
+
+  it('"an artifact you control enters" -> selfOrOther + automated loyalty counter: Tezzeret', () => {
+    const script = inferScript(
+      card(
+        "Tezzeret, Cruel Captain",
+        "Whenever an artifact you control enters, put a loyalty counter on Tezzeret.",
+        { typeLine: "Legendary Planeswalker — Tezzeret" }
+      )
+    );
+    expect(script?.triggers).toEqual([
+      {
+        event: "etb",
+        when: {
+          on: "zoneChange",
+          which: "selfOrOther",
+          move: "entersBattlefield",
+          controller: "you",
+          card: { types: ["Artifact"] },
+        },
+        optional: false,
+        description: "Whenever an artifact you control enters, put a loyalty counter on Tezzeret.",
+        effect: { kind: "addCounters", counterType: "loyalty", count: 1 },
+      },
+    ]);
+  });
+
+  it("landfall (ability word stripped) stays manual when the effect is mana: Lotus Cobra", () => {
+    const script = inferScript(
+      card("Lotus Cobra", "Landfall — Whenever a land you control enters, add one mana of any color.")
+    );
+    expect(script?.triggers).toEqual([
+      {
+        event: "etb",
+        when: {
+          on: "zoneChange",
+          which: "other",
+          move: "entersBattlefield",
+          controller: "you",
+          card: { types: ["Land"] },
+        },
+        optional: false,
+        description: "Landfall — Whenever a land you control enters, add one mana of any color.",
+        effect: { kind: "manual", note: "add one mana of any color" },
+      },
+    ]);
+  });
+
+  it("landfall with a parseable effect is fully automated: Tireless Tracker's investigate", () => {
+    const script = inferScript(
+      card(
+        "Tireless Tracker",
+        'Landfall — Whenever a land you control enters, investigate. (Create a Clue token. It\'s an artifact with "{2}, Sacrifice this token: Draw a card.")\nWhenever you sacrifice a Clue, put a +1/+1 counter on this creature.'
+      )
+    );
+    // The sacrifice-a-Clue line stays undetected (documented in UNSUPPORTED).
+    expect(script?.triggers).toHaveLength(1);
+    expect(script?.triggers[0]).toMatchObject({
+      when: { on: "zoneChange", card: { types: ["Land"] } },
+      effect: { kind: "createToken", name: "Clue", typeLine: "Token Artifact — Clue", count: 1 },
+    });
+  });
+
+  it('"another nontoken creature you control dies" is automated: Grim Haruspex', () => {
+    const script = inferScript(
+      card("Grim Haruspex", "Morph {B}\nWhenever another nontoken creature you control dies, draw a card.")
+    );
+    expect(script?.triggers).toEqual([
+      {
+        event: "dies",
+        when: {
+          on: "zoneChange",
+          which: "other",
+          move: "dies",
+          controller: "you",
+          card: { types: ["Creature"], nontoken: true },
+        },
+        optional: false,
+        description: "Whenever another nontoken creature you control dies, draw a card.",
+        effect: { kind: "draw", count: 1 },
+      },
+    ]);
+  });
+
+  it('"another creature dies" (any controller): Reaper of the Wilds', () => {
+    const script = inferScript(
+      card("Reaper of the Wilds", "Whenever another creature dies, scry 1.\n{B}: Reaper of the Wilds gains deathtouch until end of turn.")
+    );
+    expect(script?.triggers[0]).toMatchObject({
+      event: "dies",
+      when: {
+        on: "zoneChange",
+        which: "other",
+        move: "dies",
+        controller: "any",
+        card: { types: ["Creature"] },
+      },
+      effect: { kind: "scry", count: 1 },
+    });
+  });
+
+  it("begin-of-combat step condition: Luminarch Aspirant (manual, targeted)", () => {
+    const script = inferScript(
+      card(
+        "Luminarch Aspirant",
+        "At the beginning of combat on your turn, put a +1/+1 counter on target creature you control."
+      )
+    );
+    expect(script?.triggers).toEqual([
+      {
+        event: "upkeep", // inert placeholder — `when` wins
+        when: { on: "stepEntered", step: "beginCombat", whose: "yours" },
+        optional: false,
+        description:
+          "At the beginning of combat on your turn, put a +1/+1 counter on target creature you control.",
+        effect: { kind: "manual", note: "put a +1/+1 counter on target creature you control" },
+      },
+    ]);
+  });
+
+  it("begin-of-combat token creation is fully automated: Goblin Rabblemaster", () => {
+    const script = inferScript(
+      card(
+        "Goblin Rabblemaster",
+        "Other Goblin creatures you control attack each combat if able.\nAt the beginning of combat on your turn, create a 1/1 red Goblin creature token with haste.\nWhenever this creature attacks, it gets +1/+0 until end of turn for each other attacking Goblin."
+      )
+    );
+    expect(script?.triggers).toHaveLength(2);
+    expect(script?.triggers[0]).toMatchObject({
+      when: { on: "stepEntered", step: "beginCombat", whose: "yours" },
+      effect: { kind: "createToken", name: "Goblin", power: "1", toughness: "1", count: 1 },
+    });
+    // The self-attack pump keeps its legacy event (no `when`).
+    expect(script?.triggers[1]).toMatchObject({ event: "attack", effect: { kind: "manual" } });
+    expect(script?.triggers[1]!.when).toBeUndefined();
+  });
+
+  it("each opponent's upkeep: Abhorrent Oculus (manifest dread stays manual)", () => {
+    const script = inferScript(
+      card(
+        "Abhorrent Oculus",
+        "As an additional cost to cast this spell, exile six cards from your graveyard.\nFlying\nAt the beginning of each opponent's upkeep, manifest dread. (Look at the top two cards of your library. Put one onto the battlefield face down as a 2/2 creature and the other into your graveyard. Turn it face up any time for its mana cost if it's a creature card.)"
+      )
+    );
+    expect(script?.triggers).toEqual([
+      {
+        event: "upkeep", // inert placeholder
+        when: { on: "stepEntered", step: "upkeep", whose: "opponents" },
+        optional: false,
+        description: "At the beginning of each opponent's upkeep, manifest dread.",
+        effect: { kind: "manual", note: "manifest dread" },
+      },
+    ]);
+  });
+
+  it("first-main and draw-step conditions: Coalition Relic, Mana Vault", () => {
+    const relic = inferScript(
+      card(
+        "Coalition Relic",
+        "{T}: Add one mana of any color.\n{T}: Put a charge counter on this artifact.\nAt the beginning of your first main phase, remove all charge counters from this artifact. Add one mana of any color for each charge counter removed this way.",
+        { typeLine: "Artifact" }
+      )
+    );
+    expect(relic?.triggers).toHaveLength(1);
+    expect(relic?.triggers[0]).toMatchObject({
+      when: { on: "stepEntered", step: "main1", whose: "yours" },
+      effect: { kind: "manual" },
+    });
+
+    const vault = inferScript(
+      card(
+        "Mana Vault",
+        "This artifact doesn't untap during your untap step.\nAt the beginning of your upkeep, you may pay {4}. If you do, untap this artifact.\nAt the beginning of your draw step, if this artifact is tapped, it deals 1 damage to you.\n{T}: Add {C}{C}{C}.",
+        { typeLine: "Artifact" }
+      )
+    );
+    expect(vault?.triggers).toHaveLength(2);
+    // The upkeep untap offer is the plain legacy template (no `when`).
+    expect(vault?.triggers[0]).toMatchObject({ event: "upkeep", optional: true });
+    expect(vault?.triggers[0]!.when).toBeUndefined();
+    expect(vault?.triggers[1]).toMatchObject({
+      when: { on: "stepEntered", step: "draw", whose: "yours" },
+      optional: false,
+      effect: { kind: "manual", note: "if this artifact is tapped, it deals 1 damage to you" },
+    });
+  });
+
+  it('"whenever you attack" (team): Adeline, Resplendent Cathar', () => {
+    const script = inferScript(
+      card(
+        "Adeline, Resplendent Cathar",
+        "Vigilance\nAdeline's power is equal to the number of creatures you control.\nWhenever you attack, for each opponent, create a 1/1 white Human creature token that's tapped and attacking that player or a planeswalker they control."
+      )
+    );
+    expect(script?.triggers).toHaveLength(1);
+    expect(script?.triggers[0]).toMatchObject({
+      event: "attack",
+      when: { on: "attackDeclared", which: "team" },
+      effect: { kind: "manual" },
+    });
+    expect(script?.triggers[0]!.description).toMatch(/first attacker/i);
+  });
+
+  it('"becomes tapped" with an ability-word prefix: Hawkeye, Master Marksman', () => {
+    const script = inferScript(
+      card(
+        "Hawkeye, Master Marksman",
+        "First strike, reach\nTrick Arrows — Whenever Hawkeye becomes tapped, you may pay {1} up to three times. When you do, choose up to that many.\n• Net — Target creature can't block this turn.\n• Explosive — Hawkeye deals 2 damage to target player.\n• Boomerang — Discard a card, then draw a card."
+      )
+    );
+    expect(script?.triggers).toHaveLength(1);
+    expect(script?.triggers[0]).toMatchObject({
+      when: { on: "becameTapped", which: "self" },
+      optional: true,
+      effect: { kind: "manual" },
+    });
+    expect(script?.triggers[0]!.description).toMatch(/^Trick Arrows — /);
+  });
+
+  it("you-draw / opponent-draws conditions: Sheoldred's two halves via inference", () => {
+    const script = inferScript(
+      card(
+        "Sheoldred, the Apocalypse",
+        "Deathtouch\nWhenever you draw a card, you gain 2 life.\nWhenever an opponent draws a card, they lose 2 life."
+      )
+    );
+    expect(script?.triggers).toHaveLength(2);
+    expect(script?.triggers[0]).toMatchObject({
+      when: { on: "draw", who: "you" },
+      effect: { kind: "gainLife", amount: 2 },
+    });
+    expect(script?.triggers[1]).toMatchObject({
+      event: "opponentDraws",
+      when: { on: "draw", who: "opponent" },
+      effect: { kind: "manual", note: "they lose 2 life" },
+    });
+  });
+
+  it("the Bowmasters except-rider does NOT match the plain opponent-draws template", () => {
+    expect(
+      inferScript(
+        card(
+          "Rider Test",
+          "Whenever an opponent draws a card except the first one they draw in each of their draw steps, this creature deals 1 damage to any target."
+        )
+      )
+    ).toBeNull();
+  });
+
+  it('"whenever you discard a card" is automated for counter payoffs: Ivora', () => {
+    const script = inferScript(
+      card(
+        "Ivora, Insatiable Heir",
+        'Trample\nWhen Ivora enters and whenever it deals combat damage to a player, create a Blood token. (It\'s an artifact with "{1}, {T}, Discard a card, Sacrifice this token: Draw a card.")\nWhenever you discard a card, put a +1/+1 counter on Ivora.'
+      )
+    );
+    expect(script?.triggers).toHaveLength(3);
+    expect(script?.triggers[2]).toMatchObject({
+      when: { on: "discard", who: "you" },
+      effect: { kind: "addCounters", counterType: "+1/+1", count: 1 },
+    });
+
+    const converter = inferScript(
+      card(
+        "Currency Converter",
+        "Whenever you discard a card, you may exile that card from your graveyard.\n{2}, {T}: Draw a card, then discard a card.",
+        { typeLine: "Artifact" }
+      )
+    );
+    expect(converter?.triggers[0]).toMatchObject({
+      when: { on: "discard", who: "you" },
+      optional: true,
+      effect: { kind: "manual", note: "exile that card from your graveyard" },
+    });
+  });
+
+  it("DFC front faces get step conditions too: Reckless Stormseeker", () => {
+    const dfc = card("Reckless Stormseeker // Storm-Charged Slasher", undefined, {
+      layout: "transform",
+      faces: [
+        {
+          name: "Reckless Stormseeker",
+          typeLine: "Creature — Human Werewolf",
+          oracleText:
+            "At the beginning of combat on your turn, target creature you control gets +1/+0 and gains haste until end of turn.\nDaybound (If a player casts no spells during their own turn, it becomes night next turn.)",
+        },
+        {
+          name: "Storm-Charged Slasher",
+          typeLine: "Creature — Werewolf",
+          oracleText:
+            "At the beginning of combat on your turn, target creature you control gets +2/+0 and gains trample and haste until end of turn.\nNightbound (If a player casts at least two spells during their own turn, it becomes day next turn.)",
+        },
+      ],
+    });
+    const script = inferScript(dfc);
+    expect(script?.triggers).toHaveLength(1);
+    expect(script?.triggers[0]).toMatchObject({
+      when: { on: "stepEntered", step: "beginCombat", whose: "yours" },
+      effect: { kind: "manual" },
+    });
+  });
+});
+
+describe("v9: migrated overrides & UNSUPPORTED trims", () => {
+  it("Kappa Cannoneer and Pyrogoyf overrides carry selfOrOther conditions", () => {
+    expect(CARD_OVERRIDES["Kappa Cannoneer"]!.triggers[0]!.when).toEqual({
+      on: "zoneChange",
+      which: "selfOrOther",
+      move: "entersBattlefield",
+      controller: "you",
+      card: { types: ["Artifact"] },
+    });
+    expect(CARD_OVERRIDES["Pyrogoyf"]!.triggers[0]!.when).toMatchObject({
+      which: "selfOrOther",
+      card: { types: ["Creature"], subtype: "Lhurgoyf" },
+    });
+  });
+
+  it("Titania: land-death token trigger is fully automated", () => {
+    const titania = CARD_OVERRIDES["Titania, Protector of Argoth"]!;
+    expect(titania.triggers).toHaveLength(2);
+    expect(titania.triggers[0]).toMatchObject({ event: "etb", effect: { kind: "manual" } });
+    expect(titania.triggers[1]).toMatchObject({
+      when: { on: "zoneChange", which: "other", move: "dies", controller: "you", card: { types: ["Land"] } },
+      effect: { kind: "createToken", name: "Elemental", power: "5", toughness: "3", count: 1 },
+    });
+  });
+
+  it("Fastbond and City of Traitors approximate land plays with land arrivals (noted)", () => {
+    for (const name of ["Fastbond", "City of Traitors"]) {
+      const script = CARD_OVERRIDES[name]!;
+      expect(script.triggers[0]!.when).toEqual({
+        on: "zoneChange",
+        which: "other",
+        move: "entersBattlefield",
+        controller: "you",
+        card: { types: ["Land"] },
+      });
+      expect(script.triggers[0]!.effect).toMatchObject({ kind: "manual" });
+      expect((script.triggers[0]!.effect as { note: string }).note).toMatch(/weren't played/i);
+    }
+  });
+
+  it("Sheoldred override is fully automated on both halves (no draw-step exemption)", () => {
+    const sheoldred = CARD_OVERRIDES["Sheoldred, the Apocalypse"]!;
+    expect(sheoldred.triggers.map((t) => [t.when, t.effect])).toEqual([
+      [{ on: "draw", who: "you" }, { kind: "gainLife", amount: 2 }],
+      [{ on: "draw", who: "opponent" }, { kind: "eachOpponentLosesLife", amount: 2 }],
+    ]);
+  });
+
+  it("migrated cards are no longer in UNSUPPORTED_TRIGGER_CARDS", () => {
+    for (const name of [
+      "Guide of Souls",
+      "Kappa Cannoneer",
+      "Pyrogoyf",
+      "Ultron, Artificial Malevolence",
+      "Tezzeret, Cruel Captain",
+      "Titania, Protector of Argoth",
+      "Bristly Bill, Spine Sower",
+      "Lotus Cobra",
+      "Scythecat Cub",
+      "Springheart Nantuko",
+      "Icetill Explorer",
+      "Omnath, Locus of Creation",
+      "Fastbond",
+      "City of Traitors",
+      "Luminarch Aspirant",
+      "Agent Bishop, Man in Black",
+      "Leader, Super-Genius",
+      "Goblin Rabblemaster",
+      "Reckless Stormseeker",
+      "Ursine Monstrosity",
+      "Ouroboroid",
+      "Okoye, Mighty and Adored",
+      "Mister Fantastic",
+      "Coalition Relic",
+      "Mana Vault",
+      "Adeline, Resplendent Cathar",
+      "Gut, True Soul Zealot",
+      "Raffine, Scheming Seer",
+      "Abhorrent Oculus",
+      "Sheoldred, the Apocalypse",
+      "Hawkeye, Master Marksman",
+      "Currency Converter",
+      "Ivora, Insatiable Heir",
+    ]) {
+      expect(UNSUPPORTED_TRIGGER_CARDS[name], name).toBeUndefined();
+    }
+  });
+
+  it("deliberately-kept gaps stay documented with fresh reasons", () => {
+    expect(UNSUPPORTED_TRIGGER_CARDS["Vaultborn Tyrant"]).toMatch(/power/);
+    expect(UNSUPPORTED_TRIGGER_CARDS["Enduring Innocence"]).toMatch(/power|once/);
+    expect(UNSUPPORTED_TRIGGER_CARDS["Sword of the Meek"]).toMatch(/P\/T|graveyard/);
+    expect(UNSUPPORTED_TRIGGER_CARDS["Tireless Tracker"]).toMatch(/Clue/);
+    expect(UNSUPPORTED_TRIGGER_CARDS["Inti, Seneschal of the Sun"]).toMatch(/discard/);
+    expect(UNSUPPORTED_TRIGGER_CARDS["Ajani, Nacatl Pariah"]).toMatch(/batch/i);
+    expect(UNSUPPORTED_TRIGGER_CARDS["Faerie Mastermind"]).toMatch(/count/i);
+    expect(UNSUPPORTED_TRIGGER_CARDS["Emperor of Bones"]).toMatch(/counters/i);
+    expect(UNSUPPORTED_TRIGGER_CARDS["Does Machines"]).toMatch(/level/i);
+  });
+});
+
+describe("v10: replacement-rule inference", () => {
+  it('"~ enters the battlefield tapped." + an ETB trigger both infer: Bojuka Bog', () => {
+    const script = inferScript(
+      card(
+        "Bojuka Bog",
+        "Bojuka Bog enters the battlefield tapped.\nWhen Bojuka Bog enters the battlefield, exile target player's graveyard.\n{T}: Add {B}.",
+        { typeLine: "Land" }
+      )
+    );
+    expect(script?.replacements).toEqual([{ kind: "entersTapped" }]);
+    expect(script?.triggers).toHaveLength(1);
+    expect(script?.triggers[0]).toMatchObject({
+      event: "etb",
+      effect: { kind: "manual", note: "exile target player's graveyard" },
+    });
+  });
+
+  it('modern "This land enters tapped." wording: Bloodfell Caves', () => {
+    const script = inferScript(
+      card(
+        "Bloodfell Caves",
+        "This land enters tapped.\nWhen this land enters, you gain 1 life.\n{T}: Add {B} or {R}.",
+        { typeLine: "Land" }
+      )
+    );
+    expect(script?.replacements).toEqual([{ kind: "entersTapped" }]);
+    expect(script?.triggers[0]!.effect).toEqual({ kind: "gainLife", amount: 1 });
+  });
+
+  it("a lone tap line still yields a script (replacements only)", () => {
+    const script = inferScript(
+      card("Guildless Commons", "This land enters tapped.\n{T}: Add {C}.", { typeLine: "Land" })
+    );
+    expect(script).toEqual({ triggers: [], replacements: [{ kind: "entersTapped" }] });
+  });
+
+  it('conditional "tapped unless" does NOT match (anchored): Glacial Fortress', () => {
+    expect(
+      inferScript(
+        card(
+          "Glacial Fortress",
+          "Glacial Fortress enters the battlefield tapped unless you control a Plains or an Island.\n{T}: Add {W} or {U}.",
+          { typeLine: "Land" }
+        )
+      )
+    ).toBeNull();
+  });
+
+  it('"enters with N counters": Serrated Arrows and Spike Feeder', () => {
+    const arrows = inferScript(
+      card(
+        "Serrated Arrows",
+        "Serrated Arrows enters the battlefield with three arrowhead counters on it.\nAt the beginning of your upkeep, if there are no arrowhead counters on Serrated Arrows, sacrifice it.\n{T}, Remove an arrowhead counter from Serrated Arrows: Put a -1/-1 counter on target creature.",
+        { typeLine: "Artifact" }
+      )
+    );
+    expect(arrows?.replacements).toEqual([
+      { kind: "entersWithCounters", counterType: "arrowhead", count: 3 },
+    ]);
+
+    const spike = inferScript(
+      card(
+        "Spike Feeder",
+        "Spike Feeder enters the battlefield with two +1/+1 counters on it.\n{2}, Remove a +1/+1 counter from Spike Feeder: Put a +1/+1 counter on target creature.\nRemove a +1/+1 counter from Spike Feeder: You gain 2 life."
+      )
+    );
+    expect(spike?.replacements).toEqual([
+      { kind: "entersWithCounters", counterType: "+1/+1", count: 2 },
+    ]);
+  });
+
+  it('"with X counters" is NOT modeled (parseCount rejects X): Chalice of the Void', () => {
+    expect(
+      inferScript(
+        card(
+          "Chalice of the Void",
+          "Chalice of the Void enters the battlefield with X charge counters on it.\nWhenever a player casts a spell with mana value equal to the number of charge counters on Chalice of the Void, counter that spell.",
+          { typeLine: "Artifact" }
+        )
+      )
+    ).toBeNull();
   });
 });

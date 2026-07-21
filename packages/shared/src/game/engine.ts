@@ -35,25 +35,21 @@
  *    seeded rng, clears pendingSearch, and fires ETB triggers for battlefield
  *    arrivals.
  *
- * Triggered abilities (v3): when the server passes `scripts` in the
- * ActionContext, the engine pushes trigger pseudo-cards onto the stack
- * (`isTrigger`, instanceId `tr{seq}-{n}`) at these emission points:
- *  - etb: a card enters the battlefield (moveCard or resolveTopOfStack);
- *  - dies: battlefield -> graveyard;
- *  - leaves: battlefield -> any non-battlefield zone. If the destination is
- *    the graveyard AND the card's script has a "dies" trigger, only "dies"
- *    fires (no double-fire); otherwise "leaves" covers death too;
- *  - upkeep: entering the upkeep step, active player's permanents;
- *  - eachUpkeep: entering the upkeep step, BOTH players' permanents
- *    (controller = the permanent's controller);
- *  - endStep: entering the end step, active player's permanents;
- *  - attack: setAttacking {attacking:true} (never on un-declaring);
- *  - castSpell: moveCard from hand/graveyard/exile/library to the stack fires
- *    castSpell triggers on the caster's own battlefield permanents, honoring
- *    each trigger's castFilter against the cast card's typeLine. Triggers land
- *    ABOVE the cast spell (fire after it, resolve before it);
- *  - combatDamageToPlayer: entering the combatDamage step, each attacking
- *    creature of the active player with no opposing creature blocking it.
+ * Triggered abilities (v9 — the Arena GRE model): primitive mutations emit
+ * GameEvents into a transient per-action buffer (zoneChange, draw, discard,
+ * stepEntered, attackDeclared, spellCast, becameTapped,
+ * combatDamageToPlayer). ONE matching pass at the end of applyAction walks
+ * the buffer in order and, for each event, checks the event's subject card's
+ * own script first (self conditions — a card that just left the battlefield
+ * still sees its own move) and then battlefield permanents (active player's
+ * first, sortIndex order) against each trigger's TriggerCondition
+ * (`conditionOf`: `when` or the legacy `event` sugar via
+ * `conditionForEvent`). Matches push trigger pseudo-cards onto the stack
+ * (`isTrigger`, instanceId `tr{seq}-{n}`) — the same stack shape as v3–v8.
+ * Preserved rules: dies suppresses leavesBattlefield on a death when both
+ * matched; spellCast triggers land ABOVE the cast spell (events precede
+ * matching); the draw-step first draw is exempt from exceptDrawStepFirst
+ * conditions; mulligan/setup draws emit no events at all.
  * Trigger pseudo-cards only ever live on the stack: resolve applies the
  * effect, counter removes them, declineTrigger (controller + optional only)
  * removes them from any position, restartGame drops them, and moveCard
@@ -62,13 +58,18 @@
 import type {
   CardData,
   CardScript,
+  CardTrigger,
+  EffectTask,
+  EventCardFilter,
   GameAction,
   GameCard,
+  GameEvent,
   GameState,
   PlayerGameState,
   SearchFilter,
   SpawnZone,
   TargetRef,
+  TriggerCondition,
   TriggerEffect,
   TriggerEvent,
   TurnStep,
@@ -134,6 +135,15 @@ let ctx: ActionContext = {};
 // Per-action counter giving trigger pseudo-cards unique ids `tr{seq}-{n}`
 // (seq is unique per action; n disambiguates multiple triggers in one action).
 let triggerCounter = 0;
+
+// v9: the per-action GameEvent buffer (the whiteboard's event side). Primitive
+// mutations emit events; ONE matching pass at the end of applyAction turns
+// them into trigger pseudo-cards on the stack. Transient — never serialized.
+let events: GameEvent[] = [];
+
+function emitEvent(e: GameEvent): void {
+  events.push(e);
+}
 
 function playerLabel(playerId: string): string {
   return ctx.playerNames?.[playerId] ?? playerId;
@@ -245,6 +255,7 @@ export function applyAction(
 ): GameState {
   ctx = context;
   triggerCounter = 0;
+  events = [];
   const actorIdx = state.players.findIndex((p) => p.playerId === actorId);
   if (actorIdx === -1) throw new EngineError(`Unknown player "${actorId}"`);
   if (state.finished && action.type !== "restartGame") {
@@ -285,9 +296,8 @@ export function applyAction(
       }
       const drawn = drawCards(actor, count);
       logs.push(`drew ${drawn} card${drawn === 1 ? "" : "s"} (manual override)`);
-      // v6: manual-override draws are real draws — the opponent's permanents
-      // see them (opponentDraws), once per card drawn (CR 121.2).
-      emitOpponentDrawTriggers(s, actor, drawn, logs);
+      // v9: real draws — drawCards emitted draw events; the matching pass
+      // fires observer triggers (opponentDraws et al.), once per card (CR 121.2).
       break;
     }
 
@@ -307,6 +317,7 @@ export function applyAction(
       if (ability.costTap) {
         card.tapped = true;
         costParts.push("tapping it");
+        emitEvent({ kind: "becameTapped", instanceId: card.instanceId, controllerId: card.controllerId });
       }
       if (ability.costLife > 0) {
         actor.life -= ability.costLife;
@@ -360,13 +371,15 @@ export function applyAction(
       }
       if (fetched) {
         if (search.destination === "battlefield") {
-          fetched.controllerId = actor.playerId;
-          fetched.tapped = search.entersTapped;
-          fetched.sortIndex = actor.zones.battlefield.length;
-          actor.zones.battlefield.push(fetched);
+          // v10: the arrival choke point applies the fetch's own tap plus any
+          // scripted entersTapped/entersWithCounters replacements, and emits
+          // the zoneChange event.
+          arriveOnBattlefield(s, fetched, actor, "library", logs, {
+            entersTapped: search.entersTapped,
+          });
           logs.push(
             `searched their library with ${search.sourceName} and put ${cardLabel(fetched)} onto the battlefield${
-              search.entersTapped ? " tapped" : ""
+              fetched.tapped ? " tapped" : ""
             }`
           );
         } else {
@@ -374,6 +387,17 @@ export function applyAction(
           logs.push(
             `searched their library with ${search.sourceName} and put ${cardLabel(fetched)} into their hand`
           );
+          emitEvent({
+            kind: "zoneChange",
+            instanceId: fetched.instanceId,
+            cardId: fetched.cardId,
+            isToken: false,
+            controllerId: actor.playerId,
+            from: "library",
+            to: "hand",
+            died: false,
+            ...(typeLineOfCard(fetched) !== undefined ? { typeLine: typeLineOfCard(fetched) } : {}),
+          });
         }
       } else {
         logs.push(`searched their library with ${search.sourceName} and failed to find`);
@@ -383,9 +407,6 @@ export function applyAction(
         logs.push("shuffled their library");
       }
       s.pendingSearch = null;
-      if (fetched && search.destination === "battlefield") {
-        pushTriggers(s, fetched, actor.playerId, "etb", logs);
-      }
       break;
     }
 
@@ -396,8 +417,12 @@ export function applyAction(
 
     case "tapCard": {
       const card = findControlled(actor, action.instanceId, ["battlefield"]);
+      const wasTapped = card.tapped;
       card.tapped = action.tapped;
       logs.push(`${action.tapped ? "tapped" : "untapped"} ${cardLabel(card)}`);
+      if (action.tapped && !wasTapped) {
+        emitEvent({ kind: "becameTapped", instanceId: card.instanceId, controllerId: card.controllerId });
+      }
       break;
     }
 
@@ -416,6 +441,7 @@ export function applyAction(
       card.tapped = true;
       actor.manaPool[action.color] = (actor.manaPool[action.color] ?? 0) + 1;
       logs.push(`tapped ${cardLabel(card)} for {${action.color}}`);
+      emitEvent({ kind: "becameTapped", instanceId: card.instanceId, controllerId: card.controllerId });
       break;
     }
 
@@ -557,10 +583,17 @@ export function applyAction(
       const wasAttacking = card.attacking;
       card.attacking = action.attacking;
       logs.push(`${action.attacking ? "declared" : "removed"} ${cardLabel(card)} as an attacker`);
-      // Attack triggers fire on declaring only (never on un-declaring, and
+      // Attack events fire on declaring only (never on un-declaring, and
       // not again when a redundant setAttacking(true) repeats the state).
       if (action.attacking && !wasAttacking) {
-        pushTriggers(s, card, card.controllerId, "attack", logs);
+        const firstThisCombat = s.attackDeclaredThisCombat !== true;
+        s.attackDeclaredThisCombat = true;
+        emitEvent({
+          kind: "attackDeclared",
+          instanceId: card.instanceId,
+          controllerId: card.controllerId,
+          firstThisCombat,
+        });
       }
       break;
     }
@@ -590,7 +623,7 @@ export function applyAction(
         s.log.filter((e) => e.playerId === actorId && e.message.startsWith("took a mulligan")).length + 1;
       actor.zones.library.push(...actor.zones.hand.splice(0));
       actor.zones.library = shuffle(actor.zones.library, createRng(`${s.id}:mulligan:${s.seq + 1}`));
-      const drawn = drawCards(actor, 7);
+      const drawn = drawCards(actor, 7, "silent");
       logs.push(`took a mulligan (#${mullCount}) and drew ${drawn}`);
       break;
     }
@@ -739,10 +772,8 @@ export function applyAction(
         break;
       }
       const controller = s.players.find((p) => p.playerId === card.controllerId) ?? actor;
-      card.sortIndex = controller.zones.battlefield.length;
-      controller.zones.battlefield.push(card);
+      arriveOnBattlefield(s, card, controller, "stack", logs);
       logs.push(`resolved ${cardLabel(card)} onto the battlefield`);
-      pushTriggers(s, card, controller.playerId, "etb", logs);
       break;
     }
 
@@ -864,8 +895,7 @@ export function applyAction(
       if (action.zone === "stack") {
         s.stack.push(card);
       } else if (action.zone === "battlefield") {
-        card.sortIndex = actor.zones.battlefield.length;
-        actor.zones.battlefield.push(card);
+        arriveOnBattlefield(s, card, actor, null, logs);
       } else if (action.zone === "library") {
         actor.zones.library.unshift(card); // top of the library
       } else {
@@ -873,9 +903,6 @@ export function applyAction(
       }
       const dest = action.zone === "library" ? "the top of their library" : `their ${action.zone}`;
       logs.push(`conjured ${cardLabel(card)} into ${dest} (sandbox)`);
-      if (action.zone === "battlefield") {
-        pushTriggers(s, card, actor.playerId, "etb", logs);
-      }
       break;
     }
 
@@ -885,6 +912,9 @@ export function applyAction(
       throw new EngineError(`Unknown action type ${(never as { type: string }).type}`);
     }
   }
+
+  // v9: the matching pass — buffered events become trigger pseudo-cards.
+  runTriggerMatching(s, logs);
 
   s.seq += 1;
   for (const message of logs) {
@@ -917,8 +947,19 @@ function requireActive(s: GameState, actorId: string, what: string): void {
   }
 }
 
-/** Draw up to `count`; drawing from an empty library flags the loss. */
-function drawCards(p: PlayerGameState, count: number): number {
+/**
+ * Draw up to `count`; drawing from an empty library flags the loss.
+ * v9: emits one draw GameEvent PER CARD (CR 121.2). `kind` controls emission:
+ * "effect" = ordinary draws (override action, scripted effects); "drawStep" =
+ * the turn-based draw (its first card carries drawStepFirst for the
+ * Bowmasters-style exemption); "silent" = mulligan/setup draws (no events —
+ * same exemption as pre-v9).
+ */
+function drawCards(
+  p: PlayerGameState,
+  count: number,
+  kind: "effect" | "drawStep" | "silent" = "effect"
+): number {
   let drawn = 0;
   for (let i = 0; i < count; i++) {
     const card = p.zones.library.shift();
@@ -929,6 +970,13 @@ function drawCards(p: PlayerGameState, count: number): number {
     }
     p.zones.hand.push(card);
     drawn += 1;
+    if (kind !== "silent") {
+      emitEvent({
+        kind: "draw",
+        playerId: p.playerId,
+        drawStepFirst: kind === "drawStep" && i === 0,
+      });
+    }
   }
   return drawn;
 }
@@ -968,6 +1016,55 @@ function resetCardState(card: GameCard): void {
   card.blocking = null;
   card.sortIndex = 0;
   delete card.chosenTarget; // a cast-time target dies with the stack entry
+}
+
+/**
+ * v10: THE battlefield-arrival choke point. Every path that puts a card onto
+ * the battlefield (moveCard, resolveTopOfStack, completeSearch, spawnCard)
+ * routes through here: the card's own replacement rules apply (entersTapped,
+ * entersWithCounters — skipped for face-down arrivals, whose identity is
+ * hidden), sortIndex is assigned, the card is pushed, and the zoneChange
+ * event is emitted for the matching pass. `entersTapped` in opts is a
+ * caller-supplied tap (fetch-land "onto the battlefield tapped").
+ */
+function arriveOnBattlefield(
+  s: GameState,
+  card: GameCard,
+  controller: PlayerGameState,
+  from: ZoneName | null,
+  logs: string[],
+  opts?: { entersTapped?: boolean }
+): void {
+  card.controllerId = controller.playerId;
+  let tapped = opts?.entersTapped === true || card.tapped;
+  const script = card.isToken || card.faceDown ? undefined : ctx.scripts?.[card.cardId];
+  for (const r of script?.replacements ?? []) {
+    if (r.kind === "entersTapped") {
+      if (!tapped) {
+        tapped = true;
+        logs.push(`${cardLabel(card)} enters the battlefield tapped`);
+      }
+    } else if (r.kind === "entersWithCounters") {
+      card.counters[r.counterType] = (card.counters[r.counterType] ?? 0) + r.count;
+      logs.push(
+        `${cardLabel(card)} enters with ${r.count} ${r.counterType} counter${r.count === 1 ? "" : "s"}`
+      );
+    }
+  }
+  card.tapped = tapped;
+  card.sortIndex = controller.zones.battlefield.length;
+  controller.zones.battlefield.push(card);
+  emitEvent({
+    kind: "zoneChange",
+    instanceId: card.instanceId,
+    cardId: card.cardId,
+    isToken: card.isToken,
+    controllerId: controller.playerId,
+    from,
+    to: "battlefield",
+    died: false,
+    ...(typeLineOfCard(card) !== undefined ? { typeLine: typeLineOfCard(card) } : {}),
+  });
 }
 
 /** Detach every card that was attached to `instanceId`. */
@@ -1015,60 +1112,240 @@ function spawnTokens(
     if (opts.power !== undefined) token.tokenPower = opts.power;
     if (opts.toughness !== undefined) token.tokenToughness = opts.toughness;
     owner.zones.battlefield.push(token);
+    // v9: token arrivals are events too — "whenever another creature you
+    // control enters" observers see them (nontoken filters exclude them).
+    emitEvent({
+      kind: "zoneChange",
+      instanceId: token.instanceId,
+      cardId: token.cardId,
+      isToken: true,
+      controllerId: owner.playerId,
+      from: null,
+      to: "battlefield",
+      died: false,
+      typeLine: opts.typeLine,
+    });
   }
   logs.push(`${logPrefix}created ${opts.count} ${opts.name} token${opts.count === 1 ? "" : "s"}`);
 }
 
-/** Does `card`'s script contain at least one trigger of `event`? */
-function hasTriggerFor(card: GameCard, event: TriggerEvent): boolean {
-  if (card.isToken || card.isTrigger) return false;
-  return ctx.scripts?.[card.cardId]?.triggers.some((t) => t.event === event) ?? false;
+/**
+ * v9: normalize a legacy TriggerEvent into a declarative TriggerCondition.
+ * Every pre-v9 script keeps its meaning; new scripts may set `when` directly.
+ */
+export function conditionForEvent(
+  event: TriggerEvent,
+  castFilter?: CardTrigger["castFilter"]
+): TriggerCondition {
+  switch (event) {
+    case "etb":
+      return { on: "zoneChange", which: "self", move: "entersBattlefield" };
+    case "dies":
+      return { on: "zoneChange", which: "self", move: "dies" };
+    case "leaves":
+      return { on: "zoneChange", which: "self", move: "leavesBattlefield" };
+    case "upkeep":
+      return { on: "stepEntered", step: "upkeep", whose: "yours" };
+    case "eachUpkeep":
+      return { on: "stepEntered", step: "upkeep", whose: "each" };
+    case "endStep":
+      return { on: "stepEntered", step: "end", whose: "yours" };
+    case "attack":
+      return { on: "attackDeclared", which: "self" };
+    case "castSpell":
+      return { on: "spellCast", caster: "you", ...(castFilter !== undefined ? { castFilter } : {}) };
+    case "combatDamageToPlayer":
+      return { on: "combatDamageToPlayer", which: "self" };
+    case "opponentDraws":
+      return { on: "draw", who: "opponent", exceptDrawStepFirst: true };
+  }
+}
+
+/** The condition a trigger actually matches on (`when` wins over legacy `event`). */
+export function conditionOf(t: CardTrigger): TriggerCondition {
+  return t.when ?? conditionForEvent(t.event, t.castFilter);
+}
+
+/** Does an event's card satisfy an EventCardFilter? Unknown type lines never match. */
+function eventCardFilterMatches(
+  filter: EventCardFilter | undefined,
+  isToken: boolean,
+  typeLine: string | undefined
+): boolean {
+  if (!filter) return true;
+  if (filter.nontoken && isToken) return false;
+  const words = [...(filter.types ?? []), ...(filter.subtype ? [filter.subtype] : [])];
+  if (words.length === 0) return true;
+  if (typeLine === undefined) return false; // unknowable — never guess
+  return words.every((w) =>
+    new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(typeLine)
+  );
 }
 
 /**
- * Push every scripted trigger of `event` on `source` onto the stack as a
- * pseudo-card controlled by `controllerId`. No-op without a scripts context,
- * for tokens (no CardData), and for cards whose script lacks the event.
- * `accept` (optional) further filters individual triggers (castSpell filters).
+ * Does `cond` on an observer card match GameEvent `e`? `which`/"you" are
+ * relative to the observer (the card whose script holds the trigger).
  */
-function pushTriggers(
+function conditionMatches(
+  cond: TriggerCondition,
+  e: GameEvent,
+  observer: GameCard,
+  observerControllerId: string
+): boolean {
+  switch (cond.on) {
+    case "zoneChange": {
+      if (e.kind !== "zoneChange") return false;
+      const isSelf = e.instanceId === observer.instanceId;
+      if (cond.which === "self" && !isSelf) return false;
+      if (cond.which === "other" && isSelf) return false;
+      if (cond.move === "entersBattlefield") {
+        if (e.to !== "battlefield") return false;
+      } else if (cond.move === "dies") {
+        if (!e.died) return false;
+      } else {
+        // leavesBattlefield covers every departure, death included (the
+        // dies-suppresses-leaves rule is applied by the matching pass).
+        if (e.from !== "battlefield") return false;
+      }
+      if (cond.controller === "you" && e.controllerId !== observerControllerId) return false;
+      if (cond.controller === "opponent" && e.controllerId === observerControllerId) return false;
+      return eventCardFilterMatches(cond.card, e.isToken, e.typeLine);
+    }
+    case "stepEntered": {
+      if (e.kind !== "stepEntered" || e.step !== cond.step) return false;
+      if (cond.whose === "yours") return e.activePlayerId === observerControllerId;
+      if (cond.whose === "opponents") return e.activePlayerId !== observerControllerId;
+      return true;
+    }
+    case "attackDeclared": {
+      if (e.kind !== "attackDeclared") return false;
+      if (cond.which === "self") return e.instanceId === observer.instanceId;
+      // team = "whenever you attack": once per combat, on the first declaration.
+      return e.controllerId === observerControllerId && e.firstThisCombat;
+    }
+    case "spellCast": {
+      if (e.kind !== "spellCast") return false;
+      if (cond.caster === "you" && e.casterId !== observerControllerId) return false;
+      if (cond.caster === "opponent" && e.casterId === observerControllerId) return false;
+      return castFilterMatches(cond.castFilter, e.typeLine);
+    }
+    case "draw": {
+      if (e.kind !== "draw") return false;
+      if (cond.who === "you" && e.playerId !== observerControllerId) return false;
+      if (cond.who === "opponent" && e.playerId === observerControllerId) return false;
+      if (cond.exceptDrawStepFirst && e.drawStepFirst) return false;
+      return true;
+    }
+    case "discard":
+      return e.kind === "discard" && e.playerId === observerControllerId;
+    case "becameTapped":
+      return e.kind === "becameTapped" && e.instanceId === observer.instanceId;
+    case "combatDamageToPlayer":
+      return e.kind === "combatDamageToPlayer" && e.instanceId === observer.instanceId;
+  }
+}
+
+/** Find a real card anywhere in the game (all zones of both players + stack). */
+function findCardAnywhere(s: GameState, instanceId: string): GameCard | undefined {
+  for (const c of s.stack) if (c.instanceId === instanceId) return c;
+  for (const p of s.players) {
+    for (const zone of ZONE_NAMES) {
+      const card = p.zones[zone].find((c) => c.instanceId === instanceId);
+      if (card) return card;
+    }
+  }
+  return undefined;
+}
+
+/** Build + push one trigger pseudo-card onto the stack (shape unchanged since v3). */
+function pushTriggerCard(
   s: GameState,
   source: GameCard,
   controllerId: string,
-  event: TriggerEvent,
-  logs: string[],
-  accept?: (t: CardScript["triggers"][number]) => boolean
+  t: CardTrigger,
+  logs: string[]
 ): void {
-  if (source.isToken || source.isTrigger) return;
-  const script = ctx.scripts?.[source.cardId];
-  if (!script) return;
-  for (const t of script.triggers) {
-    if (t.event !== event) continue;
-    if (accept && !accept(t)) continue;
-    const trigger: GameCard = {
-      instanceId: `tr${s.seq + 1}-${triggerCounter++}`,
-      // cardId points at the SOURCE card so clients can render its image.
-      cardId: source.cardId,
-      ownerId: controllerId,
-      controllerId,
-      tapped: false,
-      faceDown: false,
-      faceIndex: 0,
-      counters: {},
-      attachedTo: null,
-      isToken: false,
-      damage: 0,
-      attacking: false,
-      blocking: null,
-      sortIndex: 0,
-      isTrigger: true,
-      triggerText: t.description,
-      triggerEffect: t.effect,
-      triggerOptional: t.optional,
-      triggerSourceId: source.instanceId,
-    };
-    s.stack.push(trigger);
-    logs.push(`trigger from ${cardLabel(source)} went on the stack: "${t.description}"`);
+  const trigger: GameCard = {
+    instanceId: `tr${s.seq + 1}-${triggerCounter++}`,
+    // cardId points at the SOURCE card so clients can render its image.
+    cardId: source.cardId,
+    ownerId: controllerId,
+    controllerId,
+    tapped: false,
+    faceDown: false,
+    faceIndex: 0,
+    counters: {},
+    attachedTo: null,
+    isToken: false,
+    damage: 0,
+    attacking: false,
+    blocking: null,
+    sortIndex: 0,
+    isTrigger: true,
+    triggerText: t.description,
+    triggerEffect: t.effect,
+    triggerOptional: t.optional,
+    triggerSourceId: source.instanceId,
+  };
+  s.stack.push(trigger);
+  logs.push(`trigger from ${cardLabel(source)} went on the stack: "${t.description}"`);
+}
+
+/**
+ * v9: THE matching pass. Walks the per-action event buffer in order; for each
+ * event checks (1) the event's subject card's own script (wherever the card
+ * now is — a card that just left the battlefield still sees its own move),
+ * then (2) battlefield permanents (active player's first, sortIndex order).
+ * Matching triggers push pseudo-cards exactly like the old per-site emission.
+ * Preserved rule: on a death, a script whose dies condition matched fires only
+ * dies — its matching leavesBattlefield conditions are suppressed.
+ */
+function runTriggerMatching(s: GameState, logs: string[]): void {
+  const buffered = events;
+  events = [];
+  if (!ctx.scripts || buffered.length === 0) return;
+
+  const active = s.players.find((p) => p.playerId === s.activePlayerId);
+  const inactive = s.players.find((p) => p.playerId !== s.activePlayerId);
+  for (const e of buffered) {
+    const candidates: GameCard[] = [];
+    if (e.kind === "zoneChange") {
+      const subject = findCardAnywhere(s, e.instanceId);
+      if (subject) candidates.push(subject);
+    }
+    for (const p of [active, inactive]) {
+      if (!p) continue;
+      const sorted = [...p.zones.battlefield].sort((a, b) => a.sortIndex - b.sortIndex);
+      for (const c of sorted) {
+        if (!candidates.some((x) => x.instanceId === c.instanceId)) candidates.push(c);
+      }
+    }
+    for (const cand of candidates) {
+      if (cand.isToken || cand.isTrigger) continue;
+      const script = ctx.scripts[cand.cardId];
+      if (!script) continue;
+      const matched = script.triggers.filter((t) =>
+        conditionMatches(conditionOf(t), e, cand, cand.controllerId)
+      );
+      if (matched.length === 0) continue;
+      const diesMatched = matched.some((t) => {
+        const c2 = conditionOf(t);
+        return c2.on === "zoneChange" && c2.move === "dies";
+      });
+      for (const t of matched) {
+        const c2 = conditionOf(t);
+        if (
+          diesMatched &&
+          e.kind === "zoneChange" &&
+          e.died &&
+          c2.on === "zoneChange" &&
+          c2.move === "leavesBattlefield"
+        ) {
+          continue; // dies suppresses leaves on death (no double-fire)
+        }
+        pushTriggerCard(s, cand, cand.controllerId, t, logs);
+      }
+    }
   }
 }
 
@@ -1160,11 +1437,12 @@ function resolveTrigger(s: GameState, trigger: GameCard, logs: string[], target?
 }
 
 /**
- * Mechanically apply one TriggerEffect for `controller` — shared by trigger
- * resolution and instant/sorcery onResolve scripts. `sourceId` is the
- * battlefield permanent counters land on; effects that need one (addCounters)
- * fizzle-log when it is undefined or gone. `label` names the source in the
- * log ("Wall of Omens trigger", "Night's Whisper").
+ * v10: apply one TriggerEffect for `controller` — shared by trigger
+ * resolution and instant/sorcery onResolve scripts. The whiteboard model:
+ * the effect COMPILES into primitive EffectTasks, the interception pipeline
+ * may rewrite them, and the executor runs whatever survives (emitting
+ * GameEvents as it goes). `sourceId` is the battlefield permanent counters
+ * land on; `label` names the source in the log ("Wall of Omens trigger").
  */
 function applyEffect(
   s: GameState,
@@ -1176,111 +1454,232 @@ function applyEffect(
   logs: string[],
   target?: TargetRef
 ): void {
-  const who = playerLabel(controller.playerId);
+  runTasks(s, compileEffect(controller, opponent, effect, label, sourceId, target), logs);
+}
 
+/** Compile one TriggerEffect into primitive tasks. Pure — no state mutation. */
+function compileEffect(
+  controller: PlayerGameState,
+  opponent: PlayerGameState,
+  effect: TriggerEffect,
+  label: string,
+  sourceId: string | undefined,
+  target?: TargetRef
+): EffectTask[] {
+  const prov = { label, ...(sourceId !== undefined ? { sourceInstanceId: sourceId } : {}) };
   switch (effect.kind) {
-    case "draw": {
-      const drawn = drawCards(controller, effect.count);
-      logs.push(`resolved ${label}: ${who} drew ${drawn} card${drawn === 1 ? "" : "s"}`);
-      // v6: a scripted draw is a real draw — the drawer's opponent's
-      // permanents see it (once per card, CR 121.2).
-      emitOpponentDrawTriggers(s, controller, drawn, logs);
-      break;
+    case "draw":
+      // One task per card (CR 121.2) — the executor coalesces runs for the log.
+      return Array.from({ length: effect.count }, () => ({
+        ...prov,
+        task: "draw" as const,
+        playerId: controller.playerId,
+      }));
+    case "gainLife":
+      return [{ ...prov, task: "gainLife", playerId: controller.playerId, amount: effect.amount }];
+    case "loseLife":
+      return [{ ...prov, task: "loseLife", playerId: controller.playerId, amount: effect.amount }];
+    case "eachOpponentLosesLife":
+      return [{ ...prov, task: "loseLife", playerId: opponent.playerId, amount: effect.amount }];
+    case "damageOpponent":
+      return [{ ...prov, task: "damagePlayer", playerId: opponent.playerId, amount: effect.amount }];
+    case "addCounters":
+      // Counters land on the SOURCE permanent — a source that never had one
+      // (a resolving spell) fizzles at compile time; one that has since left
+      // the battlefield fizzles at execution time.
+      if (sourceId === undefined) {
+        return [{ ...prov, task: "fizzle", reason: "its source is no longer on the battlefield" }];
+      }
+      return [
+        {
+          ...prov,
+          task: "addCounters",
+          instanceId: sourceId,
+          counterType: effect.counterType,
+          count: effect.count,
+        },
+      ];
+    case "createToken":
+      // One task per token — the executor coalesces identical runs.
+      return Array.from({ length: effect.count }, () => ({
+        ...prov,
+        task: "createToken" as const,
+        controllerId: controller.playerId,
+        name: effect.name,
+        typeLine: effect.typeLine,
+        ...(effect.power !== undefined ? { power: effect.power } : {}),
+        ...(effect.toughness !== undefined ? { toughness: effect.toughness } : {}),
+        tapped: false,
+      }));
+    case "scry":
+      return [{ ...prov, task: "scryNote", playerId: controller.playerId, count: effect.count }];
+    case "damageAnyTarget":
+      if (!target) return [{ ...prov, task: "fizzle", reason: "no target was chosen" }];
+      if (target.kind === "player") {
+        return [{ ...prov, task: "damagePlayer", playerId: target.playerId, amount: effect.amount }];
+      }
+      return [{ ...prov, task: "damagePermanent", instanceId: target.instanceId, amount: effect.amount }];
+    case "amass":
+      return [
+        { ...prov, task: "amass", controllerId: controller.playerId, subtype: effect.subtype, count: effect.count },
+      ];
+    case "counterTarget":
+      if (!target || target.kind !== "stack") {
+        return [{ ...prov, task: "fizzle", reason: "no spell was targeted" }];
+      }
+      return [{ ...prov, task: "counterSpell", instanceId: target.instanceId }];
+    case "seq":
+      return effect.effects.flatMap((sub) =>
+        compileEffect(controller, opponent, sub, label, sourceId, target)
+      );
+    case "manual":
+      return [{ ...prov, task: "manualNote", controllerId: controller.playerId, note: effect.note }];
+  }
+}
+
+/**
+ * v10: the interception hook — replacement effects registered by permanents
+ * rewrite the task list here before anything executes; the executor never
+ * knows who touched it. Battlefield-arrival replacements (entersTapped,
+ * entersWithCounters) live at the arriveOnBattlefield choke point; TASK-level
+ * replacement kinds (draw substitution, damage prevention/redirect, trigger
+ * doubling) plug in here as data when a card needs them. Identity transform
+ * until then.
+ */
+function interceptTasks(_s: GameState, tasks: EffectTask[]): EffectTask[] {
+  return tasks;
+}
+
+/** Run a compiled task list: intercept, then execute (coalescing draw/token runs for log parity). */
+function runTasks(s: GameState, tasks: EffectTask[], logs: string[]): void {
+  const finalTasks = interceptTasks(s, tasks);
+  let i = 0;
+  while (i < finalTasks.length) {
+    const t = finalTasks[i]!;
+    if (t.task === "draw") {
+      // Coalesce a run of same-player same-label draws into one drawCards call
+      // (events still emit per card; the log reads "drew N cards").
+      let n = 1;
+      while (i + n < finalTasks.length) {
+        const next = finalTasks[i + n]!;
+        if (next.task !== "draw" || next.playerId !== t.playerId || next.label !== t.label) break;
+        n += 1;
+      }
+      const p = s.players.find((pl) => pl.playerId === t.playerId);
+      if (p) {
+        const drawn = drawCards(p, n);
+        logs.push(
+          `resolved ${t.label}: ${playerLabel(p.playerId)} drew ${drawn} card${drawn === 1 ? "" : "s"}`
+        );
+      }
+      i += n;
+      continue;
     }
+    if (t.task === "createToken") {
+      // Coalesce identical consecutive token tasks into one spawnTokens batch.
+      let n = 1;
+      while (i + n < finalTasks.length) {
+        const next = finalTasks[i + n]!;
+        if (
+          next.task !== "createToken" ||
+          next.controllerId !== t.controllerId ||
+          next.name !== t.name ||
+          next.typeLine !== t.typeLine ||
+          next.power !== t.power ||
+          next.toughness !== t.toughness ||
+          next.tapped !== t.tapped ||
+          next.label !== t.label
+        ) {
+          break;
+        }
+        n += 1;
+      }
+      const p = s.players.find((pl) => pl.playerId === t.controllerId);
+      if (p) {
+        spawnTokens(
+          s,
+          p,
+          {
+            name: t.name,
+            typeLine: t.typeLine,
+            ...(t.power !== undefined ? { power: t.power } : {}),
+            ...(t.toughness !== undefined ? { toughness: t.toughness } : {}),
+            count: n,
+            tapped: t.tapped,
+          },
+          logs,
+          `resolved ${t.label}: `
+        );
+      }
+      i += n;
+      continue;
+    }
+    executeTask(s, t, logs);
+    i += 1;
+  }
+}
+
+/** Execute one primitive task. Missing/stale referents fizzle with a log. */
+function executeTask(s: GameState, t: EffectTask, logs: string[]): void {
+  switch (t.task) {
+    case "draw":
+    case "createToken":
+      // Handled (coalesced) in runTasks; unreachable here.
+      break;
     case "gainLife": {
-      controller.life += effect.amount;
-      logs.push(`resolved ${label}: ${who} gained ${effect.amount} life`);
+      const p = s.players.find((pl) => pl.playerId === t.playerId);
+      if (!p) break;
+      p.life += t.amount;
+      logs.push(`resolved ${t.label}: ${playerLabel(p.playerId)} gained ${t.amount} life`);
       break;
     }
     case "loseLife": {
-      controller.life -= effect.amount;
-      logs.push(`resolved ${label}: ${who} lost ${effect.amount} life`);
+      const p = s.players.find((pl) => pl.playerId === t.playerId);
+      if (!p) break;
+      p.life -= t.amount;
+      logs.push(`resolved ${t.label}: ${playerLabel(p.playerId)} lost ${t.amount} life`);
       break;
     }
-    case "eachOpponentLosesLife": {
-      opponent.life -= effect.amount;
-      logs.push(`resolved ${label}: ${playerLabel(opponent.playerId)} lost ${effect.amount} life`);
+    case "damagePlayer": {
+      const p = s.players.find((pl) => pl.playerId === t.playerId);
+      if (!p) {
+        logs.push(`${t.label} fizzled: its target player is gone`);
+        break;
+      }
+      p.life -= t.amount;
+      logs.push(`resolved ${t.label}: dealt ${t.amount} damage to ${playerLabel(p.playerId)}`);
       break;
     }
-    case "damageOpponent": {
-      opponent.life -= effect.amount;
-      logs.push(
-        `resolved ${label}: dealt ${effect.amount} damage to ${playerLabel(opponent.playerId)}`
-      );
+    case "damagePermanent": {
+      const permanent = findOnAnyBattlefield(s, t.instanceId);
+      if (!permanent) {
+        logs.push(`${t.label} fizzled: its target left the battlefield`);
+        break;
+      }
+      permanent.damage += t.amount;
+      logs.push(`resolved ${t.label}: dealt ${t.amount} damage to ${cardLabel(permanent)}`);
       break;
     }
     case "addCounters": {
-      // Counters land on the SOURCE permanent — if it already left its
-      // controller's battlefield (or never had one: a resolving spell),
-      // the effect fizzles (logged, no effect).
-      const source = sourceId
-        ? controller.zones.battlefield.find((c) => c.instanceId === sourceId)
-        : undefined;
+      const source = findOnAnyBattlefield(s, t.instanceId);
       if (!source) {
-        logs.push(`${label} fizzled: its source is no longer on the battlefield`);
+        logs.push(`${t.label} fizzled: its source is no longer on the battlefield`);
         break;
       }
-      source.counters[effect.counterType] = (source.counters[effect.counterType] ?? 0) + effect.count;
+      source.counters[t.counterType] = (source.counters[t.counterType] ?? 0) + t.count;
       logs.push(
-        `resolved ${label}: put ${effect.count} ${effect.counterType} counter${
-          effect.count === 1 ? "" : "s"
+        `resolved ${t.label}: put ${t.count} ${t.counterType} counter${
+          t.count === 1 ? "" : "s"
         } on ${cardLabel(source)}`
       );
-      break;
-    }
-    case "createToken": {
-      spawnTokens(
-        s,
-        controller,
-        {
-          name: effect.name,
-          typeLine: effect.typeLine,
-          ...(effect.power !== undefined ? { power: effect.power } : {}),
-          ...(effect.toughness !== undefined ? { toughness: effect.toughness } : {}),
-          count: effect.count,
-          tapped: false,
-        },
-        logs,
-        `resolved ${label}: `
-      );
-      break;
-    }
-    case "scry": {
-      // Log-only, like the scry action: the client follows up with
-      // scry/reorderLibraryTop to actually look and reorder.
-      logs.push(`resolved ${label}: ${who} scries ${effect.count} (use scry to finish)`);
-      break;
-    }
-    case "damageAnyTarget": {
-      // Target validated by resolveTopOfStack; defensive fizzle otherwise
-      // (spirit of CR 608.2b — a gone target is simply not affected).
-      if (!target) {
-        logs.push(`${label} fizzled: no target was chosen`);
-        break;
-      }
-      if (target.kind === "player") {
-        const p = s.players.find((pl) => pl.playerId === target.playerId);
-        if (!p) {
-          logs.push(`${label} fizzled: its target player is gone`);
-          break;
-        }
-        p.life -= effect.amount;
-        logs.push(`resolved ${label}: dealt ${effect.amount} damage to ${playerLabel(p.playerId)}`);
-      } else {
-        const permanent = findOnAnyBattlefield(s, target.instanceId);
-        if (!permanent) {
-          logs.push(`${label} fizzled: its target left the battlefield`);
-          break;
-        }
-        permanent.damage += effect.amount;
-        logs.push(`resolved ${label}: dealt ${effect.amount} damage to ${cardLabel(permanent)}`);
-      }
       break;
     }
     case "amass": {
       // CR 701.47a. "Army" is matched on the (token)type line; the first Army
       // in battlefield order gets the counters (controller's choice is not
       // modeled). Subtype addition is logged, not tracked.
+      const controller = s.players.find((pl) => pl.playerId === t.controllerId);
+      if (!controller) break;
       const typeLineOf = (c: GameCard): string =>
         c.isToken ? c.tokenTypeLine ?? "" : ctx.cards?.[c.cardId]?.typeLine ?? "";
       let army = [...controller.zones.battlefield]
@@ -1291,83 +1690,59 @@ function applyEffect(
           s,
           controller,
           {
-            name: `${effect.subtype} Army`,
-            typeLine: `Token Creature — ${effect.subtype} Army`,
+            name: `${t.subtype} Army`,
+            typeLine: `Token Creature — ${t.subtype} Army`,
             power: "0",
             toughness: "0",
             count: 1,
             tapped: false,
           },
           logs,
-          `resolved ${label}: `
+          `resolved ${t.label}: `
         );
         army = controller.zones.battlefield[controller.zones.battlefield.length - 1];
       }
       if (army) {
-        army.counters["+1/+1"] = (army.counters["+1/+1"] ?? 0) + effect.count;
+        army.counters["+1/+1"] = (army.counters["+1/+1"] ?? 0) + t.count;
         logs.push(
-          `amassed ${effect.subtype} ${effect.count}: put ${effect.count} +1/+1 counter${
-            effect.count === 1 ? "" : "s"
+          `amassed ${t.subtype} ${t.count}: put ${t.count} +1/+1 counter${
+            t.count === 1 ? "" : "s"
           } on ${cardLabel(army)}`
         );
       }
       break;
     }
-    case "counterTarget": {
-      if (!target || target.kind !== "stack") {
-        logs.push(`${label} fizzled: no spell was targeted`);
-        break;
-      }
-      const idx = s.stack.findIndex((c) => c.instanceId === target.instanceId);
+    case "counterSpell": {
+      const idx = s.stack.findIndex((c) => c.instanceId === t.instanceId);
       const spell = idx === -1 ? undefined : s.stack[idx]!;
       if (!spell || spell.isTrigger) {
-        logs.push(`${label} fizzled: its target is no longer a spell on the stack`);
+        logs.push(`${t.label} fizzled: its target is no longer a spell on the stack`);
         break;
       }
       s.stack.splice(idx, 1);
       if (spell.isToken) {
-        logs.push(`resolved ${label}: countered ${cardLabel(spell)} (token ceased to exist)`);
+        logs.push(`resolved ${t.label}: countered ${cardLabel(spell)} (token ceased to exist)`);
       } else {
-        const spellOwner = s.players.find((p) => p.playerId === spell.ownerId) ?? controller;
+        const spellOwner = s.players.find((p) => p.playerId === spell.ownerId) ?? s.players[0]!;
         resetCardState(spell);
         spellOwner.zones.graveyard.push(spell);
-        logs.push(`resolved ${label}: countered ${cardLabel(spell)}`);
+        logs.push(`resolved ${t.label}: countered ${cardLabel(spell)}`);
       }
       break;
     }
-    case "seq": {
-      for (const sub of effect.effects) {
-        applyEffect(s, controller, opponent, sub, label, sourceId, logs, target);
-      }
+    case "scryNote": {
+      logs.push(
+        `resolved ${t.label}: ${playerLabel(t.playerId)} scries ${t.count} (use scry to finish)`
+      );
       break;
     }
-    case "manual": {
-      logs.push(`resolved ${label} — carry it out by hand: ${effect.note}`);
+    case "manualNote": {
+      logs.push(`resolved ${t.label} — carry it out by hand: ${t.note}`);
       break;
     }
-  }
-}
-
-/**
- * v6: fire `opponentDraws` triggers on the battlefield of the DRAWER's
- * opponent, once per card actually drawn (CR 121.2). Callers are the real
- * draw events only — the turn-based draw-step draw and mulligan/setup draws
- * are exempt by simply never calling this (the event is defined with the
- * Orcish Bowmasters exemption built in).
- */
-function emitOpponentDrawTriggers(
-  s: GameState,
-  drawer: PlayerGameState,
-  count: number,
-  logs: string[]
-): void {
-  if (count <= 0) return;
-  const watcher = s.players.find((p) => p.playerId !== drawer.playerId);
-  if (!watcher) return;
-  const sorted = [...watcher.zones.battlefield].sort((a, b) => a.sortIndex - b.sortIndex);
-  for (let i = 0; i < count; i++) {
-    for (const permanent of sorted) {
-      pushTriggers(s, permanent, permanent.controllerId, "opponentDraws", logs);
+    case "fizzle": {
+      logs.push(`${t.label} fizzled: ${t.reason}`);
+      break;
     }
   }
 }
@@ -1453,8 +1828,21 @@ function applyMoveCard(
   if (wasOnBattlefield) detachFrom(s, card.instanceId);
 
   // Tokens cease to exist anywhere except the battlefield or the stack.
+  // Their departure is still an event (observers like "whenever a creature
+  // you control dies" see token deaths; nontoken filters exclude them).
   if (card.isToken && to !== "battlefield" && to !== "stack") {
     logs.push(`moved ${cardLabel(card)} to ${to}; the token ceased to exist`);
+    emitEvent({
+      kind: "zoneChange",
+      instanceId: card.instanceId,
+      cardId: card.cardId,
+      isToken: true,
+      controllerId: card.controllerId,
+      from,
+      to,
+      died: wasOnBattlefield && to === "graveyard",
+      ...(card.tokenTypeLine !== undefined ? { typeLine: card.tokenTypeLine } : {}),
+    });
     return;
   }
 
@@ -1483,9 +1871,8 @@ function applyMoveCard(
       else actor.zones.library.unshift(card);
       break;
     case "battlefield":
-      card.controllerId = actor.playerId;
-      card.sortIndex = actor.zones.battlefield.length;
-      actor.zones.battlefield.push(card);
+      // v10: arrival choke point (replacements + sortIndex + zoneChange event).
+      arriveOnBattlefield(s, card, actor, from, logs);
       break;
     default:
       actor.zones[to].push(card);
@@ -1495,20 +1882,27 @@ function applyMoveCard(
   const dest = to === "library" ? (action.toBottom ? "the bottom of their library" : "their library") : to;
   logs.push(`moved ${moveLabel(card, from, to)} from ${from} to ${dest}`);
 
-  // Triggered abilities. (Tokens that ceased to exist returned above and
-  // have no scripts anyway.)
-  if (to === "battlefield") {
-    pushTriggers(s, card, card.controllerId, "etb", logs);
-  } else if (wasOnBattlefield) {
-    // Leaving the battlefield: death fires "dies" when the script has one;
-    // otherwise "leaves" covers every departure, the graveyard included.
-    // A script with BOTH events fires only "dies" on death (no double-fire).
-    if (to === "graveyard" && hasTriggerFor(card, "dies")) {
-      pushTriggers(s, card, actor.playerId, "dies", logs);
-    } else {
-      pushTriggers(s, card, actor.playerId, "leaves", logs);
-    }
-  } else if (to === "stack" && (from === "hand" || from === "graveyard" || from === "exile" || from === "library")) {
+  // v9: every move is an event; the end-of-action matching pass turns events
+  // into triggers (self etb/dies/leaves, other-permanent observers, ...).
+  // (Battlefield arrivals already emitted inside arriveOnBattlefield.)
+  if (to !== "battlefield") {
+    emitEvent({
+      kind: "zoneChange",
+      instanceId: card.instanceId,
+      cardId: card.cardId,
+      isToken: card.isToken,
+      controllerId: card.controllerId,
+      from,
+      to,
+      died: wasOnBattlefield && to === "graveyard",
+      ...(typeLineOfCard(card) !== undefined ? { typeLine: typeLineOfCard(card) } : {}),
+    });
+  }
+  if (from === "hand" && to === "graveyard") {
+    emitEvent({ kind: "discard", playerId: actor.playerId, instanceId: card.instanceId });
+  }
+
+  if (to === "stack" && (from === "hand" || from === "graveyard" || from === "exile" || from === "library")) {
     // v5: only hand-casts are cost-enforced; note the gap for other zones
     // (flashback, reanimation shortcuts, ...) so it is never silent.
     if (from !== "hand") {
@@ -1516,18 +1910,22 @@ function applyMoveCard(
       const rawCost = castData?.faces?.[0]?.manaCost ?? castData?.manaCost;
       if (rawCost) logs.push(`(cost ${rawCost} is not enforced when casting from the ${from})`);
     }
-    // Casting a spell: castSpell triggers fire on the caster's OWN battlefield
-    // permanents (never on the spell itself), filtered by each trigger's
-    // castFilter against the cast card's typeLine. They are pushed after the
-    // spell, so they sit ABOVE it on the stack and resolve first.
-    const typeLine = frontTypeLine(card);
-    const permanents = [...actor.zones.battlefield].sort((a, b) => a.sortIndex - b.sortIndex);
-    for (const permanent of permanents) {
-      pushTriggers(s, permanent, permanent.controllerId, "castSpell", logs, (t) =>
-        castFilterMatches(t.castFilter, typeLine)
-      );
-    }
+    // Casting a spell: the spellCast event fires observer triggers (the
+    // caster's own permanents for caster:"you" conditions), which land ABOVE
+    // the cast spell on the stack because matching runs after the mutation.
+    emitEvent({
+      kind: "spellCast",
+      instanceId: card.instanceId,
+      cardId: card.cardId,
+      casterId: actor.playerId,
+      ...(frontTypeLine(card) !== undefined ? { typeLine: frontTypeLine(card) } : {}),
+    });
   }
+}
+
+/** Type line for event payloads: token type line or front-face card data. */
+function typeLineOfCard(card: GameCard): string | undefined {
+  return card.isToken ? card.tokenTypeLine : frontTypeLine(card);
 }
 
 /**
@@ -1610,6 +2008,7 @@ function enforceCastFromHand(
       if (source) {
         source.tapped = true;
         names.push(cardLabel(source));
+        emitEvent({ kind: "becameTapped", instanceId: source.instanceId, controllerId: source.controllerId });
       }
     }
     parts.push(`tapped ${names.join(", ")}`);
@@ -1678,15 +2077,38 @@ function enterStep(s: GameState, step: TurnStep, logs: string[]): void {
   // Floating mana empties at EVERY step boundary, for both players.
   for (const p of s.players) p.manaPool = {};
   const active = s.players.find((p) => p.playerId === s.activePlayerId)!;
+  const inactive = s.players.find((p) => p.playerId !== s.activePlayerId)!;
+
+  // A new combat (or leaving one) re-arms the "whenever you attack" trigger.
+  if (step === "beginCombat" || step === "endCombat") s.attackDeclaredThisCombat = false;
+
+  emitEvent({ kind: "stepEntered", step, activePlayerId: s.activePlayerId });
 
   if (step === "untap") {
     for (const c of active.zones.battlefield) c.tapped = false;
   } else if (step === "draw") {
     const skipFirstDraw = s.turnNumber === 1 && s.activePlayerId === s.startingPlayerId;
     if (!skipFirstDraw) {
-      const drawn = drawCards(active, 1);
+      const drawn = drawCards(active, 1, "drawStep");
       logs.push(`moved to the draw step and drew ${drawn} card${drawn === 1 ? "" : "s"}`);
       return;
+    }
+  } else if (step === "combatDamage") {
+    // Each attacking creature of the active player with no opposing creature
+    // blocking it deals its combat damage to the player. The resulting
+    // triggers are ordinary stack entries, so they can be countered/declined
+    // when the damage was actually prevented.
+    const sorted = [...active.zones.battlefield].sort((a, b) => a.sortIndex - b.sortIndex);
+    for (const c of sorted) {
+      if (!c.attacking) continue;
+      const blocked = inactive.zones.battlefield.some((b) => b.blocking === c.instanceId);
+      if (!blocked) {
+        emitEvent({
+          kind: "combatDamageToPlayer",
+          instanceId: c.instanceId,
+          controllerId: c.controllerId,
+        });
+      }
     }
   } else if (step === "cleanup") {
     for (const p of s.players) {
@@ -1694,36 +2116,6 @@ function enterStep(s: GameState, step: TurnStep, logs: string[]): void {
     }
   }
   logs.push(`moved to the ${step} step`);
-  emitStepTriggers(s, step, logs);
-}
-
-/** Step-entry trigger emission (upkeep/eachUpkeep/endStep/combatDamageToPlayer). */
-function emitStepTriggers(s: GameState, step: TurnStep, logs: string[]): void {
-  const active = s.players.find((p) => p.playerId === s.activePlayerId)!;
-  const inactive = s.players.find((p) => p.playerId !== s.activePlayerId)!;
-  const sorted = (p: PlayerGameState) =>
-    [...p.zones.battlefield].sort((a, b) => a.sortIndex - b.sortIndex);
-
-  if (step === "upkeep") {
-    // "upkeep" is controller-only (the active player); "eachUpkeep" fires for
-    // BOTH players' permanents, each controlled by its own controller.
-    for (const c of sorted(active)) {
-      pushTriggers(s, c, c.controllerId, "upkeep", logs);
-      pushTriggers(s, c, c.controllerId, "eachUpkeep", logs);
-    }
-    for (const c of sorted(inactive)) pushTriggers(s, c, c.controllerId, "eachUpkeep", logs);
-  } else if (step === "end") {
-    for (const c of sorted(active)) pushTriggers(s, c, c.controllerId, "endStep", logs);
-  } else if (step === "combatDamage") {
-    // Each attacking creature of the active player with no opposing creature
-    // blocking it. These are ordinary stack triggers, so they can be
-    // countered/declined when the damage was actually prevented.
-    for (const c of sorted(active)) {
-      if (!c.attacking) continue;
-      const blocked = inactive.zones.battlefield.some((b) => b.blocking === c.instanceId);
-      if (!blocked) pushTriggers(s, c, c.controllerId, "combatDamageToPlayer", logs);
-    }
-  }
 }
 
 /** End the current turn: swap active player, apply untap-step effects. */
@@ -1746,6 +2138,7 @@ function advanceTurn(s: GameState, logs: string[]): void {
   if (next.playerId === s.startingPlayerId) s.turnNumber += 1;
   current.landsPlayedThisTurn = 0;
   next.landsPlayedThisTurn = 0;
+  s.attackDeclaredThisCombat = false;
 
   s.step = "untap";
   for (const c of next.zones.battlefield) c.tapped = false;

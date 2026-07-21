@@ -289,6 +289,78 @@ export type TriggerEvent =
    */
   | "opponentDraws";
 
+// ---------------------------------------------------------------------------
+// v9: GameEvents — the engine's transient event stream. Buffered during ONE
+// applyAction call and consumed by the trigger-matching pass at the end of it;
+// never stored on GameState, never serialized. The log stays the player-facing
+// record. (Arena GRE model: the engine emits generic events; card conditions
+// pattern-match against them.)
+// ---------------------------------------------------------------------------
+
+export type GameEvent =
+  | {
+      kind: "zoneChange";
+      instanceId: string;
+      cardId: string;
+      isToken: boolean;
+      /** The card's controller at event time (arrival controller for enters). */
+      controllerId: string;
+      /** null = conjured into existence (spawnCard arrivals, token creation). */
+      from: ZoneName | null;
+      to: ZoneName;
+      /** battlefield -> graveyard. */
+      died: boolean;
+      /** Front-face type line (or tokenTypeLine) when known. */
+      typeLine?: string;
+    }
+  /** One event PER CARD drawn (CR 121.2). Mulligan/setup draws emit nothing. */
+  | { kind: "draw"; playerId: string; drawStepFirst: boolean }
+  | { kind: "discard"; playerId: string; instanceId: string }
+  | { kind: "stepEntered"; step: TurnStep; activePlayerId: string }
+  | { kind: "attackDeclared"; instanceId: string; controllerId: string; firstThisCombat: boolean }
+  | { kind: "spellCast"; instanceId: string; cardId: string; casterId: string; typeLine?: string }
+  /** Emitted on tap transitions only — untapping never emits. */
+  | { kind: "becameTapped"; instanceId: string; controllerId: string }
+  | { kind: "combatDamageToPlayer"; instanceId: string; controllerId: string };
+
+/** v9: type-line/token filter on the card an event is about. */
+export interface EventCardFilter {
+  /** Words that must ALL appear in the type line ("Creature", "Land", ...). */
+  types?: string[];
+  /** Real cards only (Gutter Grime's "nontoken creature"). */
+  nontoken?: boolean;
+  /** A single subtype word that must appear in the type line. */
+  subtype?: string;
+}
+
+/**
+ * v9: declarative trigger condition, matched against GameEvents in the
+ * engine's single matching pass. `CardTrigger.when` — the legacy
+ * `CardTrigger.event` values are sugar normalized via `conditionForEvent`.
+ * "which" is relative to the script's source card; "you" compares against the
+ * source's controller.
+ */
+export type TriggerCondition =
+  | {
+      on: "zoneChange";
+      which: "self" | "other" | "selfOrOther";
+      move: "entersBattlefield" | "dies" | "leavesBattlefield";
+      controller?: "you" | "opponent" | "any";
+      card?: EventCardFilter;
+    }
+  | { on: "stepEntered"; step: TurnStep; whose: "yours" | "opponents" | "each" }
+  /** team = "whenever you attack": once per combat, on the FIRST declaration. */
+  | { on: "attackDeclared"; which: "self" | "team" }
+  | {
+      on: "spellCast";
+      caster: "you" | "opponent" | "any";
+      castFilter?: "any" | "instantOrSorcery" | "noncreature" | "creature" | "artifact";
+    }
+  | { on: "draw"; who: "you" | "opponent"; exceptDrawStepFirst?: boolean }
+  | { on: "discard"; who: "you" }
+  | { on: "becameTapped"; which: "self" }
+  | { on: "combatDamageToPlayer"; which: "self" };
+
 /** v6: what a targeted effect points at, chosen when the trigger resolves.
  *  v7 adds "stack" — a non-trigger spell on the stack (counterspells). */
 export type TargetRef =
@@ -326,7 +398,17 @@ export type TriggerEffect =
   | { kind: "manual"; note: string };
 
 export interface CardTrigger {
+  /**
+   * Legacy shorthand condition (v3–v8). Still fully supported: the engine
+   * normalizes it to a TriggerCondition via `conditionForEvent`. Ignored when
+   * `when` is present.
+   */
   event: TriggerEvent;
+  /**
+   * v9: declarative condition. When present it is THE condition and `event`
+   * is ignored (set event to the closest legacy value for readability).
+   */
+  when?: TriggerCondition;
   /** "You may…" triggers can be declined by their controller. */
   optional: boolean;
   /** Human-readable ability text shown on the stack. */
@@ -364,11 +446,66 @@ export interface SpellResolutionScript {
   effects: TriggerEffect[];
 }
 
+/**
+ * v10: self-arrival replacement rules, applied at the engine's single
+ * battlefield-arrival choke point. Deliberately tiny vocabulary — future
+ * kinds (draw substitution, damage prevention, trigger doubling) are added
+ * here as data when a card needs them, never as engine surgery.
+ */
+export type ReplacementRule =
+  | { kind: "entersTapped" }
+  | { kind: "entersWithCounters"; counterType: string; count: number };
+
 export interface CardScript {
   triggers: CardTrigger[];
   activated?: ActivatedSearchAbility[];
   onResolve?: SpellResolutionScript;
+  /** v10: modifies how THIS card arrives on the battlefield. */
+  replacements?: ReplacementRule[];
 }
+
+// ---------------------------------------------------------------------------
+// v10: EffectTask — the whiteboard. Effect resolution compiles into primitive
+// task lists; the interception pipeline may rewrite them; a small executor
+// runs whatever survives and emits GameEvents. Every task carries provenance —
+// source identity is never squashed out of the pipeline (the Arena Ninja's
+// Kunai bug was exactly that loss).
+// ---------------------------------------------------------------------------
+
+export interface TaskProvenance {
+  /** cardId of the effect's source (for logs/art). */
+  sourceCardId?: string;
+  /** instanceId of the source permanent (counters land here; may be gone). */
+  sourceInstanceId?: string;
+  /** Human-readable source label ("Wall of Omens trigger", "Night's Whisper"). */
+  label: string;
+}
+
+export type EffectTask = TaskProvenance &
+  (
+    | { task: "draw"; playerId: string } // one task per card (CR 121.2)
+    | { task: "gainLife"; playerId: string; amount: number }
+    | { task: "loseLife"; playerId: string; amount: number }
+    | { task: "damagePlayer"; playerId: string; amount: number }
+    | { task: "damagePermanent"; instanceId: string; amount: number }
+    | { task: "addCounters"; instanceId: string; counterType: string; count: number }
+    | {
+        task: "createToken";
+        controllerId: string;
+        name: string;
+        typeLine: string;
+        power?: string;
+        toughness?: string;
+        tapped: boolean;
+      } // one task per token
+    | { task: "counterSpell"; instanceId: string }
+    /** Composite primitive (CR 701.47a): create-Army-if-none + counters. */
+    | { task: "amass"; controllerId: string; subtype: string; count: number }
+    | { task: "scryNote"; playerId: string; count: number }
+    | { task: "manualNote"; controllerId: string; note: string }
+    /** A compiled effect that already failed (stale/missing target). */
+    | { task: "fizzle"; reason: string }
+  );
 
 // ---------------------------------------------------------------------------
 // Game (1v1 match)
@@ -480,6 +617,13 @@ export interface GameState {
     shuffle: boolean;
     sourceName: string;
   } | null;
+  /**
+   * v9: has a "whenever you attack" (team) trigger already fired this combat?
+   * Set on the first attacker declaration of a combat; reset entering
+   * beginCombat/endCombat and on turn change. Optional: absent = false
+   * (states created before v9 keep working).
+   */
+  attackDeclaredThisCombat?: boolean;
   /** Monotonic sequence number: every applied action bumps it. */
   seq: number;
   /** Log of human-readable events for the game log panel. */

@@ -195,3 +195,87 @@ Fixes the response window: every cast visibly sits on the stack before anything 
 ## Targeting arrows, player avatars & drag-to-target (v8.1)
 
 Client-only layer over v8 targeting. Each player gets a placeholder avatar (hue hashed from their name, silhouette + initial — swap for real pictures later) beside their life counter; it anchors face-targeting: it glows while a player-legal target is being chosen (click to pick) and accepts a dragged hand card. Casting by DRAG now works end to end — drop a targeted spell onto a battlefield card, a player avatar, or (counterspells) a stack entry and it is cast AT that drop target through the normal moveCard+target path. An SVG overlay (`TargetArrows`) draws curved red arrows anchored to live DOM positions via data attributes (`data-stack-id`, `data-battlefield-id`, `data-player-avatar`, `data-hand-id`): a dashed arrow follows the cursor from the spell while its target is being chosen, and every stack entry with a `chosenTarget` keeps a solid arrow to its target until it resolves (arrows vanish naturally when either end leaves the board). Positions re-measure on an rAF loop so scrolling/layout track.
+
+## Game events & declarative triggers (v9) — "the whiteboard, part 1"
+
+Adopts the MTG Arena GRE architecture (per the "On Whiteboards, Naps, and Living Breakthrough" and Ben Finkel bug-story dev articles): the engine stays card-agnostic and emits a stream of generic **GameEvents**; triggered abilities become **declarative conditions matched against that stream** in ONE place, replacing the hard-coded per-event emission call sites. Adding a new trigger condition becomes data, not engine surgery.
+
+**GameEvent** (transient — buffered per applyAction call, never stored on GameState or serialized; the log remains the player-facing record):
+
+```ts
+export type GameEvent =
+  | { kind: "zoneChange"; instanceId; cardId; isToken: boolean; controllerId;
+      from: ZoneName | null; to: ZoneName; died: boolean; typeLine?: string }
+    // from=null for conjured/spawned arrivals and token creation; died = battlefield->graveyard.
+    // typeLine = front-face type line (or tokenTypeLine) when known.
+  | { kind: "draw"; playerId; drawStepFirst: boolean }   // one event PER CARD drawn (CR 121.2)
+  | { kind: "discard"; playerId; instanceId }            // hand -> graveyard moveCard
+  | { kind: "stepEntered"; step: TurnStep; activePlayerId }
+  | { kind: "attackDeclared"; instanceId; controllerId; firstThisCombat: boolean }
+  | { kind: "spellCast"; instanceId; cardId; casterId; typeLine?: string }
+  | { kind: "becameTapped"; instanceId; controllerId }   // untapping never emits
+  | { kind: "combatDamageToPlayer"; instanceId; controllerId };
+```
+
+Emission sites: every zone mutation (moveCard, resolveTopOfStack, counterTopOfStack skips — countered spells emit no zoneChange "arrival", completeSearch, spawnCard, spawnTokens, sacrifice costs), drawCards (EXCEPT mulligan/setup draws, which emit nothing — same exemption as today), enterStep, setAttacking(true, transition only), tapCard(true)/tapForMana/auto-payment taps/ability tap costs, the cast path, and the combatDamage-step unblocked-attacker scan. `GameState.attackDeclaredThisCombat: boolean` (new, reset entering beginCombat/endCombat and on turn advance) feeds `firstThisCombat`.
+
+**TriggerCondition** — the declarative side. `CardTrigger` gains optional `when?: TriggerCondition`; the legacy `event: TriggerEvent` field REMAINS as sugar (every existing override, template, and test keeps working) and is normalized via `conditionForEvent(event, castFilter)`:
+
+```ts
+export interface EventCardFilter { types?: string[]; nontoken?: boolean; subtype?: string }
+  // types match words in the type line ("Creature", "Land", "Artifact", ...)
+export type TriggerCondition =
+  | { on: "zoneChange"; which: "self" | "other" | "selfOrOther";
+      move: "entersBattlefield" | "dies" | "leavesBattlefield";
+      controller?: "you" | "opponent" | "any"; card?: EventCardFilter }
+  | { on: "stepEntered"; step: TurnStep; whose: "yours" | "opponents" | "each" }
+  | { on: "attackDeclared"; which: "self" | "team" }   // team = once per combat, on the FIRST declaration
+  | { on: "spellCast"; caster: "you" | "opponent" | "any";
+      castFilter?: "any" | "instantOrSorcery" | "noncreature" | "creature" | "artifact" }
+  | { on: "draw"; who: "you" | "opponent"; exceptDrawStepFirst?: boolean }
+  | { on: "discard"; who: "you" }
+  | { on: "becameTapped"; which: "self" }
+  | { on: "combatDamageToPlayer"; which: "self" };
+```
+
+Legacy mapping: etb → zoneChange/self/entersBattlefield; dies → zoneChange/self/dies; leaves → zoneChange/self/leavesBattlefield; upkeep → stepEntered/upkeep/yours; eachUpkeep → stepEntered/upkeep/each; endStep → stepEntered/end/yours; attack → attackDeclared/self; castSpell → spellCast/you (+castFilter); combatDamageToPlayer → combatDamageToPlayer/self; opponentDraws → draw/opponent/exceptDrawStepFirst.
+
+**The matching pass** (replaces emitStepTriggers, emitOpponentDrawTriggers, and every inline pushTriggers call): after the action's primary mutation, one pass walks the event buffer IN ORDER. For each event: (1) **self conditions** — the event's subject card's own script is checked first, wherever the card now is (a card that just left the battlefield still sees its own zoneChange, exactly like today's dies/leaves); (2) **observer conditions** — battlefield permanents as of matching time, active player's first then opponent's, each in sortIndex order. Matching triggers push the SAME trigger pseudo-cards as today (`tr{seq}-{n}`, isTrigger, cardId = source, triggerText/Effect/Optional/SourceId) — the stack shape, client, and server are unchanged. Preserved rules: dies suppresses leaves on death when the script has both; castSpell triggers land above the cast spell (events precede matching, pushes append); "you" controller filters compare the observer's controller to the event subject's controller/caster/drawer. DEVIATION (documented): observers are evaluated on the battlefield-at-matching-time, not CR 603.3a "look back in time"; team-attack fires on the first attacker toggle of a combat, not on a formal declare-attackers commit.
+
+**Newly expressible → cardScripts templates + UNSUPPORTED migration** (each with inference templates and honest effects — manual notes where the effect can't be automated): "Whenever ~ or another <filter> you control enters" (selfOrOther), "Whenever another creature you control enters" (Guide of Souls, Enduring Innocence, Kappa Cannoneer, Pyrogoyf, Vaultborn Tyrant halves...), landfall "Whenever a land you control enters" (Lotus Cobra, Bristly Bill, ...; also covers Fastbond/City of Traitors land-play triggers — noted deviation: "play" vs "enters"), "Whenever another creature you control dies" / "a nontoken creature you control dies" (Titania, Ajani via nontoken/subtype filters), "At the beginning of combat on your turn" (Luminarch Aspirant, Reckless Stormseeker, ~8 more), "At the beginning of each opponent's upkeep" (Abhorrent Oculus), "Whenever you attack" (team; Adeline, Raffine, Gut, Inti), "Whenever ~ becomes tapped" (Hawkeye), "Whenever you draw a card" (Sheoldred's first half; the opponent half via draw/opponent WITHOUT the exemption), "Whenever you discard a card" (Currency Converter, Ivora). Nth-draw/Nth-spell-per-turn counting conditions stay unsupported (no per-turn counts yet) and remain documented.
+
+**Blast-radius audit** (the Ninja's Kunai lesson — regenerated card logic can silently change): new `test/scriptAudit.test.ts` golden-snapshot test. A fixture list of real cube card oracle texts runs through `scriptFor`; the resulting scripts are compared against a checked-in JSON snapshot. Any template change that alters ANY card's script fails with a readable per-card diff; intentional changes are committed by regenerating the snapshot (update script documented in the test header). The snapshot diff in the git history IS the release-to-release card-behavior changelog.
+
+## Effect task pipeline & interception (v10) — "the whiteboard, part 2"
+
+Resolution stops executing effects directly: it **compiles them into primitive task lists** that pass through an **interception pipeline** before a small executor runs them — the Arena whiteboard/nap: the engine writes a task list, registered card rules may rewrite it, the engine executes whatever survives without knowing who touched it.
+
+```ts
+export type EffectTask =
+  | { task: "draw"; playerId }                       // one task per card (CR 121.2)
+  | { task: "gainLife" | "loseLife"; playerId; amount }
+  | { task: "damagePlayer"; playerId; amount }
+  | { task: "damagePermanent"; instanceId; amount }
+  | { task: "addCounters"; instanceId; counterType; count }
+  | { task: "createToken"; controllerId; name; typeLine; power?; toughness?; tapped: boolean }  // one per token
+  | { task: "counterSpell"; instanceId }
+  | { task: "manualNote"; controllerId; note };
+// Every task carries provenance: { sourceCardId?; sourceInstanceId?; label } — identity is never
+// squashed out of the pipeline (the Kunai bug was exactly that loss).
+```
+
+`compileEffect(effect, controller, opponent, sourceId, target) → EffectTask[]` (seq flattens; draw N → N tasks; amass keeps its bespoke executor step but emits token/counter tasks). `runTasks(s, tasks, logs)` = intercept → execute → emit GameEvents (a scripted draw emits a draw event, so Sheoldred-style chains fire off scripted draws exactly like manual ones; created tokens emit zoneChange arrivals, so other-creature-enters observers see them — all matched in the same end-of-action pass).
+
+**Single battlefield-arrival choke point**: every path that puts a card onto the battlefield (moveCard, resolveTopOfStack, completeSearch, spawnCard, token creation) now routes through one `arriveOnBattlefield(s, card, controller)` — it assigns sortIndex, applies arrival replacement rules, pushes, and emits the zoneChange event. Kills today's four divergent copies of that logic.
+
+**Replacement rules** (`CardScript.replacements?: ReplacementRule[]`, applied at the choke point; initial honest vocabulary — self-arrival modifiers only):
+
+```ts
+export type ReplacementRule =
+  | { kind: "entersTapped" }                                        // "~ enters the battlefield tapped."
+  | { kind: "entersWithCounters"; counterType: string; count: number };  // "~ enters with N X counters."
+```
+
+Inference templates for both lines (huge cube payoff: tap-lands and charge/oil counters just work). The pipeline API is the point: future kinds (draw substitution, damage prevention, trigger doubling à la Panharmonicon) plug into interceptTasks/the matching pass as data, no engine surgery. Not built until a card needs them (wrong automation is worse than none).
+
+**Executor refactor**: `applyEffect`'s switch becomes compileEffect + runTasks; trigger resolution and onResolve spells share it (as today). Behavior-identical for all existing effects (the 249-test suite is the proof); the only observable additions are the event emissions and replacement application.

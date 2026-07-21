@@ -37,14 +37,36 @@
  *    Sacrifice ...: Search ... for a X or Y card"), Prismatic Vista, and
  *    reveal-to-hand variants; cards the templates miss (Fabled Passage's
  *    conditional untap rider) live in CARD_OVERRIDES.
+ *
+ * v9 additions (declarative trigger conditions):
+ *  - Templates may attach `when: TriggerCondition` to the produced trigger.
+ *    When `when` is present it IS the condition and the legacy `event` field
+ *    is INERT — it is still set to the closest legacy value purely for
+ *    readability ("upkeep" is the conventional placeholder for conditions
+ *    with no legacy analogue: step, draw-you, discard, becameTapped).
+ *  - Newly expressible: "~ or another <type> you control enters" (selfOrOther),
+ *    "another creature you control enters"/"dies", landfall, begin-of-combat /
+ *    each-opponent's-upkeep / first-main / draw-step steps, "whenever you
+ *    attack" (team), "becomes tapped", "you draw/discard a card", plain
+ *    "an opponent draws a card" (the Bowmasters except-rider keeps the legacy
+ *    opponentDraws event with its built-in exemption).
+ *
+ * v10 additions (replacement rules):
+ *  - `parseReplacement` infers self-arrival modifiers: "~ enters the
+ *    battlefield tapped." and "~ enters with N <word> counters on it."
+ *    Anchored, so conditional taps ("... unless ...") and X counts stay
+ *    manual/unmodeled.
  */
 import type {
   ActivatedSearchAbility,
   CardData,
   CardScript,
   CardTrigger,
+  EventCardFilter,
+  ReplacementRule,
   SearchFilter,
   SpellResolutionScript,
+  TriggerCondition,
   TriggerEffect,
   TriggerEvent,
 } from "./types.js";
@@ -83,6 +105,33 @@ function parseCount(word: string): number | null {
 
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** "creature" -> "Creature", "lhurgoyf" -> "Lhurgoyf". */
+function capitalize(word: string): string {
+  return word[0]!.toUpperCase() + word.slice(1).toLowerCase();
+}
+
+const EVENT_CARD_TYPES: Record<string, string> = {
+  creature: "Creature",
+  artifact: "Artifact",
+  land: "Land",
+  enchantment: "Enchantment",
+};
+
+/**
+ * v9: build an EventCardFilter from a captured type/subtype word of an
+ * "…or another <word> you control enters" clause. A plain card type maps to a
+ * types filter; "permanent" means no filter at all; anything else is treated
+ * as a subtype word ("Lhurgoyf", optionally "Lhurgoyf creature").
+ */
+function eventCardFilter(word: string): EventCardFilter | undefined {
+  const w = word.toLowerCase();
+  if (w === "permanent") return undefined;
+  const type = EVENT_CARD_TYPES[w];
+  if (type !== undefined) return { types: [type] };
+  const subtype = capitalize(word.replace(/\s+creature$/i, ""));
+  return /\bcreature$/i.test(word) ? { types: ["Creature"], subtype } : { subtype };
 }
 
 /**
@@ -396,6 +445,15 @@ function parseLine(line: string, self: string): CardTrigger[] {
     events: TriggerEvent[];
     re: RegExp;
     castFilter?: CardTrigger["castFilter"];
+    /**
+     * v9: declarative condition attached to the produced trigger. When set it
+     * IS the condition (the engine ignores `event`); the legacy event value
+     * is kept purely for readability — "upkeep" is the conventional inert
+     * placeholder for conditions with no legacy analogue.
+     */
+    when?: TriggerCondition | ((m: RegExpMatchArray) => TriggerCondition);
+    /** Extra sentence appended to the stack description (engine deviations). */
+    descriptionNote?: string;
   }[] = [
     {
       // "When ~ enters the battlefield or attacks," / "Whenever ~ attacks or
@@ -459,8 +517,8 @@ function parseLine(line: string, self: string): CardTrigger[] {
     },
     {
       // "each upkeep" / "each player's upkeep" fires on both players' turns.
-      // ("each opponent's upkeep" intentionally does NOT match — that
-      // condition has no event and belongs in UNSUPPORTED_TRIGGER_CARDS.)
+      // ("each opponent's upkeep" is the v9 stepEntered/opponents template
+      // further down — it intentionally does NOT match here.)
       events: ["eachUpkeep"],
       re: /^at the beginning of each (?:player's )?upkeep, (.+)$/i,
     },
@@ -508,13 +566,177 @@ function parseLine(line: string, self: string): CardTrigger[] {
       castFilter: "any",
       re: /^whenever you cast a spell, (.+)$/i,
     },
+
+    // -----------------------------------------------------------------------
+    // v9 declarative conditions. Every entry below sets `when`, which the
+    // engine matches against the GameEvent stream; the legacy `event` value
+    // is INERT and chosen only for readability ("upkeep" = conventional
+    // placeholder where no legacy value fits).
+    // -----------------------------------------------------------------------
+    {
+      // "Whenever ~ or another <type/subtype> you control enters," (Kappa
+      // Cannoneer, Pyrogoyf). Riders like "with power 4 or greater" (Vaultborn
+      // Tyrant) deliberately do NOT match — those keep curated overrides.
+      events: ["etb"],
+      re: new RegExp(
+        `^whenever (?:${self}) or another ` +
+          `(creature|artifact|land|enchantment|permanent|[A-Z][a-z]+(?: creature)?) ` +
+          `you control enters(?: the battlefield)?, (.+)$`,
+        "i"
+      ),
+      when: (m) => {
+        const card = eventCardFilter(m[1]!);
+        return {
+          on: "zoneChange",
+          which: "selfOrOther",
+          move: "entersBattlefield",
+          controller: "you",
+          ...(card !== undefined ? { card } : {}),
+        };
+      },
+    },
+    {
+      // "Whenever another [nontoken] creature/artifact/... you control
+      // enters," (Guide of Souls, Ultron) — plus the older "enters the
+      // battlefield under your control" templating of the same condition.
+      events: ["etb"],
+      re: /^whenever another (nontoken )?(creature|artifact|land|enchantment) (?:you control enters(?: the battlefield)?|enters the battlefield under your control), (.+)$/i,
+      when: (m) => ({
+        on: "zoneChange",
+        which: "other",
+        move: "entersBattlefield",
+        controller: "you",
+        card: {
+          types: [EVENT_CARD_TYPES[m[2]!.toLowerCase()]!],
+          ...(m[1] !== undefined ? { nontoken: true } : {}),
+        },
+      }),
+    },
+    {
+      // Landfall: "Whenever a land you control enters," (the "Landfall — "
+      // ability word is stripped before matching).
+      events: ["etb"],
+      re: /^whenever a land you control enters(?: the battlefield)?, (.+)$/i,
+      when: {
+        on: "zoneChange",
+        which: "other",
+        move: "entersBattlefield",
+        controller: "you",
+        card: { types: ["Land"] },
+      },
+    },
+    {
+      // "Whenever an artifact you control enters," (Tezzeret, Cruel Captain).
+      // "a/an" without "another" includes the source itself whenever it fits
+      // the filter, so selfOrOther. Lands are the landfall template above.
+      events: ["etb"],
+      re: /^whenever an? (creature|artifact|enchantment) you control enters(?: the battlefield)?, (.+)$/i,
+      when: (m) => ({
+        on: "zoneChange",
+        which: "selfOrOther",
+        move: "entersBattlefield",
+        controller: "you",
+        card: { types: [EVENT_CARD_TYPES[m[1]!.toLowerCase()]!] },
+      }),
+    },
+    {
+      // "Whenever another [nontoken] creature [you control] dies," (Grim
+      // Haruspex, Reaper of the Wilds).
+      events: ["dies"],
+      re: /^whenever another (nontoken )?creature( you control)? dies, (.+)$/i,
+      when: (m) => ({
+        on: "zoneChange",
+        which: "other",
+        move: "dies",
+        controller: m[2] !== undefined ? "you" : "any",
+        card: { types: ["Creature"], ...(m[1] !== undefined ? { nontoken: true } : {}) },
+      }),
+    },
+    {
+      // "Whenever a nontoken creature you control dies," (Gutter Grime
+      // templating — "a" instead of "another").
+      events: ["dies"],
+      re: /^whenever a nontoken creature you control dies, (.+)$/i,
+      when: {
+        on: "zoneChange",
+        which: "other",
+        move: "dies",
+        controller: "you",
+        card: { types: ["Creature"], nontoken: true },
+      },
+    },
+    {
+      // "At the beginning of combat on your turn," (Luminarch Aspirant,
+      // Goblin Rabblemaster, ...).
+      events: ["upkeep"], // placeholder — inert, `when` is the condition
+      re: /^at the beginning of combat on your turn, (.+)$/i,
+      when: { on: "stepEntered", step: "beginCombat", whose: "yours" },
+    },
+    {
+      // "At the beginning of each opponent's upkeep," (Abhorrent Oculus).
+      events: ["upkeep"], // placeholder — inert
+      re: /^at the beginning of each opponent's upkeep, (.+)$/i,
+      when: { on: "stepEntered", step: "upkeep", whose: "opponents" },
+    },
+    {
+      // "At the beginning of your first/precombat main phase," (Coalition
+      // Relic — both wordings have been printed).
+      events: ["upkeep"], // placeholder — inert
+      re: /^at the beginning of your (?:first|precombat) main phase, (.+)$/i,
+      when: { on: "stepEntered", step: "main1", whose: "yours" },
+    },
+    {
+      // "At the beginning of your draw step," (Mana Vault).
+      events: ["upkeep"], // placeholder — inert
+      re: /^at the beginning of your draw step, (.+)$/i,
+      when: { on: "stepEntered", step: "draw", whose: "yours" },
+    },
+    {
+      // "Whenever you attack," (Adeline, Raffine, Gut, Inti, Guide of Souls).
+      // Team condition: the engine fires it when the FIRST attacker of a
+      // combat is declared (SPEC v9 documented deviation from a formal
+      // declare-attackers commit) — the description says so.
+      events: ["attack"],
+      re: /^whenever you attack(?: with one or more creatures)?, (.+)$/i,
+      when: { on: "attackDeclared", which: "team" },
+      descriptionNote: "(Fires when your first attacker is declared each combat.)",
+    },
+    {
+      // "Whenever ~ becomes tapped," (Hawkeye, Master Marksman).
+      events: ["upkeep"], // placeholder — inert
+      re: new RegExp(`^whenever (?:${self}) becomes tapped, (.+)$`, "i"),
+      when: { on: "becameTapped", which: "self" },
+    },
+    {
+      // "Whenever you draw a card," (Sheoldred's first half).
+      events: ["upkeep"], // placeholder — inert
+      re: /^whenever you draw a card, (.+)$/i,
+      when: { on: "draw", who: "you" },
+    },
+    {
+      // "Whenever an opponent draws a card," — the PLAIN form only. The
+      // Bowmasters "except the first one they draw in each of their draw
+      // steps" rider breaks the anchor and keeps the legacy opponentDraws
+      // event (whose exemption is built in); this `when` has no exemption.
+      events: ["opponentDraws"],
+      re: /^whenever an opponent draws a card, (.+)$/i,
+      when: { on: "draw", who: "opponent" },
+    },
+    {
+      // "Whenever you discard a card," (Currency Converter, Ivora).
+      events: ["upkeep"], // placeholder — inert
+      re: /^whenever you discard a card, (.+)$/i,
+      when: { on: "discard", who: "you" },
+    },
   ];
 
   const body = line.replace(ABILITY_WORD_PREFIX, "");
-  for (const { events, re, castFilter } of conditions) {
+  for (const { events, re, castFilter, when, descriptionNote } of conditions) {
     const m = body.match(re);
     if (!m) continue;
-    let clause = m[1]!.trim();
+    // The effect clause is always the LAST capture group (v9 templates also
+    // capture type/subtype words before it).
+    let clause = m[m.length - 1]!.trim();
     let optional = false;
     const may = clause.match(/^you may (.+)$/i);
     if (may) {
@@ -527,15 +749,42 @@ function parseLine(line: string, self: string): CardTrigger[] {
       kind: "manual" as const,
       note: clause.trim().replace(/\.+$/, ""),
     };
+    const whenValue = typeof when === "function" ? when(m) : when;
     return events.map((event) => ({
       event,
+      ...(whenValue !== undefined ? { when: whenValue } : {}),
       optional,
-      description: line,
+      description: descriptionNote !== undefined ? `${line} ${descriptionNote}` : line,
       effect,
       ...(event === "castSpell" && castFilter !== undefined ? { castFilter } : {}),
     }));
   }
   return [];
+}
+
+/**
+ * v10: parse one oracle line as a self-arrival replacement rule.
+ *  - "~ enters the battlefield tapped." / "This land enters tapped."
+ *    Anchored: "… tapped unless …" and other riders never match (conditional
+ *    taps stay manual).
+ *  - "~ enters the battlefield with N <word> counters on it." — number words
+ *    only ("with X charge counters" fails parseCount and stays unmodeled).
+ */
+function parseReplacement(line: string, self: string): ReplacementRule | null {
+  if (new RegExp(`^(?:${self}) enters(?: the battlefield)? tapped\\.?$`, "i").test(line)) {
+    return { kind: "entersTapped" };
+  }
+  const m = line.match(
+    new RegExp(
+      `^(?:${self}) enters(?: the battlefield)? with (\\w+) (\\+1\\/\\+1|[a-z]+) counters? on it\\.?$`,
+      "i"
+    )
+  );
+  if (m) {
+    const count = parseCount(m[1]!);
+    if (count !== null) return { kind: "entersWithCounters", counterType: m[2]!, count };
+  }
+  return null;
 }
 
 /**
@@ -561,10 +810,13 @@ export function inferScript(card: CardData): CardScript | null {
 
   const triggers: CardTrigger[] = [];
   const activated: ActivatedSearchAbility[] = [];
+  const replacements: ReplacementRule[] = [];
   for (const line of lines) {
     triggers.push(...parseLine(line, self));
     const search = parseActivatedSearch(line, self);
     if (search) activated.push(search);
+    const replacement = parseReplacement(line, self);
+    if (replacement) replacements.push(replacement);
   }
 
   // onResolve: instants/sorceries only, and ALL-OR-NOTHING — one unparseable
@@ -585,11 +837,19 @@ export function inferScript(card: CardData): CardScript | null {
     if (allParsed && effects.length > 0) onResolve = { effects };
   }
 
-  if (triggers.length === 0 && activated.length === 0 && onResolve === undefined) return null;
+  if (
+    triggers.length === 0 &&
+    activated.length === 0 &&
+    onResolve === undefined &&
+    replacements.length === 0
+  ) {
+    return null;
+  }
   return {
     triggers,
     ...(activated.length > 0 ? { activated } : {}),
     ...(onResolve !== undefined ? { onResolve } : {}),
+    ...(replacements.length > 0 ? { replacements } : {}),
   };
 }
 
@@ -791,12 +1051,19 @@ export const CARD_OVERRIDES: Record<string, CardScript> = {
   // oracle wording so the stack UI (and the audit tooling) read true.
   // -------------------------------------------------------------------------
 
-  // Self-ETB half scripted; "or another artifact you control enters" is not
-  // modelable (see UNSUPPORTED_TRIGGER_CARDS).
+  // v9: the whole condition is declarative now — fires for itself AND every
+  // other artifact you control (the compound effect stays a manual note).
   "Kappa Cannoneer": {
     triggers: [
       {
-        event: "etb",
+        event: "etb", // inert — `when` is the condition
+        when: {
+          on: "zoneChange",
+          which: "selfOrOther",
+          move: "entersBattlefield",
+          controller: "you",
+          card: { types: ["Artifact"] },
+        },
         optional: false,
         description:
           "Whenever this creature or another artifact you control enters, put a +1/+1 counter on this creature. It can't be blocked this turn.",
@@ -901,15 +1168,130 @@ export const CARD_OVERRIDES: Record<string, CardScript> = {
       },
     ],
   },
-  // Self-ETB half scripted; "or another Lhurgoyf creature you control" is not.
+  // v9: fires for itself and every other Lhurgoyf you control (the dynamic
+  // power-based damage stays a manual note).
   Pyrogoyf: {
+    triggers: [
+      {
+        event: "etb", // inert — `when` is the condition
+        when: {
+          on: "zoneChange",
+          which: "selfOrOther",
+          move: "entersBattlefield",
+          controller: "you",
+          card: { types: ["Creature"], subtype: "Lhurgoyf" },
+        },
+        optional: false,
+        description:
+          "Whenever this creature or another Lhurgoyf creature you control enters, that creature deals damage equal to its power to any target.",
+        effect: {
+          kind: "manual",
+          note: "the entering creature deals damage equal to its power to any target",
+        },
+      },
+    ],
+  },
+  // v9: the land-death token trigger is declarative (a land is any card whose
+  // type line says Land; sacrifices and destructions both "die"). The ETB
+  // land recursion is targeted, so manual.
+  "Titania, Protector of Argoth": {
     triggers: [
       {
         event: "etb",
         optional: false,
+        description: "When Titania enters, return target land card from your graveyard to the battlefield.",
+        effect: {
+          kind: "manual",
+          note: "return target land card from your graveyard to the battlefield",
+        },
+      },
+      {
+        event: "dies", // inert — `when` is the condition
+        when: {
+          on: "zoneChange",
+          which: "other",
+          move: "dies",
+          controller: "you",
+          card: { types: ["Land"] },
+        },
+        optional: false,
         description:
-          "Whenever this creature or another Lhurgoyf creature you control enters, that creature deals damage equal to its power to any target.",
-        effect: { kind: "manual", note: "this creature deals damage equal to its power to any target" },
+          "Whenever a land you control is put into a graveyard from the battlefield, create a 5/3 green Elemental creature token.",
+        effect: {
+          kind: "createToken",
+          name: "Elemental",
+          typeLine: "Token Creature — Elemental",
+          power: "5",
+          toughness: "3",
+          count: 1,
+        },
+      },
+    ],
+  },
+  // v9 DEVIATION (documented): there is no "play a land" event — the closest
+  // condition is "a land you control enters", which ALSO fires for lands put
+  // onto the battlefield without being played (fetches). The effect is a
+  // manual note either way, so the player applies the real rider by hand.
+  Fastbond: {
+    triggers: [
+      {
+        event: "etb", // inert — `when` is the condition
+        when: {
+          on: "zoneChange",
+          which: "other",
+          move: "entersBattlefield",
+          controller: "you",
+          card: { types: ["Land"] },
+        },
+        optional: false,
+        description:
+          "Whenever you play a land, if it wasn't the first land you played this turn, this enchantment deals 1 damage to you.",
+        effect: {
+          kind: "manual",
+          note: "if it wasn't the first land you played this turn, this enchantment deals 1 damage to you (fires for ANY land arrival — decline it for lands that weren't played)",
+        },
+      },
+    ],
+  },
+  // Same "play a land" -> "land enters" approximation as Fastbond.
+  "City of Traitors": {
+    triggers: [
+      {
+        event: "etb", // inert — `when` is the condition
+        when: {
+          on: "zoneChange",
+          which: "other",
+          move: "entersBattlefield",
+          controller: "you",
+          card: { types: ["Land"] },
+        },
+        optional: false,
+        description: "When you play another land, sacrifice this land.",
+        effect: {
+          kind: "manual",
+          note: "sacrifice this land (fires for ANY other land arrival — decline it for lands that weren't played)",
+        },
+      },
+    ],
+  },
+  // v9: fully automated. The opponent half uses the draw/opponent condition
+  // WITHOUT the Bowmasters draw-step exemption (Sheoldred hits every draw);
+  // "they lose 2 life" is the drawer, which in 1v1 is exactly "each opponent".
+  "Sheoldred, the Apocalypse": {
+    triggers: [
+      {
+        event: "upkeep", // inert placeholder — `when` is the condition
+        when: { on: "draw", who: "you" },
+        optional: false,
+        description: "Whenever you draw a card, you gain 2 life.",
+        effect: { kind: "gainLife", amount: 2 },
+      },
+      {
+        event: "opponentDraws", // inert — `when` wins (no draw-step exemption)
+        when: { on: "draw", who: "opponent" },
+        optional: false,
+        description: "Whenever an opponent draws a card, they lose 2 life.",
+        effect: { kind: "eachOpponentLosesLife", amount: 2 },
       },
     ],
   },
@@ -1213,88 +1595,76 @@ export const CARD_OVERRIDES: Record<string, CardScript> = {
  * clauses (e.g. an ETB plus an unmodelable landfall line).
  */
 export const UNSUPPORTED_TRIGGER_CARDS: Record<string, string> = {
-  // --- other-permanent events (something ELSE entering/leaving/dying) ------
-  "Guide of Souls": "another-creature-enters and whole-team attack triggers have no event",
-  "Enduring Innocence": "other-creatures-enter trigger has no event",
-  "Kappa Cannoneer": "the 'or another artifact you control enters' half has no event (self ETB is scripted)",
-  "Pyrogoyf": "the 'or another Lhurgoyf creature you control enters' half has no event (self ETB is scripted)",
-  "Vaultborn Tyrant": "the 'or another creature with power 4 or greater enters' half has no event (self ETB + dies are scripted)",
-  "Super Shredder": "another-permanent-leaves trigger has no event",
-  "The Ooze": "counter-carrying-creature-leaves trigger has no event",
-  "Ultron, Artificial Malevolence": "another-artifact-enters trigger has no event",
-  "Tezzeret, Cruel Captain": "artifact-you-control-enters trigger has no event",
-  "Sword of the Meek": "1/1-creature-enters trigger has no event",
-  "Titania, Protector of Argoth": "land-you-control-dies trigger has no event",
-  "Ajani, Nacatl Pariah": "other-Cats-die trigger has no event",
-  "Skullclamp": "equipped-creature-dies trigger has no event (equipment watches another permanent)",
-  // --- landfall ------------------------------------------------------------
-  "Bristly Bill, Spine Sower": "landfall (a land you control enters) has no event",
-  "Lotus Cobra": "landfall has no event",
-  "Scythecat Cub": "landfall has no event",
-  "Springheart Nantuko": "landfall has no event",
-  "Tireless Tracker": "landfall and sacrifice-a-Clue triggers have no event",
-  "Icetill Explorer": "landfall has no event",
-  "Omnath, Locus of Creation": "landfall has no event",
-  // --- land plays ----------------------------------------------------------
-  "Fastbond": "land-play trigger has no event (lands are not cast)",
-  "City of Traitors": "land-play trigger has no event",
-  // --- begin-of-combat / main-phase / draw-step steps ----------------------
-  "Luminarch Aspirant": "begin-of-combat step trigger has no event",
-  "Agent Bishop, Man in Black": "begin-of-combat step trigger has no event",
-  "Leader, Super-Genius": "begin-of-combat step trigger has no event",
-  "Goblin Rabblemaster": "begin-of-combat token trigger has no event (the attack pump is scripted)",
-  "Reckless Stormseeker": "begin-of-combat step trigger has no event",
-  "Ursine Monstrosity": "begin-of-combat step trigger has no event",
-  "Ouroboroid": "begin-of-combat step trigger has no event",
-  "Okoye, Mighty and Adored": "begin-of-combat step trigger has no event",
-  "Mister Fantastic": "begin-of-combat step trigger has no event",
-  "Emperor of Bones": "begin-of-combat and counters-placed triggers have no event",
-  "Does Machines": "begin-of-combat and Class level-up triggers have no event (the ETB is scripted)",
-  "Coalition Relic": "first-main-phase trigger has no event",
-  "Mana Vault": "draw-step trigger has no event",
-  // --- whole-team "whenever you attack" ------------------------------------
-  "Adeline, Resplendent Cathar": "whole-team attack trigger has no event",
-  "Inti, Seneschal of the Sun": "whole-team attack and discard triggers have no event",
-  "Gut, True Soul Zealot": "whole-team attack trigger has no event",
-  "Raffine, Scheming Seer": "whole-team attack trigger has no event",
-  "Glimmer Lens": "equipped-creature-plus-another-attacker condition has no event",
-  "Coveted Jewel": "opponent-attackers-unblocked trigger has no event",
-  "Emberwilde Captain": "opponent-attacks-you-while-monarch trigger has no event",
+  // v9 migrated OUT of this list (now scripted via declarative `when`
+  // conditions — inference templates or CARD_OVERRIDES): Guide of Souls,
+  // Kappa Cannoneer, Pyrogoyf, Ultron, Tezzeret Cruel Captain, Titania, the
+  // landfall block (Bristly Bill, Lotus Cobra, Scythecat Cub, Springheart
+  // Nantuko, Icetill Explorer, Omnath), Fastbond + City of Traitors
+  // (land-enters approximation), the begin-of-combat block (Luminarch
+  // Aspirant, Agent Bishop, Leader, Goblin Rabblemaster, Reckless
+  // Stormseeker, Ursine Monstrosity, Ouroboroid, Okoye, Mister Fantastic),
+  // Coalition Relic, Mana Vault, the team-attack block (Adeline, Gut,
+  // Raffine), Abhorrent Oculus, Sheoldred, Hawkeye, Currency Converter,
+  // Ivora.
+
+  // --- other-permanent events the condition vocabulary still can't say -----
+  "Enduring Innocence":
+    "the 'one or more other creatures with power 2 or less enter' batch needs a power filter and a once-each-turn limit EventCardFilter lacks (the dies return is scripted)",
+  "Vaultborn Tyrant":
+    "the 'or another creature with power 4 or greater enters' half needs a power filter EventCardFilter lacks (self ETB + dies are scripted)",
+  "Super Shredder":
+    "another-permanent-leaves is expressible in v9 but this card is deliberately unmigrated (exact wording unverified — needs a curated override)",
+  "The Ooze": "counter-carrying-creature-leaves needs a counters filter EventCardFilter lacks",
+  "Sword of the Meek":
+    "the '1/1 creature you control enters' trigger needs a P/T filter, and it watches from the graveyard (trigger matching only sees battlefield permanents)",
+  "Ajani, Nacatl Pariah":
+    "the 'one or more other Cats you control die' batch transform stays manual (batch-once semantics are not expressible; the front-face ETB token is inferred)",
+  "Skullclamp": "equipped-creature-dies has no condition (equipment watches another permanent)",
+  "Tireless Tracker": "sacrifice-a-Clue has no condition (the landfall investigate is now inferred)",
+  // --- begin-of-combat leftovers -------------------------------------------
+  "Emperor of Bones":
+    "counters-are-placed has no condition (the begin-of-combat exile is now inferred)",
+  "Does Machines":
+    "Class level-up has no condition, and its combat/cast lines are level-gated (Class levels are invisible to inference); the ETB is scripted",
+  // --- team-attack leftovers -----------------------------------------------
+  "Inti, Seneschal of the Sun":
+    "the 'discard one or more cards' batch trigger is not expressible (the whenever-you-attack half is now inferred)",
+  "Glimmer Lens": "equipped-creature-plus-another-attacker condition is not expressible",
+  "Coveted Jewel": "opponent-attackers-unblocked trigger is not expressible",
+  "Emberwilde Captain": "opponent-attacks-you-while-monarch trigger is not expressible",
   // --- casting-count / on-cast-of-this-spell -------------------------------
-  "Cosmogrand Zenith": "Nth-spell-each-turn trigger has no event (spell counting is not tracked)",
-  "Emeritus of Conflict": "Nth-spell-each-turn trigger has no event",
-  "Cori-Steel Cutter": "Nth-spell-each-turn trigger has no event",
-  "The Fantasticar": "Nth-noncreature-spell-each-turn trigger has no event",
-  "Sage of the Skies": "when-you-cast-this-spell (on-stack) trigger has no event",
-  "Sowing Mycospawn": "when-you-cast-this-spell (kicker) triggers have no event",
-  "Emrakul, the Aeons Torn": "when-you-cast-this-spell extra turn has no event; the graveyard shuffle is scripted for death only (not mill/discard)",
+  "Cosmogrand Zenith": "Nth-spell-each-turn trigger needs per-turn spell counting (not tracked)",
+  "Emeritus of Conflict": "Nth-spell-each-turn trigger needs per-turn spell counting",
+  "Cori-Steel Cutter": "Nth-spell-each-turn trigger needs per-turn spell counting",
+  "The Fantasticar": "Nth-noncreature-spell-each-turn trigger needs per-turn spell counting",
+  "Sage of the Skies": "when-you-cast-this-spell (on-stack) trigger has no condition",
+  "Sowing Mycospawn": "when-you-cast-this-spell (kicker) triggers have no condition",
+  "Emrakul, the Aeons Torn": "when-you-cast-this-spell extra turn has no condition; the graveyard shuffle is scripted for death only (not mill/discard)",
   "Worldspine Wurm": "put-into-graveyard-from-anywhere is scripted for death only (not mill/discard)",
   "Ugin, Eye of the Storms": "when-you-cast-this-spell trigger and colorless-spell cast filter have no support",
-  // --- draws / discards / other hidden-zone events -------------------------
-  "Sheoldred, the Apocalypse": "draw triggers (yours and the opponent's) have no event",
-  "Faerie Mastermind": "opponent's-second-draw trigger has no event",
-  "King T'Challa": "any-player's-second-draw trigger has no event",
-  "Tamiyo, Inquisitive Student": "your-third-draw trigger has no event",
-  "Currency Converter": "discard trigger has no event",
-  "Ivora, Insatiable Heir": "discard trigger has no event (the ETB/combat-damage Blood token is scripted)",
-  "Wan Shi Tong, All-Knowing": "cards-put-into-a-library trigger has no event",
-  "Moonshadow": "permanent-cards-into-your-graveyard trigger has no event",
-  "Laelia, the Blade Reforged": "cards-exiled-from-library/graveyard trigger has no event (the attack trigger is scripted)",
-  "Staff of the Storyteller": "token-creation trigger has no event",
+  // --- Nth-draw counts / other hidden-zone events --------------------------
+  "Faerie Mastermind":
+    "opponent's-SECOND-draw needs per-turn draw counting (the plain draw condition would over-fire)",
+  "King T'Challa": "any-player's-second-draw needs per-turn draw counting",
+  "Tamiyo, Inquisitive Student": "your-third-draw needs per-turn draw counting",
+  "Wan Shi Tong, All-Knowing": "cards-put-into-a-library trigger has no condition",
+  "Moonshadow": "permanent-cards-into-your-graveyard trigger has no condition",
+  "Laelia, the Blade Reforged": "cards-exiled-from-library/graveyard trigger has no condition (the attack trigger is scripted)",
+  "Staff of the Storyteller": "token-creation trigger has no condition",
   // --- taps, targeting, damage-received, misc ------------------------------
-  "Hawkeye, Master Marksman": "becomes-tapped trigger has no event",
-  "Magda, Brazen Outlaw": "Dwarf-becomes-tapped trigger has no event",
-  "Badgermole Cub": "tap-a-creature-for-mana trigger has no event",
-  "Nissa, Who Shakes the World": "tap-a-Forest-for-mana trigger has no event",
-  "Surrak, Elusive Hunter": "becomes-the-target trigger has no event",
-  "Leovold, Emissary of Trest": "becomes-the-target trigger has no event",
-  "Screaming Nemesis": "is-dealt-damage trigger has no event",
-  "Umezawa's Jitte": "equipped-creature-deals-combat-damage trigger has no event",
-  "Abhorrent Oculus": "each-OPPONENT's-upkeep trigger has no event (upkeep/eachUpkeep don't fit)",
-  "Baloth Prime": "sacrifice-a-land trigger has no event",
-  "Alpha Deathclaw": "the 'or becomes monstrous' half has no event (ETB is scripted)",
-  "Smuggler's Copter": "the 'or blocks' half has no event (the attack half is scripted)",
-  "Stormchaser's Talent": "Class level-up trigger has no event (the ETB token is scripted)",
+  "Magda, Brazen Outlaw":
+    "becameTapped only matches the source itself — the other-Dwarf-becomes-tapped condition is not expressible",
+  "Badgermole Cub": "tap-a-creature-for-mana trigger has no condition",
+  "Nissa, Who Shakes the World": "tap-a-Forest-for-mana trigger has no condition",
+  "Surrak, Elusive Hunter": "becomes-the-target trigger has no condition",
+  "Leovold, Emissary of Trest": "becomes-the-target trigger has no condition",
+  "Screaming Nemesis": "is-dealt-damage trigger has no condition",
+  "Umezawa's Jitte": "equipped-creature-deals-combat-damage trigger has no condition",
+  "Baloth Prime":
+    "sacrifice-a-land is only approximable by land-dies (it would over-fire on destroyed lands) — stays manual",
+  "Alpha Deathclaw": "the 'or becomes monstrous' half has no condition (ETB is scripted)",
+  "Smuggler's Copter": "the 'or blocks' half has no condition (the attack half is scripted)",
+  "Stormchaser's Talent": "Class level-up trigger has no condition (the ETB token is scripted)",
   // --- sagas (chapter abilities are not modeled at all) --------------------
   "Summon: Good King Mog XII": "saga (Summon) chapter abilities are not modeled",
   "Urza's Saga": "saga chapter abilities are not modeled",
