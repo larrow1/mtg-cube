@@ -56,6 +56,7 @@ const SLOW_EVENTS: Partial<Record<AckedEvent, number>> = {
   saveCube: 120_000,
   adminUploadSystemCube: 120_000,
   loadCubeIntoRoom: 30_000,
+  sandboxAddCard: 30_000, // one Scryfall lookup (cached after the first hit)
 };
 
 /**

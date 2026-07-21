@@ -67,6 +67,7 @@ import type {
   GameState,
   PlayerGameState,
   SearchFilter,
+  SpawnZone,
   TriggerEffect,
   TriggerEvent,
   TurnStep,
@@ -763,6 +764,51 @@ export function applyAction(
 
     case "restartGame": {
       restartGame(s, action.seed, logs);
+      break;
+    }
+
+    case "spawnCard": {
+      // v4.1 admin sandbox: conjure a fresh copy of a known card into one of
+      // the actor's zones. The SERVER gates this to sandbox rooms; the engine
+      // just requires the card data to exist so the spawn is never a blind id.
+      if (!ctx.cards?.[action.cardId]) {
+        throw new EngineError(`Cannot spawn unknown card "${action.cardId}" (no card data)`);
+      }
+      const allowed: readonly SpawnZone[] = ["hand", "battlefield", "library", "graveyard", "exile", "stack"];
+      if (!allowed.includes(action.zone)) {
+        throw new EngineError(`Cannot spawn a card into zone "${action.zone}"`);
+      }
+      const card: GameCard = {
+        instanceId: `sb${s.seq + 1}`,
+        cardId: action.cardId,
+        ownerId: actor.playerId,
+        controllerId: actor.playerId,
+        tapped: false,
+        faceDown: false,
+        faceIndex: 0,
+        counters: {},
+        attachedTo: null,
+        isToken: false,
+        damage: 0,
+        attacking: false,
+        blocking: null,
+        sortIndex: 0,
+      };
+      if (action.zone === "stack") {
+        s.stack.push(card);
+      } else if (action.zone === "battlefield") {
+        card.sortIndex = actor.zones.battlefield.length;
+        actor.zones.battlefield.push(card);
+      } else if (action.zone === "library") {
+        actor.zones.library.unshift(card); // top of the library
+      } else {
+        actor.zones[action.zone].push(card);
+      }
+      const dest = action.zone === "library" ? "the top of their library" : `their ${action.zone}`;
+      logs.push(`conjured ${cardLabel(card)} into ${dest} (sandbox)`);
+      if (action.zone === "battlefield") {
+        pushTriggers(s, card, actor.playerId, "etb", logs);
+      }
       break;
     }
 

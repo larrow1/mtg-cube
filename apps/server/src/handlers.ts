@@ -17,6 +17,7 @@ import type {
   RankedMatchRecord,
   RatingInfo,
   SavedCubeSummary,
+  SpawnZone,
   SystemCubeSummary,
 } from "@mtg-cube/shared";
 import {
@@ -65,6 +66,8 @@ import {
   reconcilePickTimers,
   startDraftInRoom,
   startMatchInRoom,
+  startSandboxMatchInRoom,
+  registerMatchCard,
   advanceDraft,
   emitMatchViewsTo,
 } from "./flow.js";
@@ -216,6 +219,15 @@ function doLeaveRoom(io: AppServer, rooms: Map<string, Room>, socket: AppSocket)
   if (!room) return;
   const player = room.players.get(playerId);
   if (!player) return;
+
+  // Sandbox rooms live and die with the admin driving them: any leave tears
+  // the whole room down (the phantom opponent can never keep it alive).
+  if (room.sandbox) {
+    room.clearAllPickTimers();
+    rooms.delete(room.id);
+    console.log(`[room ${room.id}] engine sandbox closed`);
+    return;
+  }
 
   // Ranked + match in progress: a "leave" is just a disconnect — the seat is
   // kept so the 3-minute concession clock (and any reconnect) governs it.
@@ -520,6 +532,9 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
       const type = (action as { type: string }).type;
       if (room.ranked && (type === "endMatch" || type === "restartGame")) {
         throw new Error("That action is disabled in ranked matches");
+      }
+      if (type === "spawnCard" && !room.sandbox) {
+        throw new Error("spawnCard is only available in the admin engine sandbox");
       }
       // EngineError (or anything else): reply {ok:false}, keep state, emit nothing.
       applyGameActionServer(io, room, match, player.id, action as GameAction);
@@ -847,6 +862,82 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
       }
       reply({ ok: true });
       console.log(`[admin] user deleted: ${target.username} (${userId})`);
+    });
+  });
+
+  // -- admin engine sandbox (v4.1; admin verified per call) -----------------
+  socket.on("sandboxStart", (ack) => {
+    const reply = once<{ roomId: string; playerId: string; token: string }>(ack);
+    guard(reply, () => {
+      const adminId = requireAdmin(socket);
+      const username = findUserById(adminId)?.username ?? "Admin";
+      doLeaveRoom(io, rooms, socket);
+      const room = new Room(Room.createId(rooms));
+      room.sandbox = true;
+      rooms.set(room.id, room);
+      const player = room.addPlayer(validateName(username), socket.id);
+      room.hostId = player.id;
+      const phantom = room.addPlayer("Goldfish", "");
+      phantom.connected = false;
+      phantom.socketId = null;
+      socket.data.roomId = room.id;
+      socket.data.playerId = player.id;
+      socket.join(room.id);
+      startSandboxMatchInRoom(io, room, player.id, phantom.id);
+      reply({ ok: true, data: { roomId: room.id, playerId: player.id, token: player.token } });
+      console.log(`[room ${room.id}] engine sandbox started by ${player.name}`);
+    });
+  });
+
+  socket.on("sandboxAddCard", (args, ack) => {
+    const reply = once<{ cardName: string }>(ack);
+    guardAsync(reply, async () => {
+      requireAdmin(socket);
+      const { room, player } = getContext(rooms, socket);
+      if (!room.sandbox) throw new Error("You are not in an engine sandbox");
+      const match = [...room.matches.values()].find((m) => !m.game.finished);
+      if (!match) throw new Error("The sandbox match is finished — restart the game first");
+      const name = String(args?.name ?? "").trim();
+      if (name.length < 1 || name.length > 200) throw new Error("Enter a card name");
+      const zone = String(args?.zone ?? "hand") as SpawnZone; // engine re-validates
+      const targetId = args?.playerId ? String(args.playerId) : player.id;
+      if (!match.playerIds.includes(targetId)) {
+        throw new Error("The target player is not in the sandbox match");
+      }
+
+      const { byName } = await resolveCardNames([name]);
+      const card = byName.get(name);
+      if (!card) throw new Error(`No card found on Scryfall for "${name}"`);
+
+      // Re-validate after the await: the sandbox may have been torn down.
+      if (rooms.get(room.id) !== room || !room.matches.has(match.id)) {
+        throw new Error("The sandbox no longer exists");
+      }
+      registerMatchCard(match, card);
+      applyGameActionServer(io, room, match, targetId, { type: "spawnCard", cardId: card.id, zone });
+      reply({ ok: true, data: { cardName: card.name } });
+      console.log(`[room ${room.id}] sandbox: conjured "${card.name}" into ${zone}`);
+    });
+  });
+
+  socket.on("sandboxSwitchSeat", (ack) => {
+    const reply = once<{ playerId: string; token: string; name: string }>(ack);
+    guard(reply, () => {
+      requireAdmin(socket);
+      const { room, player } = getContext(rooms, socket);
+      if (!room.sandbox) throw new Error("You are not in an engine sandbox");
+      const next = [...room.players.values()].find((p) => p.id !== player.id);
+      if (!next) throw new Error("There is no other seat to switch to");
+      player.connected = false;
+      player.socketId = null;
+      next.connected = true;
+      next.socketId = socket.id;
+      socket.data.playerId = next.id;
+      room.touch();
+      reply({ ok: true, data: { playerId: next.id, token: next.token, name: next.name } });
+      broadcastRoomState(io, room);
+      emitMatchViewsTo(io, room, next.id, socket.id);
+      console.log(`[room ${room.id}] sandbox: seat switched to ${next.name}`);
     });
   });
 

@@ -140,6 +140,57 @@ function RankedPanel(): JSX.Element {
   );
 }
 
+/** Admin-only: one click into an engine-testing match vs a phantom opponent. */
+function SandboxPanel(): JSX.Element | null {
+  const { state, dispatch, pushToast } = useApp();
+  const acct = state.account;
+  const [busy, setBusy] = useState(false);
+  if (!acct?.account.isAdmin) return null;
+
+  const start = async (): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    const r = await call("sandboxStart");
+    setBusy(false);
+    if (r.ok && r.data) {
+      dispatch({
+        type: "sessionEstablished",
+        session: {
+          roomId: r.data.roomId,
+          playerId: r.data.playerId,
+          token: r.data.token,
+          name: acct.account.username,
+        },
+      });
+    } else {
+      pushToast(r.error ?? "Could not start the engine sandbox");
+    }
+  };
+
+  return (
+    <div className="panel mt-4 border-purple-400/20 p-5">
+      <div className="mb-3 flex items-center gap-2">
+        <svg viewBox="0 0 24 24" className="h-4 w-4 fill-purple-300">
+          <path d="M9.5 2h5v2h-1v4.6l5.7 9.5A2 2 0 0 1 17.5 21h-11a2 2 0 0 1-1.7-2.9L10.5 8.6V4h-1V2Zm3 7.1V4h-1v5.1L8.6 13h6.8l-2.9-3.9Z" />
+        </svg>
+        <h2 className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Engine sandbox · admin</h2>
+      </div>
+      <p className="text-xs leading-relaxed text-zinc-400">
+        Jump straight into a test match against a goldfish. Conjure any card into any zone, drive both seats, and
+        watch its triggers resolve on the stack.
+      </p>
+      <button
+        type="button"
+        className="btn-primary mt-3 w-full"
+        disabled={busy || !state.connected}
+        onClick={() => void start()}
+      >
+        Enter the sandbox
+      </button>
+    </div>
+  );
+}
+
 export function Home(): JSX.Element {
   const { state, dispatch, pushToast } = useApp();
   const [name, setName] = useState(() => state.session?.name ?? loadName());
@@ -285,6 +336,7 @@ export function Home(): JSX.Element {
         </div>
 
         <RankedPanel />
+        <SandboxPanel />
 
         <p className="mt-6 text-center text-[11px] text-zinc-500">
           Rooms hold up to 8 drafters — empty seats are filled with bots.

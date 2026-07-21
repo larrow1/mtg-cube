@@ -15,6 +15,7 @@ import type {
   RatingInfo,
   RoomState,
   SavedCubeSummary,
+  SpawnZone,
   SystemCubeSummary,
 } from "./types.js";
 
@@ -121,6 +122,22 @@ export interface ClientToServerEvents {
    * cannot delete their own account.
    */
   adminDeleteUser: (args: { userId: string }, ack: (r: Ack) => void) => void;
+
+  // -- Admin engine sandbox (v4.1; admin verified per call) -----------------
+  /** Leave any current room and enter a fresh sandbox match vs a phantom
+   *  opponent (basic-land decks). Ack = normal join credentials. */
+  sandboxStart: (ack: (r: Ack<{ roomId: string; playerId: string; token: string }>) => void) => void;
+  /**
+   * Resolve any card name via Scryfall and conjure it into `zone` for
+   * `playerId` (either match seat; default = your current seat). Registers
+   * the card's data + script with the match, then applies spawnCard.
+   */
+  sandboxAddCard: (
+    args: { name: string; zone: SpawnZone; playerId?: string },
+    ack: (r: Ack<{ cardName: string }>) => void
+  ) => void;
+  /** Rebind this socket to the other sandbox seat and re-emit views. */
+  sandboxSwitchSeat: (ack: (r: Ack<{ playerId: string; token: string; name: string }>) => void) => void;
 }
 
 export interface ServerToClientEvents {

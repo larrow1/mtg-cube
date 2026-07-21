@@ -72,6 +72,11 @@ export class Room {
    * timers are forced, endMatch/restart are disabled, Elo applies on finish.
    */
   ranked = false;
+  /**
+   * Admin engine sandbox: created by sandboxStart, jumps straight to a match
+   * vs a phantom opponent, allows spawnCard, torn down when the admin leaves.
+   */
+  sandbox = false;
   readonly players = new Map<string, RoomPlayer>();
   cube: Cube | null = null;
   draftConfig: DraftConfig = { ...DEFAULT_DRAFT_CONFIG };
@@ -219,6 +224,7 @@ export class Room {
       decksSubmitted: [...this.decks.keys()],
       matches: this.matchSummaries(),
       ranked: this.ranked,
+      sandbox: this.sandbox,
     };
   }
 }

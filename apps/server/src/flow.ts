@@ -386,6 +386,64 @@ export function startMatchInRoom(io: AppServer, room: Room, idA: string, idB: st
   return matchId;
 }
 
+/**
+ * v4.1 admin engine sandbox: start an instant match between the admin's seat
+ * and the phantom opponent. Both decks are 30 basics (6 of each) so draw
+ * steps and library effects work; cards under test arrive via sandboxAddCard.
+ */
+export function startSandboxMatchInRoom(io: AppServer, room: Room, idA: string, idB: string): string {
+  const basics = getBasicLandCards();
+  let counter = 0;
+  const buildLibrary = (playerId: string): GameCard[] => {
+    const library: GameCard[] = [];
+    for (const data of basics) {
+      for (let i = 0; i < 6; i++) {
+        counter += 1;
+        library.push(makeGameCard(`sbl${counter}`, data.id, playerId));
+      }
+    }
+    return library;
+  };
+  const cardLookup: Record<string, CardData> = {};
+  for (const basic of basics) cardLookup[basic.id] = basic;
+
+  const matchId = nanoid(8);
+  const game = createGame(
+    matchId,
+    [
+      { playerId: idA, deck: buildLibrary(idA) },
+      { playerId: idB, deck: buildLibrary(idB) },
+    ],
+    nanoid(16)
+  );
+  const match: Match = {
+    id: matchId,
+    playerIds: [idA, idB],
+    game,
+    cardLookup,
+    scripts: buildMatchScripts(cardLookup),
+  };
+  room.matches.set(matchId, match);
+  room.phase = "playing";
+  room.touch();
+  emitGameViews(io, room, match);
+  broadcastRoomState(io, room);
+  return matchId;
+}
+
+/**
+ * Register extra CardData (and its script) with an existing match, so a
+ * sandbox-spawned card renders, taps for mana, and fires its triggers exactly
+ * like a drafted one.
+ */
+export function registerMatchCard(match: Match, card: CardData): void {
+  match.cardLookup[card.id] = card;
+  if (match.scripts) {
+    const script = scriptFor(card);
+    if (script) match.scripts[card.id] = script;
+  }
+}
+
 /** Triggered-ability scripts for every card that can appear in a match. */
 function buildMatchScripts(cardLookup: Record<string, CardData>): Record<string, CardScript> {
   const scripts: Record<string, CardScript> = {};

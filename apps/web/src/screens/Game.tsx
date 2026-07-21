@@ -15,6 +15,7 @@ import type {
   GameView,
   PlayerGameState,
   SearchFilter,
+  SpawnZone,
   ZoneName,
 } from "@mtg-cube/shared";
 import { scriptFor } from "@mtg-cube/shared";
@@ -145,6 +146,121 @@ function matchesSearchFilter(data: CardData | undefined, filter: SearchFilter): 
   if (filter.kind === "any") return true;
   if (filter.kind === "basicLand") return tl.includes("Basic") && tl.includes("Land");
   return filter.subtypes.some((s) => tl.includes(s));
+}
+
+// ---------------------------------------------------------------------------
+// Admin engine sandbox toolbar (v4.1) — rendered only when room.sandbox
+// ---------------------------------------------------------------------------
+
+const SPAWN_ZONES: { value: SpawnZone; label: string }[] = [
+  { value: "hand", label: "Hand" },
+  { value: "battlefield", label: "Battlefield" },
+  { value: "stack", label: "Stack" },
+  { value: "library", label: "Library (top)" },
+  { value: "graveyard", label: "Graveyard" },
+  { value: "exile", label: "Exile" },
+];
+
+function SandboxToolbar({ meId, oppId, oppName }: { meId: string; oppId: string; oppName: string }): JSX.Element {
+  const { state, dispatch, pushToast } = useApp();
+  const [open, setOpen] = useState(true);
+  const [name, setName] = useState("");
+  const [zone, setZone] = useState<SpawnZone>("hand");
+  const [target, setTarget] = useState<"me" | "opp">("me");
+  const [busy, setBusy] = useState(false);
+
+  const addCard = async (): Promise<void> => {
+    const trimmed = name.trim();
+    if (trimmed.length === 0 || busy) return;
+    setBusy(true);
+    const r = await call("sandboxAddCard", {
+      name: trimmed,
+      zone,
+      playerId: target === "me" ? meId : oppId,
+    });
+    setBusy(false);
+    if (r.ok && r.data) {
+      pushToast(`Conjured ${r.data.cardName}`, "success");
+      setName("");
+    } else {
+      pushToast(r.error ?? "Could not conjure that card");
+    }
+  };
+
+  const switchSeat = async (): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    const r = await call("sandboxSwitchSeat");
+    setBusy(false);
+    const session = state.session;
+    if (r.ok && r.data && session) {
+      dispatch({
+        type: "sessionEstablished",
+        session: { roomId: session.roomId, playerId: r.data.playerId, token: r.data.token, name: r.data.name },
+      });
+      pushToast(`Now playing as ${r.data.name}`, "info");
+    } else {
+      pushToast(r.error ?? "Could not switch seats");
+    }
+  };
+
+  return (
+    <div className="fixed left-2 top-14 z-[70] w-60 animate-fade-in rounded-xl border border-purple-400/40 bg-felt-950/95 shadow-card-lg">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-purple-300"
+        onClick={() => setOpen((o) => !o)}
+      >
+        Engine sandbox
+        <span className="text-zinc-500">{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+        <div className="flex flex-col gap-2 px-3 pb-3">
+          <input
+            className="input !py-1.5 !text-xs"
+            placeholder="Card name (any card)"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void addCard();
+            }}
+          />
+          <div className="flex gap-2">
+            <select
+              className="input flex-1 !py-1.5 !text-xs"
+              value={zone}
+              onChange={(e) => setZone(e.target.value as SpawnZone)}
+            >
+              {SPAWN_ZONES.map((z) => (
+                <option key={z.value} value={z.value}>
+                  {z.label}
+                </option>
+              ))}
+            </select>
+            <select
+              className="input flex-1 !py-1.5 !text-xs"
+              value={target}
+              onChange={(e) => setTarget(e.target.value as "me" | "opp")}
+            >
+              <option value="me">For me</option>
+              <option value="opp">For {oppName}</option>
+            </select>
+          </div>
+          <button
+            type="button"
+            className="btn-primary !py-1.5 !text-xs"
+            disabled={busy || name.trim().length === 0}
+            onClick={() => void addCard()}
+          >
+            Conjure card
+          </button>
+          <button type="button" className="btn-ghost !py-1.5 !text-xs" disabled={busy} onClick={() => void switchSeat()}>
+            Switch seat → {oppName}
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -600,6 +716,11 @@ export function Game(): JSX.Element {
 
   return (
     <div className="mx-auto flex h-full max-w-[120rem] flex-col gap-2 overflow-hidden p-2 lg:p-3">
+      {/* Admin engine sandbox controls */}
+      {room?.sandbox && viewerIsPlayer && (
+        <SandboxToolbar meId={me.playerId} oppId={opp.playerId} oppName={nameFor(opp.playerId)} />
+      )}
+
       {/* Mode hints */}
       {(attachSource || blockSource) && (
         <div className="fixed left-1/2 top-2 z-[60] flex -translate-x-1/2 animate-fade-in items-center gap-2 rounded-full border border-brass-400/50 bg-felt-900 px-4 py-1.5 text-xs font-semibold text-brass-300 shadow-card-lg">

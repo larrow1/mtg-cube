@@ -1505,3 +1505,82 @@ describe("mana pools empty on every step transition", () => {
     expect(player(s, active).manaPool).toEqual({});
   });
 });
+
+describe("spawnCard (v4.1 admin sandbox)", () => {
+  const spawnCtx = (extra?: { scripts?: Record<string, CardScript>; typeLine?: string }) => ({
+    cards: {
+      spawned: {
+        ...mkCardData("spawned"),
+        name: "Spawned Test Card",
+        typeLine: extra?.typeLine ?? "Creature — Test",
+      },
+    },
+    cardNames: { spawned: "Spawned Test Card" },
+    ...(extra?.scripts ? { scripts: extra.scripts } : {}),
+  });
+
+  it("rejects a cardId with no card data (and without a cards context)", () => {
+    const g = newGame();
+    expect(() => applyAction(g, "p1", { type: "spawnCard", cardId: "spawned", zone: "hand" })).toThrow(EngineError);
+    expect(() =>
+      applyAction(g, "p1", { type: "spawnCard", cardId: "unknown", zone: "hand" }, 0, spawnCtx())
+    ).toThrow(/unknown card/i);
+  });
+
+  it("rejects an invalid zone", () => {
+    const g = newGame();
+    expect(() =>
+      applyAction(g, "p1", { type: "spawnCard", cardId: "spawned", zone: "sideboard" as never }, 0, spawnCtx())
+    ).toThrow(EngineError);
+  });
+
+  it("spawns into the hand with the actor as owner/controller (loudly logged)", () => {
+    const g = newGame();
+    const s = applyAction(g, "p1", { type: "spawnCard", cardId: "spawned", zone: "hand" }, 0, spawnCtx());
+    const card = player(s, "p1").zones.hand.find((c) => c.cardId === "spawned")!;
+    expect(card).toBeDefined();
+    expect(card.ownerId).toBe("p1");
+    expect(card.controllerId).toBe("p1");
+    expect(card.instanceId).toBe(`sb${s.seq}`);
+    expect(lastLog(s)).toMatch(/conjured .* into their hand \(sandbox\)/);
+  });
+
+  it("library spawns land on TOP of the library", () => {
+    const g = newGame();
+    const s = applyAction(g, "p2", { type: "spawnCard", cardId: "spawned", zone: "library" }, 0, spawnCtx());
+    expect(player(s, "p2").zones.library[0]!.cardId).toBe("spawned");
+  });
+
+  it("battlefield spawns fire etb triggers", () => {
+    const g = newGame();
+    const ctx = spawnCtx({ scripts: { spawned: mkScript("etb", { kind: "draw", count: 1 }) } });
+    const s = applyAction(g, "p1", { type: "spawnCard", cardId: "spawned", zone: "battlefield" }, 0, ctx);
+    expect(player(s, "p1").zones.battlefield.some((c) => c.cardId === "spawned")).toBe(true);
+    const trigger = s.stack[s.stack.length - 1]!;
+    expect(trigger.isTrigger).toBe(true);
+    expect(trigger.cardId).toBe("spawned");
+    const resolved = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(player(resolved, "p1").zones.hand.length).toBe(player(s, "p1").zones.hand.length + 1);
+  });
+
+  it("stack spawns resolve through the normal machinery (sorcery -> graveyard + onResolve)", () => {
+    const g = newGame();
+    const ctx = spawnCtx({ typeLine: "Sorcery" });
+    (ctx as { scripts?: Record<string, CardScript> }).scripts = {
+      spawned: { triggers: [], onResolve: { effects: [{ kind: "gainLife", amount: 3 }] } },
+    };
+    let s = applyAction(g, "p1", { type: "spawnCard", cardId: "spawned", zone: "stack" }, 0, ctx);
+    expect(s.stack[s.stack.length - 1]!.cardId).toBe("spawned");
+    const lifeBefore = player(s, "p1").life;
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(player(s, "p1").zones.graveyard.some((c) => c.cardId === "spawned")).toBe(true);
+    expect(player(s, "p1").life).toBe(lifeBefore + 3);
+  });
+
+  it("does not mutate the input state", () => {
+    const g = newGame();
+    const before = JSON.stringify(g);
+    applyAction(g, "p1", { type: "spawnCard", cardId: "spawned", zone: "battlefield" }, 0, spawnCtx());
+    expect(JSON.stringify(g)).toBe(before);
+  });
+});

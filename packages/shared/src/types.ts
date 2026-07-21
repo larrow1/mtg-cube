@@ -82,6 +82,11 @@ export interface RoomState {
    * timers, endMatch disabled, Elo applied on completion.
    */
   ranked: boolean;
+  /**
+   * Admin engine sandbox: instant match vs a phantom opponent where spawnCard
+   * is allowed and the admin can drive both seats (v4.1).
+   */
+  sandbox: boolean;
 }
 
 export interface MatchSummary {
@@ -469,6 +474,9 @@ export interface GameView {
 // through the shared reducer, then broadcasts.
 // ---------------------------------------------------------------------------
 
+/** Zones a sandbox-conjured card can be spawned into (v4.1). */
+export type SpawnZone = "hand" | "battlefield" | "library" | "graveyard" | "exile" | "stack";
+
 export type GameAction =
   /**
    * v4: free draws are no longer allowed — draws come from the draw step,
@@ -515,7 +523,13 @@ export type GameAction =
   | { type: "reorderLibraryTop"; instanceIds: string[]; toBottom: string[] }
   | { type: "concede" }
   | { type: "endMatch" }
-  | { type: "restartGame"; seed: string };
+  | { type: "restartGame"; seed: string }
+  /**
+   * v4.1 admin sandbox only (the server rejects it outside sandbox rooms):
+   * conjure a fresh copy of `cardId` (must be present in ctx.cards) into the
+   * actor's `zone`. Battlefield spawns fire etb triggers; library = top.
+   */
+  | { type: "spawnCard"; cardId: string; zone: SpawnZone };
 
 // Server augments every action with actor + seq before applying.
 export interface AppliedAction {
