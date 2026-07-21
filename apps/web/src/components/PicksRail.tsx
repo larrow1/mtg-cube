@@ -2,13 +2,14 @@
  * Right rail on the Draft screen: live stats for the current main picks
  * (type counts with creature-subtype breakdown, mana curve, color split) and,
  * in "List" view, a compact names-only picks list grouped by lane with
- * hover-anchored card previews and drag-to-move between lanes.
+ * hover-anchored card previews plus click/drag movement between the main deck
+ * and sideboard.
  */
 import { useMemo, useState, type DragEvent } from "react";
-import type { CardData, DraftCard } from "@mtg-cube/shared";
+import type { CardData, Color, DraftCard } from "@mtg-cube/shared";
 import { CurveChart } from "./CurveChart";
 import { useCardPreview } from "./Card";
-import { ViewToggle, type PackPickDrop } from "./PicksTray";
+import { AUTO_LANE, ViewToggle, type PackPickDrop } from "./PicksTray";
 import { getPackPickInstanceId } from "../lib/dnd";
 import {
   cmcBucket,
@@ -19,7 +20,7 @@ import {
   type ColorBucket,
 } from "../lib/cards";
 import { ManaSymbol } from "./ManaSymbol";
-import { SIDEBOARD_LANE_ID, isUnnamedDefaultLane, type DraftLanes, type Lane } from "../lib/draftLanes";
+import { SIDEBOARD_LANE_ID, defaultLaneId, type DraftLanes } from "../lib/draftLanes";
 
 const DRAG_MIME = "text/plain";
 
@@ -36,16 +37,71 @@ const TYPE_PLURALS: Record<string, string> = {
   Other: "Other",
 };
 
-const NAME_COLOR: Record<ColorBucket, string> = {
-  W: "text-yellow-100",
-  U: "text-sky-300",
-  B: "text-purple-300",
-  R: "text-red-300",
-  G: "text-green-300",
-  M: "text-amber-300",
-  C: "text-zinc-300",
-  L: "text-orange-300",
+const LIST_ROW_COLOR: Record<ColorBucket, string> = {
+  W: "border-[#b99a26]",
+  U: "border-[#147fbd]",
+  B: "border-[#5f5268]",
+  R: "border-[#df482f]",
+  G: "border-[#168552]",
+  M: "border-[#a77d12]",
+  C: "border-[#68727a]",
+  L: "border-[#775032]",
 };
+
+const LIST_FILL_COLOR: Record<ColorBucket, string> = {
+  W: "#eee6bd",
+  U: "#82bedf",
+  B: "#a9a0ae",
+  R: "#eba18b",
+  G: "#a5d0ba",
+  M: "#d9c06b",
+  C: "#c8cbcd",
+  L: "#bda185",
+};
+
+const LIST_BORDER_FILL_COLOR: Record<ColorBucket, string> = {
+  W: "#b99a26",
+  U: "#147fbd",
+  B: "#5f5268",
+  R: "#df482f",
+  G: "#168552",
+  M: "#a77d12",
+  C: "#68727a",
+  L: "#775032",
+};
+
+const LAND_TYPE_COLORS: ReadonlyArray<readonly [string, Color]> = [
+  ["Plains", "W"],
+  ["Island", "U"],
+  ["Swamp", "B"],
+  ["Mountain", "R"],
+  ["Forest", "G"],
+];
+
+/** Colors a list row should communicate, including lands' usable/fetchable mana. */
+function listRowColors(data: CardData | undefined): Color[] {
+  if (!data) return [];
+  const printed = data.colors.length > 0 ? data.colors : data.colorIdentity;
+  if (!data.typeLine.toLowerCase().includes("land")) return printed;
+
+  const oracle = [data.oracleText, ...(data.faces?.map((face) => face.oracleText) ?? [])]
+    .filter((text): text is string => Boolean(text))
+    .join(" ");
+
+  // Fetch lands have no rules color identity, so use the basic land types
+  // named in their search instruction (Misty Rainforest => Island + Forest).
+  if (/search your library/i.test(oracle)) {
+    const fetchColors = LAND_TYPE_COLORS
+      .filter(([landType]) => new RegExp(`\\b${landType}\\b`, "i").test(oracle))
+      .map(([, color]) => color);
+    if (fetchColors.length > 0) return fetchColors;
+  }
+
+  const produced = LAND_TYPE_COLORS
+    .map(([, color]) => color)
+    .filter((color) => data.producedMana?.includes(color));
+  return produced.length > 0 ? produced : printed;
+}
 
 /** Creature subtypes: the words after the em-dash on the first face's type line. */
 function creatureSubtypes(data: CardData): string[] {
@@ -179,14 +235,37 @@ function ListRow({
   pick,
   data,
   onDragStart,
+  onClick,
+  moveLabel,
 }: {
   pick: DraftCard;
   data: CardData | undefined;
   onDragStart: (e: DragEvent<HTMLDivElement>) => void;
+  onClick: () => void;
+  moveLabel: string;
 }): JSX.Element {
   const { showPreview, clearPreview } = useCardPreview();
   const bucket = colorBucket(data);
   const pips = parseManaCost(data?.manaCost);
+  const cardColors = listRowColors(data);
+  // Lands inherit their actual mana role: colorless lands match artifacts,
+  // one-color lands use that color, and 3+ color lands use the gold treatment.
+  const rowBucket: ColorBucket = bucket === "L"
+    ? cardColors.length === 0 ? "C" : cardColors.length === 1 ? cardColors[0]! : cardColors.length > 2 ? "M" : "L"
+    : bucket;
+  const twoColor = (bucket === "M" || bucket === "L") && cardColors.length === 2;
+  const firstColor = cardColors[0] as ColorBucket | undefined;
+  const secondColor = cardColors[1] as ColorBucket | undefined;
+  const manaFill = twoColor
+    ? `linear-gradient(90deg, ${LIST_FILL_COLOR[cardColors[0] as ColorBucket] ?? LIST_FILL_COLOR.M} 0%, ${LIST_FILL_COLOR[cardColors[0] as ColorBucket] ?? LIST_FILL_COLOR.M} 38%, ${LIST_FILL_COLOR[cardColors[1] as ColorBucket] ?? LIST_FILL_COLOR.M} 62%, ${LIST_FILL_COLOR[cardColors[1] as ColorBucket] ?? LIST_FILL_COLOR.M} 100%)`
+    : LIST_FILL_COLOR[rowBucket];
+  const gloss = "linear-gradient(180deg, rgba(255,255,255,0.24) 0%, rgba(255,255,255,0.04) 38%, rgba(0,0,0,0.12) 100%)";
+  const borderFill = twoColor
+    ? `linear-gradient(90deg, ${LIST_BORDER_FILL_COLOR[firstColor ?? "M"]} 0%, ${LIST_BORDER_FILL_COLOR[firstColor ?? "M"]} 38%, ${LIST_BORDER_FILL_COLOR[secondColor ?? "M"]} 62%, ${LIST_BORDER_FILL_COLOR[secondColor ?? "M"]} 100%)`
+    : null;
+  const rowFill = borderFill
+    ? `${gloss} padding-box, ${manaFill} padding-box, ${borderFill} border-box`
+    : `${gloss}, ${manaFill}`;
   return (
     <div
       draggable
@@ -199,15 +278,37 @@ function ListRow({
         showPreview(data, { left: r.left, right: r.right, top: r.top, bottom: r.bottom });
       }}
       onMouseLeave={clearPreview}
-      className="flex min-h-8 cursor-grab items-center gap-2 rounded-md px-2.5 py-1.5 transition-colors duration-100 hover:bg-white/[0.07] active:cursor-grabbing"
-      title={data?.name ?? pick.cardId}
+      onClick={() => {
+        clearPreview();
+        onClick();
+      }}
+      onKeyDown={(e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        clearPreview();
+        onClick();
+      }}
+      role="button"
+      tabIndex={0}
+      aria-label={`${moveLabel}: ${data?.name ?? pick.cardId}`}
+      className={`draft-list-card-row relative my-[3px] ml-2 flex min-h-[25px] cursor-pointer items-center rounded-[8px] border-[3px] pl-5 pr-1 text-zinc-950 shadow-[inset_0_1px_0_rgba(255,255,255,0.28),inset_0_-1px_0_rgba(0,0,0,0.18),0_2px_3px_rgba(0,0,0,0.78)] ring-1 ring-black/90 transition-[transform,box-shadow] duration-150 hover:-translate-y-px hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.34),inset_0_-1px_0_rgba(0,0,0,0.2),0_3px_6px_rgba(0,0,0,0.88)] active:cursor-grabbing ${LIST_ROW_COLOR[rowBucket]}`}
+      style={{ background: rowFill, borderColor: borderFill ? "transparent" : undefined }}
+      title={`${data?.name ?? pick.cardId} — ${moveLabel}`}
     >
-      <span className="flex shrink-0 items-center gap-[1px]">
+      <span className="absolute -left-[7px] top-1/2 z-10 flex h-[21px] w-[21px] -translate-y-1/2 items-center justify-center rounded-full border border-amber-100/55 bg-gradient-to-br from-zinc-600 via-zinc-800 to-zinc-950 text-[8px] font-black tabular-nums text-zinc-50 shadow-[inset_0_1px_1px_rgba(255,255,255,0.35),0_1px_3px_rgba(0,0,0,0.9),0_0_0_1px_rgba(0,0,0,0.75)]">
+        1×
+      </span>
+      <span className="draft-list-card-name min-w-0 flex-1 truncate text-[12px] font-bold leading-none tracking-[-0.018em] text-black">{data?.name ?? "…"}</span>
+      <span className="ml-1 flex shrink-0 items-center gap-px">
         {pips.slice(0, 6).map((s, i) => (
-          <ManaSymbol key={`${s}-${i}`} symbol={s} className="h-4 w-4" />
+          <span
+            key={`${s}-${i}`}
+            className="inline-flex h-[15px] w-[15px] shrink-0 items-center justify-center rounded-full bg-black/12 shadow-[inset_0_1px_1px_rgba(0,0,0,0.42),inset_0_-1px_1px_rgba(255,255,255,0.2)] ring-1 ring-black/25"
+          >
+            <ManaSymbol symbol={s} className="h-3.5 w-3.5" />
+          </span>
         ))}
       </span>
-      <span className={`truncate text-sm font-medium ${NAME_COLOR[bucket]}`}>{data?.name ?? "…"}</span>
     </div>
   );
 }
@@ -226,9 +327,29 @@ function PicksList({
   onPackPick?: PackPickDrop;
 }): JSX.Element {
   const [dragOver, setDragOver] = useState<string | null>(null);
-  const sideboardLane: Lane = { id: SIDEBOARD_LANE_ID, name: "Sideboard" };
-  const laneList: Lane[] = [...lanesApi.lanes, sideboardLane];
-  const total = [...lanesApi.grouped.values()].reduce((a, arr) => a + arr.length, 0);
+  const allPicks = [...lanesApi.grouped.values()].flat();
+  const sidePicks = [...(lanesApi.grouped.get(SIDEBOARD_LANE_ID) ?? [])].sort((a, b) =>
+    compareByCmcName(cards[a.cardId], cards[b.cardId])
+  );
+  const mainPicks = allPicks
+    .filter((pick) => lanesApi.laneOf(pick) !== SIDEBOARD_LANE_ID)
+    .sort((a, b) => {
+      const aData = cards[a.cardId];
+      const bData = cards[b.cardId];
+      const aLand = aData?.typeLine.toLowerCase().includes("land") ?? false;
+      const bLand = bData?.typeLine.toLowerCase().includes("land") ?? false;
+      if (aLand !== bLand) return aLand ? 1 : -1;
+      const aX = parseManaCost(aData?.manaCost).some((symbol) => symbol.toUpperCase() === "X");
+      const bX = parseManaCost(bData?.manaCost).some((symbol) => symbol.toUpperCase() === "X");
+      if (aX !== bX) return aX ? 1 : -1;
+      return compareByCmcName(aData, bData);
+    });
+  const total = allPicks.length;
+
+  const dropOnMain = (instanceId: string): void => {
+    const pick = allPicks.find((candidate) => candidate.instanceId === instanceId);
+    if (pick) lanesApi.moveCard(instanceId, defaultLaneId(cards[pick.cardId]?.cmc));
+  };
 
   return (
     <div className="panel draft-list-zone flex min-h-0 flex-1 flex-col">
@@ -238,67 +359,78 @@ function PicksList({
         <div className="flex-1" />
         <ViewToggle view={view} onView={onView} />
       </div>
-      <div className="scrollbar-slim min-h-0 flex-1 space-y-2 overflow-y-auto p-2">
+      <div className="scrollbar-slim min-h-0 flex-1 overflow-y-auto p-2">
         {total === 0 && (
           <div className="rounded-lg border border-dashed border-amber-100/15 py-4 text-center text-[11px] text-zinc-500">
             No picks yet.
           </div>
         )}
-        {laneList.map((lane) => {
-          const picks = [...(lanesApi.grouped.get(lane.id) ?? [])].sort((a, b) =>
-            compareByCmcName(cards[a.cardId], cards[b.cardId])
-          );
-          const isSide = lane.id === SIDEBOARD_LANE_ID;
-          if (picks.length === 0 && !isSide) return null;
-          return (
-            <div
-              key={lane.id}
-              className={`rounded-lg p-1 transition-colors duration-100 ${
-                isSide
-                  ? `border border-dashed ${dragOver === lane.id ? "border-amber-300/80 bg-amber-400/10" : "border-amber-400/35"}`
-                  : dragOver === lane.id
-                    ? "bg-brass-400/10 ring-1 ring-brass-400/50"
-                    : ""
-              }`}
-              onDragOver={(e) => {
-                e.preventDefault();
-                setDragOver(lane.id);
-              }}
-              onDragLeave={() => setDragOver(null)}
-              onDrop={(e) => {
-                e.preventDefault();
-                setDragOver(null);
-                const packId = getPackPickInstanceId(e.dataTransfer);
-                if (packId) {
-                  onPackPick?.(packId, lane.id);
-                  return;
-                }
-                const id = e.dataTransfer.getData(DRAG_MIME);
-                if (id) lanesApi.moveCard(id, lane.id);
-              }}
-            >
-              {!isSide && isUnnamedDefaultLane(lane) ? (
-                // Unnamed default lanes: thin divider instead of a numeric header.
-                <div className="mx-1 mb-1 border-t border-amber-100/10" />
-              ) : (
-                <div className={`flex items-center gap-1.5 px-1 pb-0.5 text-[9px] font-bold uppercase tracking-wider ${isSide ? "text-amber-300" : "text-zinc-500"}`}>
-                  {lane.name} <span className="tabular-nums">· {picks.length}</span>
-                </div>
-              )}
-              {picks.map((pick) => (
-                <ListRow
-                  key={pick.instanceId}
-                  pick={pick}
-                  data={cards[pick.cardId]}
-                  onDragStart={(e) => e.dataTransfer.setData(DRAG_MIME, pick.instanceId)}
-                />
-              ))}
-              {picks.length === 0 && isSide && (
-                <div className="px-1 pb-1 text-[10px] text-amber-400/50">Drop cards here to sideboard them.</div>
-              )}
-            </div>
-          );
-        })}
+        <div
+          className={`rounded-lg transition-colors duration-100 ${dragOver === "main" ? "bg-brass-400/10 ring-1 ring-brass-400/50" : ""}`}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragOver("main");
+          }}
+          onDragLeave={() => setDragOver(null)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragOver(null);
+            const packId = getPackPickInstanceId(e.dataTransfer);
+            if (packId) onPackPick?.(packId, AUTO_LANE);
+            else {
+              const id = e.dataTransfer.getData(DRAG_MIME);
+              if (id) dropOnMain(id);
+            }
+          }}
+        >
+          {mainPicks.map((pick) => (
+            <ListRow
+              key={pick.instanceId}
+              pick={pick}
+              data={cards[pick.cardId]}
+              onDragStart={(e) => e.dataTransfer.setData(DRAG_MIME, pick.instanceId)}
+              onClick={() => lanesApi.moveCard(pick.instanceId, SIDEBOARD_LANE_ID)}
+              moveLabel="Move to sideboard"
+            />
+          ))}
+        </div>
+        <div
+          className={`mt-2 rounded-lg border border-dashed p-1 transition-colors duration-100 ${
+            dragOver === SIDEBOARD_LANE_ID ? "border-amber-300/80 bg-amber-400/10" : "border-amber-400/35"
+          }`}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragOver(SIDEBOARD_LANE_ID);
+          }}
+          onDragLeave={() => setDragOver(null)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragOver(null);
+            const packId = getPackPickInstanceId(e.dataTransfer);
+            if (packId) onPackPick?.(packId, SIDEBOARD_LANE_ID);
+            else {
+              const id = e.dataTransfer.getData(DRAG_MIME);
+              if (id) lanesApi.moveCard(id, SIDEBOARD_LANE_ID);
+            }
+          }}
+        >
+          <div className="flex items-center gap-1.5 px-1 pb-0.5 text-[9px] font-bold uppercase tracking-wider text-amber-300">
+            Sideboard <span className="tabular-nums">· {sidePicks.length}</span>
+          </div>
+          {sidePicks.map((pick) => (
+            <ListRow
+              key={pick.instanceId}
+              pick={pick}
+              data={cards[pick.cardId]}
+              onDragStart={(e) => e.dataTransfer.setData(DRAG_MIME, pick.instanceId)}
+              onClick={() => dropOnMain(pick.instanceId)}
+              moveLabel="Move to main deck"
+            />
+          ))}
+          {sidePicks.length === 0 && (
+            <div className="px-1 pb-1 text-[10px] text-amber-400/50">Drop cards here to sideboard them.</div>
+          )}
+        </div>
       </div>
     </div>
   );

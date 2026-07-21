@@ -44,6 +44,11 @@ export function isUnnamedDefaultLane(lane: Lane): boolean {
   return DEFAULT_LANE_NAMES.get(lane.id) === lane.name;
 }
 
+/** Factory-created lanes also stay visually unnamed until the user renames them. */
+export function isUnnamedLane(lane: Lane): boolean {
+  return isUnnamedDefaultLane(lane) || /^Lane \d+$/.test(lane.name);
+}
+
 interface LaneState {
   /** Ordered lanes (sideboard excluded — it is pinned and implicit). */
   lanes: Lane[];

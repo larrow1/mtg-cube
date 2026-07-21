@@ -14,6 +14,7 @@ import type {
   GameState,
   GameView,
   PlayerGameState,
+  RoomState,
   SearchFilter,
   SpawnZone,
   TargetRef,
@@ -21,7 +22,7 @@ import type {
 } from "@mtg-cube/shared";
 import { canPayFor, effectNeedsTarget, effectTargetKinds, hasInstantSpeed, scriptFor } from "@mtg-cube/shared";
 import { call } from "../socket";
-import { useApp } from "../store";
+import { useApp, type Session } from "../store";
 import { classifyRow, compareByCmcName, nameOf, randomSeed, type RowKind } from "../lib/cards";
 import { Card, CardBack } from "../components/Card";
 import { CardGrid } from "../components/CardGrid";
@@ -268,11 +269,19 @@ function SandboxToolbar({ meId, oppId, oppName }: { meId: string; oppId: string;
 // Screen
 // ---------------------------------------------------------------------------
 
-export function Game(): JSX.Element {
+interface GameProps {
+  /** Supplies a local game state for visual UI work; game actions are disabled. */
+  demoView?: GameView;
+  demoRoom?: RoomState;
+  demoSession?: Session;
+}
+
+export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.Element {
   const { state, dispatch, pushToast } = useApp();
-  const view = state.game;
-  const room = state.room;
-  const session = state.session;
+  const view = demoView ?? state.game;
+  const room = demoRoom ?? state.room;
+  const session = demoSession ?? state.session;
+  const isDemo = demoView !== undefined;
 
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
   const [selectedHand, setSelectedHand] = useState<string | null>(null);
@@ -451,6 +460,10 @@ export function Game(): JSX.Element {
       : null;
 
   const send = (action: GameAction): void => {
+    if (isDemo) {
+      pushToast("Demo table — interactions are disabled", "info");
+      return;
+    }
     if (!viewerIsPlayer) {
       pushToast("Spectators cannot act", "info");
       return;
@@ -853,7 +866,7 @@ export function Game(): JSX.Element {
   // -------------------------------------------------------------------------
 
   return (
-    <div className="mx-auto flex h-full max-w-[120rem] flex-col gap-2 overflow-hidden p-2 lg:p-3">
+    <div className="game-scene mx-auto flex h-full max-w-[120rem] flex-col gap-2 overflow-hidden p-2 lg:p-3">
       {/* Admin engine sandbox controls */}
       {room?.sandbox && viewerIsPlayer && (
         <SandboxToolbar meId={me.playerId} oppId={opp.playerId} oppName={nameFor(opp.playerId)} />

@@ -84,6 +84,7 @@ export interface PreviewValue {
   data?: CardData;
   gameCard?: GameCard;
   faceIndex: number;
+  placement?: "side" | "above";
   /** Viewport rect of the hovered card — the preview docks next to it. */
   anchor?: { left: number; right: number; top: number; bottom: number };
 }
@@ -115,14 +116,21 @@ export function CardPreviewProvider({ children }: { children: ReactNode }): JSX.
       setPos({ left: PREVIEW_MARGIN, top: vh - height - PREVIEW_MARGIN });
       return;
     }
-    // Prefer the right side of the hovered card; flip left when cramped.
-    let left = a.right + PREVIEW_GAP;
-    if (left + PREVIEW_WIDTH > vw - PREVIEW_MARGIN) {
-      left = a.left - PREVIEW_GAP - PREVIEW_WIDTH;
+    let left: number;
+    let top: number;
+    if (preview.placement === "above") {
+      left = (a.left + a.right) / 2 - PREVIEW_WIDTH / 2;
+      top = a.top - PREVIEW_GAP - height;
+    } else {
+      // Prefer the right side of the hovered card; flip left when cramped.
+      left = a.right + PREVIEW_GAP;
+      if (left + PREVIEW_WIDTH > vw - PREVIEW_MARGIN) {
+        left = a.left - PREVIEW_GAP - PREVIEW_WIDTH;
+      }
+      // Center vertically on the card.
+      top = (a.top + a.bottom) / 2 - height / 2;
     }
     left = Math.max(PREVIEW_MARGIN, Math.min(left, vw - PREVIEW_WIDTH - PREVIEW_MARGIN));
-    // Center vertically on the card, clamped into the viewport.
-    let top = (a.top + a.bottom) / 2 - height / 2;
     top = Math.max(PREVIEW_MARGIN, Math.min(top, vh - height - PREVIEW_MARGIN));
     setPos({ left, top });
   }, [preview]);
@@ -492,6 +500,8 @@ export interface CardProps {
   onDragStart?: (e: DragEvent<HTMLDivElement>) => void;
   className?: string;
   disablePreview?: boolean;
+  /** Override where the enlarged hover preview opens. */
+  previewPlacement?: "side" | "above";
   title?: string;
 }
 
@@ -515,6 +525,7 @@ export function Card(props: CardProps): JSX.Element {
     onDragStart,
     className = "",
     disablePreview = false,
+    previewPlacement = "side",
     title,
   } = props;
 
@@ -661,11 +672,11 @@ export function Card(props: CardProps): JSX.Element {
         const r = e.currentTarget.getBoundingClientRect();
         const anchor = { left: r.left, right: r.right, top: r.top, bottom: r.bottom };
         if (previewValue && !showBack) {
-          const v = { ...previewValue, anchor };
+          const v = { ...previewValue, anchor, placement: previewPlacement };
           lastPreviewSet.current = v;
           setPreview(v);
         } else if (isFaceDown && data) {
-          const v = { data, gameCard, faceIndex: shownFaceIndex, anchor };
+          const v = { data, gameCard, faceIndex: shownFaceIndex, anchor, placement: previewPlacement };
           lastPreviewSet.current = v;
           setPreview(v);
         }

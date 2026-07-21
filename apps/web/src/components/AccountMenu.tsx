@@ -6,7 +6,6 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { useApp } from "../store";
-import { AuthModal } from "./AuthModal";
 import { Modal } from "./Modal";
 import { MyCubesList } from "./MyCubes";
 import { ProfileModal } from "./ProfileModal";
@@ -129,7 +128,6 @@ export function AccountMenu(): JSX.Element {
         </button>
       )}
 
-      {state.authOpen && <AuthModal />}
       {profileOpen && <ProfileModal onClose={() => setProfileOpen(false)} />}
       {cubesOpen && (
         <Modal title="My cubes" onClose={() => setCubesOpen(false)} width="md" noFooter>

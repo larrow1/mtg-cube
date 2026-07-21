@@ -19,7 +19,9 @@ function CrownIcon(): JSX.Element {
   );
 }
 
-function TimerOption({ value, current, onSelect }: { value: number | null; current: number | null; onSelect: (v: number | null) => void }): JSX.Element {
+type PickTimerSetting = number | "dynamic" | null;
+
+function TimerOption({ value, current, onSelect }: { value: PickTimerSetting; current: PickTimerSetting; onSelect: (v: PickTimerSetting) => void }): JSX.Element {
   const active = value === current;
   return (
     <button
@@ -29,7 +31,7 @@ function TimerOption({ value, current, onSelect }: { value: number | null; curre
         active ? "bg-gradient-to-b from-brass-300 to-brass-500 text-amber-950 shadow-card" : "bg-white/[0.05] text-zinc-400 hover:bg-white/10"
       }`}
     >
-      {value === null ? "Off" : `${value}s`}
+      {value === null ? "Off" : value === "dynamic" ? "Dynamic" : `${value}s`}
     </button>
   );
 }
@@ -214,13 +216,13 @@ export function Lobby(): JSX.Element {
   const [seatCount, setSeatCount] = useState(4);
   const [packsPerPlayer, setPacksPerPlayer] = useState(3);
   const [cardsPerPack, setCardsPerPack] = useState(15);
-  const [pickTimerSeconds, setPickTimerSeconds] = useState<number | null>(60);
+  const [pickTimerSeconds, setPickTimerSeconds] = useState<PickTimerSetting>(60);
   const [starting, setStarting] = useState(false);
 
   if (!room || !me) {
     return (
-      <div className="flex min-h-full items-center justify-center">
-        <div className="panel animate-fade-in px-6 py-4 text-sm text-zinc-400">Loading room…</div>
+      <div className="lobby-scene flex min-h-full items-center justify-center">
+        <div className="panel relative z-10 animate-fade-in px-6 py-4 text-sm text-zinc-400">Loading room…</div>
       </div>
     );
   }
@@ -248,7 +250,8 @@ export function Lobby(): JSX.Element {
   const ranked = room.ranked;
 
   return (
-    <div className="mx-auto max-w-6xl animate-fade-in p-4 md:p-6">
+    <div className="lobby-scene min-h-full px-4 py-5 md:px-6 md:py-6">
+      <div className="relative z-10 mx-auto max-w-6xl animate-fade-in">
       {/* Header: room code */}
       <header className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
@@ -279,7 +282,10 @@ export function Lobby(): JSX.Element {
           </div>
         </div>
         <button type="button" className="btn-ghost !text-xs" onClick={leaveRoom}>
-          Leave room
+          <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-current" aria-hidden="true">
+            <path d="M10 3h8a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1h-8v-2h7V5h-7V3Zm1.5 6.5V7l-6 5 6 5v-2.5H16v-3h-4.5Z" />
+          </svg>
+              Leave
         </button>
       </header>
 
@@ -379,7 +385,7 @@ export function Lobby(): JSX.Element {
               </div>
               <label className="label">Pick timer</label>
               <div className="flex gap-1.5">
-                {([null, 30, 60, 90] as const).map((v) => (
+                {(["dynamic", null, 30, 60, 90] as const).map((v) => (
                   <TimerOption key={String(v)} value={v} current={pickTimerSeconds} onSelect={setPickTimerSeconds} />
                 ))}
               </div>
@@ -405,6 +411,7 @@ export function Lobby(): JSX.Element {
 
         {/* Chat */}
         <ChatPanel className="min-h-[24rem] lg:min-h-0" />
+      </div>
       </div>
     </div>
   );

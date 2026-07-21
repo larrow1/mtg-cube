@@ -419,7 +419,7 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
         seatCount: clampInt(args?.seatCount, 2, 8, 8),
         packsPerPlayer: clampInt(args?.packsPerPlayer, 1, 6, 3),
         cardsPerPack: clampInt(args?.cardsPerPack, 3, 30, 15),
-        pickTimerSeconds: rawTimer == null ? null : clampInt(rawTimer, 5, 600, 60),
+        pickTimerSeconds: rawTimer === "dynamic" ? "dynamic" : rawTimer == null ? null : clampInt(rawTimer, 5, 600, 60),
       });
       reply({ ok: true });
     });
