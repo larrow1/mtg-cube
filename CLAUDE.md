@@ -96,19 +96,28 @@ v10 whiteboard effect pipeline (effects compile to EffectTask lists →
 interceptTasks hook → executor; single arriveOnBattlefield choke point;
 entersTapped/entersWithCounters replacement rules — tap-lands just work);
 v11 real engine-enforced stack priority (`GameState.priorityPasses`;
-resolveTopOfStack/counterTopOfStack throw until both players pass in
-succession, CR 117.4-117.5; casting grants the caster priority) and direct
-spell-effect resolution (an instant/sorcery's onResolve effect applies in
-the SAME resolveTopOfStack action, CR 608 — no more synthetic effect entry;
-Auto mode reads priorityPasses instead of guessing from the log);
+resolveTopOfStack throws until both players pass in succession, CR
+117.4-117.5; casting grants the caster priority) and direct spell-effect
+resolution (an instant/sorcery's onResolve effect applies in the SAME
+resolveTopOfStack action, CR 608 — no more synthetic effect entry);
 v12 timing guardrails & transit automation (lands/sorcery-speed casts only
 in your own main phases with an empty stack, CR 305.1/117.1a, override
 escape hatch; setAttacking/setBlocking locked to their steps with untapped
 checks, attackers auto-tap unless Vigilance, CR 508/509; transit steps
 untap/upkeep/draw/beginCombat/endCombat/cleanup auto-advance while the
 stack is empty — manual play lives in main1/combat/main2/end, turn-pass
-lands the opponent in main1 with upkeep+draw automated);
-310+ shared tests;
+lands the opponent in main1 with upkeep+draw automated); v13 the second
+passPriority auto-resolves the top of the stack itself (CR 117.4 —
+resolution isn't a separate click) unless it still needs a fresh target
+choice; counterTopOfStack's priority gate was removed (manual escape hatch,
+would otherwise be unreachable, folded into v12's STACK_EMPTYING_ACTIONS/
+autoAdvanceTransit interlock) and Auto mode simplifies to "just pass";
+v14 the second passPriority over an EMPTY stack now also auto-advances the
+step/turn itself (CR 500.4 — a manual step ends once both players decline
+to act in it, not just when the active player clicks nextStep/nextTurn);
+shared `advanceToNextStep` helper backs both the automatic and explicit
+paths;
+326 shared tests;
 Arena-style UI (draft lanes/drag-to-pick, deck builder, battlefield art
 tiles with color frames + keyword chips, mana symbols).
 

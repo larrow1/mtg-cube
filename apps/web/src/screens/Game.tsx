@@ -411,20 +411,14 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
 
     let action: GameAction | null = null;
     if (gs.stack.length > 0) {
-      // v11: the stack is priority-driven and engine-enforced (CR 117.4) —
-      // resolveTopOfStack/counterTopOfStack are rejected until both players
-      // have passed in succession (gs.priorityPasses reaches 2). Holding
-      // priority with no response: pass; once both have passed, resolve the
-      // top. Entries still awaiting a target wait for a click.
+      // v13: the top of the stack resolves automatically the instant both
+      // players have passed in succession (CR 117.4) — the engine does this
+      // as part of the second passPriority action itself. Auto mode just
+      // needs to pass when holding priority with nothing to respond with;
+      // an entry still awaiting a fresh target choice stops the engine's
+      // auto-resolve too, and waits for that controller's manual pick.
       if (gs.priorityPlayerId === me.playerId && !canActNow) {
-        const top = gs.stack[gs.stack.length - 1]!;
-        const topAwaitsTarget = effectNeedsTarget(stackEffectOf(top, cards)) && !top.chosenTarget;
-        if (gs.priorityPasses >= 2) {
-          if (!topAwaitsTarget) action = { type: "resolveTopOfStack" };
-          // else: the controller must pick a target by hand
-        } else {
-          action = { type: "passPriority" };
-        }
+        action = { type: "passPriority" };
       }
     } else if (gs.activePlayerId === me.playerId) {
       if (!canActNow) {

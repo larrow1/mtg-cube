@@ -101,7 +101,17 @@ const TRANSIT_STEPS: ReadonlySet<TurnStep> = new Set([
   "cleanup",
 ]);
 
-/** Actions that can empty the stack and so resume a held transit step. */
+/**
+ * Actions that can empty the stack and so resume a held transit step.
+ * passPriority is NOT listed here even though v13's auto-resolve can empty
+ * the stack as a side effect of the second pass — unlike the others, most
+ * passPriority calls resolve nothing at all (holding priority with an empty
+ * stack is the common case), and autoAdvanceTransit would incorrectly fire
+ * on every one of them, re-entering the current transit step and resetting
+ * priorityPlayerId out from under the pass that just happened. Instead the
+ * passPriority case below calls autoAdvanceTransit itself, ONLY when its
+ * own auto-resolve actually ran.
+ */
 const STACK_EMPTYING_ACTIONS: ReadonlySet<GameAction["type"]> = new Set([
   "resolveTopOfStack",
   "counterTopOfStack",
@@ -723,14 +733,7 @@ export function applyAction(
 
     case "nextStep": {
       requireActive(s, actorId, "nextStep");
-      if (s.step === "cleanup") {
-        advanceTurn(s, logs);
-      } else {
-        const idx = TURN_STEPS.indexOf(s.step);
-        const next = TURN_STEPS[idx + 1];
-        if (next === undefined) throw new EngineError(`Cannot advance past step "${s.step}"`);
-        enterStep(s, next, logs);
-      }
+      advanceToNextStep(s, logs);
       // v12: flow through transit steps until a manual step or a held trigger.
       autoAdvanceTransit(s, logs);
       break;
@@ -750,6 +753,32 @@ export function applyAction(
       s.priorityPlayerId = opponent.playerId;
       s.priorityPasses = Math.min(2, s.priorityPasses + 1);
       logs.push("passed priority");
+      // v13 (CR 117.4): once both players have passed in succession, the top
+      // of the stack resolves automatically — no separate click needed.
+      // Exception: an entry still awaiting a FRESH target choice (no
+      // chosenTarget from cast time) stops here for its controller to pick.
+      if (s.priorityPasses >= 2 && s.stack.length > 0 && !topNeedsFreshTarget(s)) {
+        resolveStackTop(s, s.activePlayerId, { type: "resolveTopOfStack" }, logs);
+        // v12 integration: if that resolution emptied the stack during a
+        // held transit step, resume the auto-advance (see STACK_EMPTYING_ACTIONS
+        // — passPriority is deliberately excluded from that blanket set so
+        // this only fires when auto-resolve actually did something).
+        autoAdvanceTransit(s, logs);
+      } else if (
+        s.priorityPasses >= 2 &&
+        s.stack.length === 0 &&
+        !s.finished &&
+        !s.pendingSearch &&
+        !s.players.some((p) => p.hasLost)
+      ) {
+        // v14 (CR 500.4/117.5): both players passed with nothing on the
+        // stack — the current step/phase ends on its own, no explicit
+        // nextStep/nextTurn click required. Mirrors the nextStep action's
+        // own advance logic, then lets autoAdvanceTransit chain through any
+        // following transit steps exactly as nextStep already does.
+        advanceToNextStep(s, logs);
+        autoAdvanceTransit(s, logs);
+      }
       break;
     }
 
@@ -759,63 +788,17 @@ export function applyAction(
           "Both players must pass priority in succession before the stack resolves (CR 117.4) — pass priority first"
         );
       }
-      const card = s.stack.pop();
-      if (!card) throw new EngineError("The stack is empty");
-      // v11 (CR 117.5): the active player receives priority after a resolution.
-      s.priorityPasses = 0;
-      s.priorityPlayerId = s.activePlayerId;
-      if (card.isTrigger) {
-        // v6: targeted triggers — the CONTROLLER chooses a legal target at
-        // resolution (house rule; real Magic picks at stack time, CR 603.3d).
-        // v8: entries carrying a cast-time chosenTarget resolve without a new
-        // choice (either player may click); a stale chosen target fizzles.
-        resolveTrigger(s, card, logs, actorId, action);
-        break;
-      }
-      // v4: with card data, instants/sorceries (front-face type line) resolve
-      // into their OWNER's graveyard and apply onResolve effects for their
-      // CONTROLLER. Real card copies never sit on the stack as tokens, but
-      // guard anyway: tokens have no CardData so frontTypeLine is undefined.
-      const typeLine = frontTypeLine(card);
-      if (!card.isToken && typeLine !== undefined && /\b(?:Instant|Sorcery)\b/i.test(typeLine)) {
-        const owner = s.players.find((p) => p.playerId === card.ownerId) ?? actor;
-        const spellName = cardLabel(card);
-        const spellController = card.controllerId;
-        const castTarget = card.chosenTarget; // captured before resetCardState clears it
-        resetCardState(card);
-        owner.zones.graveyard.push(card);
-        const effects = ctx.scripts?.[card.cardId]?.onResolve?.effects;
-        if (effects && effects.length > 0) {
-          // v11: the spell's effect applies immediately as part of THIS
-          // resolution (CR 608) — no more synthetic effect entry on the stack.
-          const effect: TriggerEffect =
-            effects.length === 1 ? effects[0]! : { kind: "seq", effects };
-          const controller = s.players.find((p) => p.playerId === spellController) ?? actor;
-          const spellOpponent = s.players.find((p) => p.playerId !== spellController) ?? opponent;
-          const target = resolveEffectTarget(
-            s, effect, castTarget, spellController, actorId, action, spellName, logs
-          );
-          logs.push(`resolved ${spellName} (now in the graveyard)`);
-          applyEffect(s, controller, spellOpponent, effect, spellName, undefined, logs, target);
-        } else {
-          logs.push(
-            `resolved ${cardLabel(card)} — carry out its effects by hand (it was put into the graveyard)`
-          );
-        }
-        break;
-      }
-      const controller = s.players.find((p) => p.playerId === card.controllerId) ?? actor;
-      arriveOnBattlefield(s, card, controller, "stack", logs);
-      logs.push(`resolved ${cardLabel(card)} onto the battlefield`);
+      resolveStackTop(s, actorId, action, logs);
       break;
     }
 
     case "counterTopOfStack": {
-      if (s.stack.length > 0 && s.priorityPasses < 2) {
-        throw new EngineError(
-          "Both players must pass priority in succession before the stack resolves (CR 117.4) — pass priority first"
-        );
-      }
+      // v13: NOT gated on priorityPasses — this is a manual house-rule
+      // escape hatch with no dedicated button (like declineTrigger), not a
+      // CR-modeled player action. Gating it the same as resolveTopOfStack
+      // would make it unreachable: a non-targeted top now auto-resolves the
+      // instant both players pass (see passPriority), so a counter attempt
+      // must be usable before that point too.
       const card = s.stack.pop();
       if (!card) throw new EngineError("The stack is empty");
       // v11 (CR 117.5): the active player receives priority after a resolution.
@@ -963,7 +946,9 @@ export function applyAction(
 
   // v12: a stack-emptying action during a held transit step resumes the
   // auto-advance (its own events were just matched — anything they pushed
-  // onto the stack holds the step again).
+  // onto the stack holds the step again). passPriority is included because
+  // v13's own auto-resolve (above) can empty the stack as a side effect of
+  // the second pass, not just an explicit resolve/counter/decline/search.
   if (STACK_EMPTYING_ACTIONS.has(action.type)) {
     autoAdvanceTransit(s, logs);
   }
@@ -1534,6 +1519,90 @@ function resolveTrigger(
     `the trigger from ${cardLabel(trigger)}`, logs
   );
   applyEffect(s, controller, opponent, effect, `${cardLabel(trigger)} trigger`, trigger.triggerSourceId, logs, target);
+}
+
+/**
+ * v13: the effective TriggerEffect for a stack entry, whether a real trigger
+ * or a plain spell card resolving via its onResolve script (v11: no more
+ * synthetic effect entry, so a spell itself may need a target at resolution).
+ */
+function stackTopEffect(card: GameCard): TriggerEffect | undefined {
+  if (card.isTrigger) return card.triggerEffect;
+  const effects = ctx.scripts?.[card.cardId]?.onResolve?.effects;
+  if (!effects || effects.length === 0) return undefined;
+  return effects.length === 1 ? effects[0] : { kind: "seq", effects };
+}
+
+/** v13: does the stack's top entry still need a FRESH target choice (no chosenTarget yet)? */
+function topNeedsFreshTarget(s: GameState): boolean {
+  const top = s.stack[s.stack.length - 1];
+  if (!top) return false;
+  return effectNeedsTarget(stackTopEffect(top)) && !top.chosenTarget;
+}
+
+/**
+ * v13: pop and resolve the top of the stack — shared by the explicit
+ * resolveTopOfStack action and passPriority's automatic resolution (CR
+ * 117.4) once both players have passed. `actorId` only matters for a FRESH
+ * target choice (action.target); auto-resolution never supplies one, so it
+ * is only reached when none is needed (topNeedsFreshTarget gates the call).
+ */
+function resolveStackTop(
+  s: GameState,
+  actorId: string,
+  action: Extract<GameAction, { type: "resolveTopOfStack" }>,
+  logs: string[]
+): void {
+  const card = s.stack.pop();
+  if (!card) throw new EngineError("The stack is empty");
+  const actor = s.players.find((p) => p.playerId === actorId)!;
+  const opponent = s.players.find((p) => p.playerId !== actorId)!;
+  // v11 (CR 117.5): the active player receives priority after a resolution.
+  s.priorityPasses = 0;
+  s.priorityPlayerId = s.activePlayerId;
+  if (card.isTrigger) {
+    // v6: targeted triggers — the CONTROLLER chooses a legal target at
+    // resolution (house rule; real Magic picks at stack time, CR 603.3d).
+    // v8: entries carrying a cast-time chosenTarget resolve without a new
+    // choice (either player may click); a stale chosen target fizzles.
+    resolveTrigger(s, card, logs, actorId, action);
+    return;
+  }
+  // v4: with card data, instants/sorceries (front-face type line) resolve
+  // into their OWNER's graveyard and apply onResolve effects for their
+  // CONTROLLER. Real card copies never sit on the stack as tokens, but
+  // guard anyway: tokens have no CardData so frontTypeLine is undefined.
+  const typeLine = frontTypeLine(card);
+  if (!card.isToken && typeLine !== undefined && /\b(?:Instant|Sorcery)\b/i.test(typeLine)) {
+    const owner = s.players.find((p) => p.playerId === card.ownerId) ?? actor;
+    const spellName = cardLabel(card);
+    const spellController = card.controllerId;
+    const castTarget = card.chosenTarget; // captured before resetCardState clears it
+    resetCardState(card);
+    owner.zones.graveyard.push(card);
+    const effects = ctx.scripts?.[card.cardId]?.onResolve?.effects;
+    if (effects && effects.length > 0) {
+      // v11: the spell's effect applies immediately as part of THIS
+      // resolution (CR 608) — no more synthetic effect entry on the stack.
+      const effect: TriggerEffect =
+        effects.length === 1 ? effects[0]! : { kind: "seq", effects };
+      const controller = s.players.find((p) => p.playerId === spellController) ?? actor;
+      const spellOpponent = s.players.find((p) => p.playerId !== spellController) ?? opponent;
+      const target = resolveEffectTarget(
+        s, effect, castTarget, spellController, actorId, action, spellName, logs
+      );
+      logs.push(`resolved ${spellName} (now in the graveyard)`);
+      applyEffect(s, controller, spellOpponent, effect, spellName, undefined, logs, target);
+    } else {
+      logs.push(
+        `resolved ${cardLabel(card)} — carry out its effects by hand (it was put into the graveyard)`
+      );
+    }
+    return;
+  }
+  const controller = s.players.find((p) => p.playerId === card.controllerId) ?? actor;
+  arriveOnBattlefield(s, card, controller, "stack", logs);
+  logs.push(`resolved ${cardLabel(card)} onto the battlefield`);
 }
 
 /**
@@ -2221,6 +2290,18 @@ function castFilterMatches(
  * the stack before the continue/hold decision (the v9 end-of-action pass
  * would otherwise decide too late). The guard bounds runaway chains.
  */
+/** Advance from the current step to the next one (cleanup ends the turn). */
+function advanceToNextStep(s: GameState, logs: string[]): void {
+  if (s.step === "cleanup") {
+    advanceTurn(s, logs);
+  } else {
+    const idx = TURN_STEPS.indexOf(s.step);
+    const next = TURN_STEPS[idx + 1];
+    if (next === undefined) throw new EngineError(`Cannot advance past step "${s.step}"`);
+    enterStep(s, next, logs);
+  }
+}
+
 function autoAdvanceTransit(s: GameState, logs: string[]): void {
   let guard = 0;
   for (;;) {

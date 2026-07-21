@@ -10,6 +10,7 @@ import type {
   TurnStep,
 } from "../src/types.js";
 import { EngineError, applyAction, createGame } from "../src/game/engine.js";
+import type { ActionContext } from "../src/game/engine.js";
 
 function mkCard(owner: string, i: number): GameCard {
   return {
@@ -82,14 +83,16 @@ function lastLog(s: GameState): string {
 }
 
 /**
- * v11: resolveTopOfStack/counterTopOfStack now require both players to have
- * passed priority in succession (CR 117.4). Keyed off `s.priorityPlayerId`
- * (not a fixed player) since who passes first depends on who last touched
- * the stack.
+ * v11: resolveTopOfStack requires both players to have passed priority in
+ * succession (CR 117.4). Keyed off `s.priorityPlayerId` (not a fixed player)
+ * since who passes first depends on who last touched the stack. v13: the
+ * second pass auto-resolves the top of the stack when it doesn't need a
+ * fresh target — pass `ctx` whenever the top is a scripted spell so the
+ * auto-resolve check can see whether its effect needs one.
  */
-function bothPass(s: GameState): GameState {
-  const s1 = applyAction(s, s.priorityPlayerId, { type: "passPriority" });
-  return applyAction(s1, s1.priorityPlayerId, { type: "passPriority" });
+function bothPass(s: GameState, ctx?: ActionContext): GameState {
+  const s1 = applyAction(s, s.priorityPlayerId, { type: "passPriority" }, 0, ctx);
+  return applyAction(s1, s1.priorityPlayerId, { type: "passPriority" }, 0, ctx);
 }
 
 /**
@@ -503,9 +506,9 @@ describe("stack", () => {
     expect(s.stack.map((c) => c.instanceId)).toEqual([spell]);
     expect(s.stack[0]!.controllerId).toBe("p1");
 
-    // Either player may resolve, once both have passed priority (CR 117.4).
+    // Once both players have passed priority (CR 117.4), it resolves
+    // automatically — no separate Resolve click needed.
     s = bothPass(s);
-    s = applyAction(s, "p2", { type: "resolveTopOfStack" });
     expect(s.stack).toHaveLength(0);
     expect(player(s, "p1").zones.battlefield.map((c) => c.instanceId)).toEqual([spell]);
   });
@@ -514,7 +517,9 @@ describe("stack", () => {
     const g = newGame();
     const spell = handCard(g, "p1");
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "stack" });
-    s = bothPass(s);
+    // v13: counterTopOfStack is a manual escape hatch, not gated on
+    // priority passes (it would otherwise be unreachable — a non-targeted
+    // top auto-resolves the instant both players pass).
     s = applyAction(s, "p2", { type: "counterTopOfStack" });
     expect(s.stack).toHaveLength(0);
     expect(player(s, "p1").zones.graveyard.map((c) => c.instanceId)).toEqual([spell]);
@@ -538,7 +543,7 @@ describe("stack", () => {
 });
 
 describe("priority passing (v11)", () => {
-  it("resolveTopOfStack/counterTopOfStack are rejected until both players pass in succession", () => {
+  it("resolveTopOfStack is rejected until both players pass in succession; counterTopOfStack is not gated", () => {
     const g = newGame();
     const spell = handCard(g, "p1");
     const s = applyAction(g, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "stack" });
@@ -546,25 +551,29 @@ describe("priority passing (v11)", () => {
     expect(() => applyAction(s, "p2", { type: "resolveTopOfStack" })).toThrow(
       /Both players must pass priority/
     );
-    expect(() => applyAction(s, "p2", { type: "counterTopOfStack" })).toThrow(
-      /Both players must pass priority/
-    );
-    // One pass is not enough.
+    // counterTopOfStack is a manual escape hatch — not gated on priority
+    // passes (gating it would make it unreachable once auto-resolve exists).
+    expect(() => applyAction(s, "p2", { type: "counterTopOfStack" })).not.toThrow();
+    // One pass is not enough to resolve.
     const onePass = applyAction(s, s.priorityPlayerId, { type: "passPriority" });
     expect(onePass.priorityPasses).toBe(1);
+    expect(onePass.stack).toHaveLength(1);
     expect(() => applyAction(onePass, onePass.priorityPlayerId, { type: "resolveTopOfStack" })).toThrow(
       /Both players must pass priority/
     );
-    // Two passes in a row clears the gate.
+    // Two passes in a row auto-resolves it (CR 117.4) — no explicit click needed.
     const ready = bothPass(s);
-    expect(ready.priorityPasses).toBe(2);
-    expect(() => applyAction(ready, ready.priorityPlayerId, { type: "resolveTopOfStack" })).not.toThrow();
+    expect(ready.stack).toHaveLength(0);
+    expect(player(ready, "p1").zones.battlefield.map((c) => c.instanceId)).toEqual([spell]);
   });
 
   it("casting retains priority for the caster and resets the pass counter", () => {
     const g = newGame();
     const spell = handCard(g, "p1");
-    let s = bothPass(g); // pass twice on the empty stack — harmless, just churns priority
+    // Passing twice on the empty stack auto-advances the turn structure (v14)
+    // all the way to main1 (untap/upkeep/draw are transit steps); p1 stays
+    // active throughout, so this is still harmless for what's being asserted.
+    let s = bothPass(g);
     s = applyAction(s, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "stack" });
     expect(s.priorityPlayerId).toBe("p1");
     expect(s.priorityPasses).toBe(0);
@@ -574,8 +583,8 @@ describe("priority passing (v11)", () => {
     const g = newGame();
     const spell = handCard(g, "p1");
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "stack" });
-    s = bothPass(s);
-    s = applyAction(s, "p2", { type: "resolveTopOfStack" });
+    s = bothPass(s); // auto-resolves once both have passed (CR 117.4)
+    expect(s.stack).toHaveLength(0);
     expect(s.priorityPasses).toBe(0);
     expect(s.priorityPlayerId).toBe(s.activePlayerId);
   });
@@ -604,7 +613,7 @@ describe("priority passing (v11)", () => {
     const g = newGame();
     let s = applyAction(g, "p1", { type: "spawnCard", cardId: "bolt", zone: "stack" }, 0, ctx);
     expect(s.stack[0]!.chosenTarget).toBeUndefined(); // spawnCard has no target field
-    s = bothPass(s);
+    s = bothPass(s, ctx); // ctx must be forwarded so auto-resolve sees it needs a target
     // Non-controller cannot supply the target.
     expect(() =>
       applyAction(s, "p2", { type: "resolveTopOfStack", target: { kind: "player", playerId: "p2" } }, 0, ctx)
@@ -613,6 +622,53 @@ describe("priority passing (v11)", () => {
     s = applyAction(s, "p1", { type: "resolveTopOfStack", target: { kind: "player", playerId: "p2" } }, 0, ctx);
     expect(s.stack).toHaveLength(0);
     expect(player(s, "p2").life).toBe(17);
+  });
+});
+
+describe("auto-advance the step/turn on a double pass with an empty stack (v14)", () => {
+  it("one pass with an empty stack does nothing — the step is unchanged", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    atStep(g, active, "main1");
+    const s = applyAction(g, active, { type: "passPriority" });
+    expect(s.priorityPasses).toBe(1);
+    expect(s.step).toBe("main1");
+  });
+
+  it("both players passing with an empty stack in a manual step advances past it automatically", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    atStep(g, active, "main1");
+    const s = bothPass(g);
+    // main1 -> beginCombat (transit) -> declareAttackers (manual, holds).
+    expect(s.step).toBe("declareAttackers");
+    expect(s.activePlayerId).toBe(active);
+    expect(s.priorityPasses).toBe(0);
+    expect(s.log.some((e) => /moved to the declareAttackers step/.test(e.message))).toBe(true);
+  });
+
+  it("both players passing from the end step passes the turn, mirroring nextStep", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    const inactive = other(g, active);
+    atStep(g, active, "end");
+    const handBefore = player(g, inactive).zones.hand.length;
+    const s = bothPass(g);
+    expect(s.activePlayerId).toBe(inactive);
+    expect(s.priorityPlayerId).toBe(inactive);
+    expect(s.step).toBe("main1");
+    expect(player(s, inactive).zones.hand).toHaveLength(handBefore + 1); // drew in the chain
+  });
+
+  it("a stack that isn't empty is unaffected — that path still goes through auto-resolve, not step advance", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    const spell = handCard(g, active);
+    atStep(g, active, "main1");
+    let s = applyAction(g, active, { type: "moveCard", instanceId: spell, from: "hand", to: "stack" });
+    s = bothPass(s); // resolves the spell (v13); does not also advance the step
+    expect(s.stack).toHaveLength(0);
+    expect(s.step).toBe("main1");
   });
 });
 
@@ -735,10 +791,9 @@ describe("triggered abilities", () => {
     expect(trigger.triggerSourceId).toBe(id);
     expect(trigger.triggerOptional).toBe(false);
 
-    // Either player may resolve; the effect applies to the CONTROLLER.
+    // Both players pass; the effect auto-resolves for the CONTROLLER.
     const handBefore = player(s, "p1").zones.hand.length;
     s = bothPass(s);
-    s = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx);
     expect(s.stack).toHaveLength(0);
     expect(player(s, "p1").zones.hand).toHaveLength(handBefore + 1);
     expect(player(s, "p1").zones.battlefield.map((c) => c.instanceId)).toEqual([id]);
@@ -752,14 +807,12 @@ describe("triggered abilities", () => {
 
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "stack" }, 0, ctx);
     expect(s.stack).toHaveLength(1);
-    s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    s = bothPass(s, ctx); // auto-resolves the permanent; ctx needed for its ETB to fire
     // The permanent landed and its ETB trigger replaced it on the stack.
     expect(player(s, "p1").zones.battlefield.map((c) => c.instanceId)).toEqual([id]);
     expect(s.stack).toHaveLength(1);
     expect(s.stack[0]!.isTrigger).toBe(true);
-    s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    s = bothPass(s); // auto-resolves the ETB trigger
     expect(player(s, "p1").life).toBe(24);
   });
 
@@ -781,7 +834,6 @@ describe("triggered abilities", () => {
     s = applyAction(s, "p1", { type: "moveCard", instanceId: id, from: "battlefield", to: "graveyard" }, 0, ctx);
     expect(s.stack).toHaveLength(1);
     s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
     expect(player(s, "p2").life).toBe(18);
   });
 
@@ -864,13 +916,12 @@ describe("triggered abilities", () => {
     expect(s.stack).toHaveLength(1);
 
     // Happy path: source still on the battlefield.
-    const resolved = applyAction(bothPass(s), "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    const resolved = bothPass(s);
     expect(player(resolved, "p1").zones.battlefield[0]!.counters).toEqual({ "+1/+1": 2 });
 
     // Fizzle: source left the battlefield while the trigger waited.
     s = applyAction(s, "p1", { type: "moveCard", instanceId: id, from: "battlefield", to: "graveyard" }, 0, ctx);
     s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
     expect(lastLog(s)).toMatch(/fizzled/);
     expect(player(s, "p1").zones.graveyard[0]!.counters).toEqual({});
   });
@@ -894,7 +945,6 @@ describe("triggered abilities", () => {
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
     s = applyAction(s, "p1", { type: "moveCard", instanceId: id, from: "battlefield", to: "graveyard" }, 0, ctx);
     s = bothPass(s);
-    s = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx);
     const tokens = player(s, "p1").zones.battlefield;
     expect(tokens).toHaveLength(2);
     expect(tokens.every((t) => t.isToken && t.tokenName === "Zombie" && t.tokenPower === "2")).toBe(true);
@@ -908,7 +958,6 @@ describe("triggered abilities", () => {
     let s = applyAction(g, "p2", { type: "setLife", playerId: "p2", life: 3 });
     s = applyAction(s, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
     s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
     expect(player(s, "p2").life).toBe(0);
     expect(s.finished).toBe(true);
     expect(s.winnerId).toBe("p1");
@@ -923,7 +972,6 @@ describe("triggered abilities", () => {
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
     const zonesBefore = structuredClone(player(s, "p1").zones);
     s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
     expect(lastLog(s)).toMatch(/do the thing/);
     expect(player(s, "p1").zones).toEqual(zonesBefore);
   });
@@ -936,7 +984,9 @@ describe("triggered abilities", () => {
     const ctx = { scripts: { [cardId]: mkScript("etb", { kind: "draw", count: 1 }) } };
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
     const handBefore = player(s, "p1").zones.hand.length;
-    s = bothPass(s);
+    // v13: counterTopOfStack is not gated on priority passes (it would
+    // otherwise be unreachable — a non-targeted top auto-resolves the
+    // instant both players pass).
     s = applyAction(s, "p2", { type: "counterTopOfStack" }, 0, ctx);
     expect(s.stack).toHaveLength(0);
     expect(player(s, "p1").zones.graveyard).toHaveLength(0);
@@ -970,7 +1020,6 @@ describe("triggered abilities", () => {
 
     // Returning to the battlefield and bouncing to hand fires it again.
     s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
     s = applyAction(s, "p1", { type: "moveCard", instanceId: id, from: "exile", to: "battlefield" }, 0, ctx);
     s = applyAction(s, "p1", { type: "moveCard", instanceId: id, from: "battlefield", to: "hand" }, 0, ctx);
     expect(s.stack).toHaveLength(1);
@@ -985,7 +1034,6 @@ describe("triggered abilities", () => {
     s = applyAction(s, "p1", { type: "moveCard", instanceId: id, from: "battlefield", to: "graveyard" }, 0, ctx);
     expect(s.stack).toHaveLength(1);
     s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
     expect(player(s, "p1").life).toBe(25);
   });
 
@@ -1038,10 +1086,10 @@ describe("triggered abilities", () => {
     expect(s.stack.map((c) => c.triggerSourceId)).toEqual([mine, theirs]);
     expect(s.stack.map((c) => c.controllerId)).toEqual([active, inactive]);
 
-    // Resolving the opponent's trigger draws for the OPPONENT.
+    // The opponent's trigger is on TOP (stack is top-last) and auto-resolves
+    // once both players pass, drawing for the OPPONENT.
     const theirHand = player(s, inactive).zones.hand.length;
     s = bothPass(s);
-    s = applyAction(s, active, { type: "resolveTopOfStack" }, 0, ctx);
     expect(player(s, inactive).zones.hand).toHaveLength(theirHand + 1);
   });
 
@@ -1312,9 +1360,9 @@ describe("spell resolution scripts (v4)", () => {
       onResolve: { effects: [{ kind: "draw", count: 2 }, { kind: "loseLife", amount: 2 }] },
     });
     const handBefore = player(s, "p1").zones.hand.length;
-    // Either player may resolve; card to graveyard AND effect apply together
+    // Both pass; card to graveyard AND effect apply together, automatically
     // (no intermediate stack entry — CR 608, no more house-rule two-step).
-    const next = applyAction(bothPass(s), "p2", { type: "resolveTopOfStack" }, 0, ctx);
+    const next = bothPass(s, ctx);
     expect(player(next, "p1").zones.graveyard.map((c) => c.instanceId)).toEqual([spell]);
     expect(next.stack).toHaveLength(0);
     expect(player(next, "p1").zones.battlefield).toHaveLength(0);
@@ -1326,7 +1374,7 @@ describe("spell resolution scripts (v4)", () => {
 
   it("an instant WITHOUT onResolve goes to the graveyard with a resolve-by-hand log (targeted spells stay manual)", () => {
     const { s, ctx, spell } = castSpell("Instant");
-    const next = applyAction(bothPass(s), "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    const next = bothPass(s, ctx);
     expect(player(next, "p1").zones.graveyard.map((c) => c.instanceId)).toEqual([spell]);
     expect(player(next, "p1").zones.battlefield).toHaveLength(0);
     expect(lastLog(next)).toMatch(/carry out its effects by hand/);
@@ -1336,7 +1384,7 @@ describe("spell resolution scripts (v4)", () => {
     const { s, ctx, spell } = castSpell("Creature — Bear", {
       triggers: [{ event: "etb", optional: false, description: "etb", effect: { kind: "gainLife", amount: 1 } }],
     });
-    const next = applyAction(bothPass(s), "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    const next = bothPass(s, ctx);
     expect(player(next, "p1").zones.battlefield.map((c) => c.instanceId)).toEqual([spell]);
     expect(next.stack).toHaveLength(1);
     expect(next.stack[0]!.isTrigger).toBe(true);
@@ -1347,7 +1395,7 @@ describe("spell resolution scripts (v4)", () => {
       triggers: [],
       onResolve: { effects: [{ kind: "addCounters", counterType: "+1/+1", count: 1 }] },
     });
-    const next = applyAction(bothPass(s), "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    const next = bothPass(s, ctx);
     expect(player(next, "p1").zones.graveyard.map((c) => c.instanceId)).toEqual([spell]);
     expect(lastLog(next)).toMatch(/fizzled/);
   });
@@ -1371,8 +1419,7 @@ describe("spell resolution scripts (v4)", () => {
       scripts: { [spellCardId]: { triggers: [], onResolve: { effects: [{ kind: "gainLife", amount: 3 }] } } as CardScript },
     };
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "stack" }, 0, ctx);
-    s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    s = bothPass(s, ctx);
     expect(player(s, "p1").zones.graveyard.map((c) => c.instanceId)).toEqual([spell]);
     expect(player(s, "p1").life).toBe(23);
   });
@@ -1382,7 +1429,6 @@ describe("spell resolution scripts (v4)", () => {
     const spell = handCard(g, "p1");
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "stack" });
     s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" });
     expect(player(s, "p1").zones.battlefield.map((c) => c.instanceId)).toEqual([spell]);
   });
 });
@@ -1703,7 +1749,7 @@ describe("spawnCard (v4.1 admin sandbox)", () => {
     const trigger = s.stack[s.stack.length - 1]!;
     expect(trigger.isTrigger).toBe(true);
     expect(trigger.cardId).toBe("spawned");
-    const resolved = applyAction(bothPass(s), "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    const resolved = bothPass(s, ctx);
     expect(player(resolved, "p1").zones.hand.length).toBe(player(s, "p1").zones.hand.length + 1);
   });
 
@@ -1716,8 +1762,7 @@ describe("spawnCard (v4.1 admin sandbox)", () => {
     let s = applyAction(g, "p1", { type: "spawnCard", cardId: "spawned", zone: "stack" }, 0, ctx);
     expect(s.stack[s.stack.length - 1]!.cardId).toBe("spawned");
     const lifeBefore = player(s, "p1").life;
-    s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    s = bothPass(s, ctx);
     expect(player(s, "p1").zones.graveyard.some((c) => c.cardId === "spawned")).toBe(true);
     expect(player(s, "p1").life).toBe(lifeBefore + 3);
   });
@@ -1803,7 +1848,7 @@ describe("cost enforcement & land drops (v5)", () => {
     // v7: the creature sits on the stack (response window), not in play yet.
     expect(s.stack.some((c) => c.instanceId === "castme")).toBe(true);
     expect(player(s, "p1").zones.battlefield.some((c) => c.instanceId === "castme")).toBe(false);
-    const resolved = applyAction(bothPass(s), "p1", { type: "resolveTopOfStack" }, 0, { cards });
+    const resolved = bothPass(s, { cards });
     expect(player(resolved, "p1").zones.battlefield.some((c) => c.instanceId === "castme")).toBe(true);
   });
 
@@ -1967,8 +2012,7 @@ describe("targeted triggers, opponentDraws & amass (v6)", () => {
       0, ctx2
     );
     // Resolve the ETB draw trigger; the draw then queues the bow trigger.
-    s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx2);
+    s = bothPass(s, ctx2);
     expect(s.stack.some((c) => c.isTrigger && c.cardId === "bow")).toBe(true);
   });
 
@@ -2067,8 +2111,7 @@ describe("targeted triggers, opponentDraws & amass (v6)", () => {
       { type: "moveCard", instanceId: src.instanceId, from: "hand", to: "battlefield" },
       0, ctx
     );
-    s = bothPass(s);
-    s = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx); // opponent clicks it
+    s = bothPass(s, ctx); // auto-resolves once both have passed
     expect(player(s, "p1").life).toBe(22);
   });
 });
@@ -2136,7 +2179,9 @@ describe("stack-first casting & counterspells (v7)", () => {
     expect(s.stack.map((c) => c.instanceId)).toEqual(["bear1", "csp1"]);
     // Counterspell resolves in ONE action (v11): card to p2's graveyard AND
     // the bear is countered immediately — no intermediate stack entry.
-    s = bothPass(s);
+    // ctx must be forwarded so auto-resolve sees Counterspell still needs a
+    // target and stops for its controller to supply one.
+    s = bothPass(s, ctx);
     s = applyAction(
       s, "p2",
       { type: "resolveTopOfStack", target: { kind: "stack", instanceId: "bear1" } },
@@ -2167,7 +2212,7 @@ describe("stack-first casting & counterspells (v7)", () => {
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: "bear1", from: "hand", to: "stack", override: true }, 0, ctx2);
     const triggerId = s.stack.find((c) => c.isTrigger)!.instanceId;
     s = applyAction(s, "p2", { type: "moveCard", instanceId: "csp1", from: "hand", to: "stack", override: true }, 0, ctx2);
-    s = bothPass(s);
+    s = bothPass(s, ctx2);
     // Targeting the watcher's trigger (an ability) is rejected.
     expect(() =>
       applyAction(s, "p2", { type: "resolveTopOfStack", target: { kind: "stack", instanceId: triggerId } }, 0, ctx2)
@@ -2185,7 +2230,7 @@ describe("stack-first casting & counterspells (v7)", () => {
     boltCard.instanceId = "bolt1";
     player(g, "p1").zones.hand.push(boltCard);
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: "bolt1", from: "hand", to: "stack", override: true }, 0, ctx);
-    s = bothPass(s);
+    s = bothPass(s, ctx);
     // Only p1 (controller) may resolve the targeted effect; opponent's face.
     s = applyAction(s, "p1", { type: "resolveTopOfStack", target: { kind: "player", playerId: "p2" } }, 0, ctx);
     expect(player(s, "p1").zones.graveyard.some((c) => c.instanceId === "bolt1")).toBe(true);
@@ -2253,9 +2298,8 @@ describe("cast-time targets (v8)", () => {
     expect(s.log.some((e) => /chose .* as the target of Lightning Bolt/.test(e.message))).toBe(true);
     // Either player may resolve — the chosen target already rides the stack
     // entry, so no re-picking is needed; card to graveyard AND damage apply
-    // together in one resolution (v11).
-    s = bothPass(s);
-    s = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx);
+    // together in one resolution (v11), automatically once both pass (v13).
+    s = bothPass(s, ctx);
     expect(s.stack).toHaveLength(0);
     expect(player(s, "p1").zones.graveyard.some((c) => c.instanceId === "bolt1")).toBe(true);
     expect(player(s, "p2").life).toBe(17);
@@ -2274,8 +2318,7 @@ describe("cast-time targets (v8)", () => {
     // The bear leaves the battlefield before the spell resolves.
     s = applyAction(s, "p2", { type: "moveCard", instanceId: bear.instanceId, from: "battlefield", to: "graveyard" }, 0, ctx);
     const before = JSON.stringify([player(s, "p1").life, player(s, "p2").life]);
-    s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    s = bothPass(s, ctx);
     expect(JSON.stringify([player(s, "p1").life, player(s, "p2").life])).toBe(before); // nobody took damage
     expect(s.log.some((e) => /is gone — the effect fizzles/.test(e.message))).toBe(true);
     expect(player(s, "p1").zones.graveyard.some((c) => c.instanceId === "bolt1")).toBe(true);
@@ -2320,8 +2363,7 @@ describe("cast-time targets (v8)", () => {
       { type: "moveCard", instanceId: "csp1", from: "hand", to: "stack", override: true, target: { kind: "stack", instanceId: "bolt1" } },
       0, ctx
     );
-    s = bothPass(s);
-    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx); // either player resolves it — pre-targeted
+    s = bothPass(s, ctx); // auto-resolves — pre-targeted, no further clicks
     expect(s.stack).toHaveLength(0); // bolt countered, nothing left
     expect(player(s, "p1").zones.graveyard.some((c) => c.instanceId === "bolt1")).toBe(true);
     expect(player(s, "p2").life).toBe(20); // the bolt never resolved
@@ -2537,8 +2579,7 @@ describe("timing guardrails & transit automation (v12)", () => {
     expect(s.stack[0]!.isTrigger).toBe(true);
     // v11 interlock: the held trigger still needs both players to pass.
     expect(() => applyAction(s, active, { type: "resolveTopOfStack" }, 0, ctx2)).toThrow(/pass priority/);
-    s = bothPass(s);
-    s = applyAction(s, active, { type: "resolveTopOfStack" }, 0, ctx2);
+    s = bothPass(s, ctx2); // auto-resolves (v13) and resumes the transit chain
     expect(player(s, active).life).toBe(23);
     expect(s.stack).toHaveLength(0);
     expect(s.step).toBe("main1"); // the resolve resumed the auto-advance
@@ -2595,8 +2636,7 @@ describe("timing guardrails & transit automation (v12)", () => {
     expect(s.stack).toHaveLength(1);
     expect(s.stack[0]!.triggerSourceId).toBe("wd1");
     // Pass-pass-resolve (v11) applies the effect and resumes the chain.
-    s = bothPass(s);
-    s = applyAction(s, inactive, { type: "resolveTopOfStack" }, 0, ctx2);
+    s = bothPass(s, ctx2); // auto-resolves (v13)
     expect(player(s, inactive).life).toBe(21);
     expect(s.stack).toHaveLength(0);
     expect(s.step).toBe("main1");
