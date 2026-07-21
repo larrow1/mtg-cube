@@ -79,11 +79,45 @@ import { TURN_STEPS } from "../types.js";
 import { createRng, shuffle } from "../rng.js";
 import {
   describePoolSpend,
+  hasInstantSpeed,
   manaSourcesOf,
   parseManaCost,
   parsedCostSize,
   planManaPayment,
 } from "./mana.js";
+
+/**
+ * v12: TRANSIT steps run themselves — entering one performs its turn-based
+ * actions and trigger emission, then auto-advances while the stack stays
+ * empty. MANUAL steps (main1, declareAttackers, declareBlockers,
+ * combatDamage, main2, end) hold for player decisions.
+ */
+const TRANSIT_STEPS: ReadonlySet<TurnStep> = new Set([
+  "untap",
+  "upkeep",
+  "draw",
+  "beginCombat",
+  "endCombat",
+  "cleanup",
+]);
+
+/**
+ * Actions that can empty the stack and so resume a held transit step.
+ * passPriority is NOT listed here even though v13's auto-resolve can empty
+ * the stack as a side effect of the second pass — unlike the others, most
+ * passPriority calls resolve nothing at all (holding priority with an empty
+ * stack is the common case), and autoAdvanceTransit would incorrectly fire
+ * on every one of them, re-entering the current transit step and resetting
+ * priorityPlayerId out from under the pass that just happened. Instead the
+ * passPriority case below calls autoAdvanceTransit itself, ONLY when its
+ * own auto-resolve actually ran.
+ */
+const STACK_EMPTYING_ACTIONS: ReadonlySet<GameAction["type"]> = new Set([
+  "resolveTopOfStack",
+  "counterTopOfStack",
+  "declineTrigger",
+  "completeSearch",
+]);
 
 export class EngineError extends Error {
   constructor(message: string) {
@@ -586,10 +620,27 @@ export function applyAction(
     }
 
     case "setAttacking": {
+      // v12 (CR 508.1a/c): attackers are declared in the declare-attackers
+      // step, by the active player, and must be untapped; declaring taps the
+      // creature unless its text has vigilance.
+      if (s.step !== "declareAttackers") {
+        throw new EngineError("Attackers are declared during the declare-attackers step (CR 508.1).");
+      }
+      if (s.activePlayerId !== actorId) {
+        throw new EngineError("Only the active player declares attackers (CR 508.1).");
+      }
       const card = findControlled(actor, action.instanceId, ["battlefield"]);
       const wasAttacking = card.attacking;
+      if (action.attacking && !wasAttacking && card.tapped) {
+        throw new EngineError(`${cardLabel(card)} is tapped and can't attack (CR 508.1c).`);
+      }
       card.attacking = action.attacking;
       logs.push(`${action.attacking ? "declared" : "removed"} ${cardLabel(card)} as an attacker`);
+      if (action.attacking && !wasAttacking && !hasVigilance(card)) {
+        card.tapped = true;
+        logs.push(`${cardLabel(card)} taps as it attacks`);
+        emitEvent({ kind: "becameTapped", instanceId: card.instanceId, controllerId: card.controllerId });
+      }
       // Attack events fire on declaring only (never on un-declaring, and
       // not again when a redundant setAttacking(true) repeats the state).
       if (action.attacking && !wasAttacking) {
@@ -606,9 +657,27 @@ export function applyAction(
     }
 
     case "setBlocking": {
+      // v12 (CR 509.1a): blockers are declared in the declare-blockers step,
+      // by the defending (non-active) player; the blocker must be untapped
+      // and the blocked creature must actually be attacking.
+      if (s.step !== "declareBlockers") {
+        throw new EngineError("Blockers are declared during the declare-blockers step (CR 509.1).");
+      }
+      if (s.activePlayerId === actorId) {
+        throw new EngineError("Only the defending player declares blockers (CR 509.1).");
+      }
       const card = findControlled(actor, action.instanceId, ["battlefield"]);
-      if (action.blocking !== null && !findOnAnyBattlefield(s, action.blocking)) {
-        throw new EngineError(`Blocked creature ${action.blocking} is not on the battlefield`);
+      if (action.blocking !== null) {
+        if (card.tapped && card.blocking === null) {
+          throw new EngineError(`${cardLabel(card)} is tapped and can't block (CR 509.1a).`);
+        }
+        const blocked = findOnAnyBattlefield(s, action.blocking);
+        if (!blocked) {
+          throw new EngineError(`Blocked creature ${action.blocking} is not on the battlefield`);
+        }
+        if (!blocked.attacking) {
+          throw new EngineError(`${cardLabel(blocked)} is not attacking — blockers must block an attacker (CR 509.1a).`);
+        }
       }
       card.blocking = action.blocking;
       logs.push(
@@ -672,12 +741,15 @@ export function applyAction(
         if (next === undefined) throw new EngineError(`Cannot advance past step "${s.step}"`);
         enterStep(s, next, logs);
       }
+      // v12: flow through transit steps until a manual step or a held trigger.
+      autoAdvanceTransit(s, logs);
       break;
     }
 
     case "nextTurn": {
       requireActive(s, actorId, "nextTurn");
       advanceTurn(s, logs);
+      autoAdvanceTransit(s, logs);
       break;
     }
 
@@ -688,12 +760,17 @@ export function applyAction(
       s.priorityPlayerId = opponent.playerId;
       s.priorityPasses = Math.min(2, s.priorityPasses + 1);
       logs.push("passed priority");
-      // v12 (CR 117.4): once both players have passed in succession, the top
+      // v13 (CR 117.4): once both players have passed in succession, the top
       // of the stack resolves automatically — no separate click needed.
       // Exception: an entry still awaiting a FRESH target choice (no
       // chosenTarget from cast time) stops here for its controller to pick.
       if (s.stack.length > 0 && s.priorityPasses >= 2 && !topNeedsFreshTarget(s)) {
         resolveStackTop(s, s.activePlayerId, { type: "resolveTopOfStack" }, logs);
+        // v12 integration: if that resolution emptied the stack during a
+        // held transit step, resume the auto-advance (see STACK_EMPTYING_ACTIONS
+        // — passPriority is deliberately excluded from that blanket set so
+        // this only fires when auto-resolve actually did something).
+        autoAdvanceTransit(s, logs);
       }
       break;
     }
@@ -709,7 +786,7 @@ export function applyAction(
     }
 
     case "counterTopOfStack": {
-      // v12: NOT gated on priorityPasses — this is a manual house-rule
+      // v13: NOT gated on priorityPasses — this is a manual house-rule
       // escape hatch with no dedicated button (like declineTrigger), not a
       // CR-modeled player action. Gating it the same as resolveTopOfStack
       // would make it unreachable: a non-targeted top now auto-resolves the
@@ -717,6 +794,7 @@ export function applyAction(
       // must be usable before that point too.
       const card = s.stack.pop();
       if (!card) throw new EngineError("The stack is empty");
+      // v11 (CR 117.5): the active player receives priority after a resolution.
       s.priorityPasses = 0;
       s.priorityPlayerId = s.activePlayerId;
       if (card.isTrigger) {
@@ -858,6 +936,15 @@ export function applyAction(
   // or a trigger matched just above — voids a pending priority-pass sequence
   // (CR 117.4).
   if (s.stack.length > stackLenBefore) s.priorityPasses = 0;
+
+  // v12: a stack-emptying action during a held transit step resumes the
+  // auto-advance (its own events were just matched — anything they pushed
+  // onto the stack holds the step again). passPriority is included because
+  // v13's own auto-resolve (above) can empty the stack as a side effect of
+  // the second pass, not just an explicit resolve/counter/decline/search.
+  if (STACK_EMPTYING_ACTIONS.has(action.type)) {
+    autoAdvanceTransit(s, logs);
+  }
 
   s.seq += 1;
   for (const message of logs) {
@@ -1428,7 +1515,7 @@ function resolveTrigger(
 }
 
 /**
- * v12: the effective TriggerEffect for a stack entry, whether a real trigger
+ * v13: the effective TriggerEffect for a stack entry, whether a real trigger
  * or a plain spell card resolving via its onResolve script (v11: no more
  * synthetic effect entry, so a spell itself may need a target at resolution).
  */
@@ -1439,7 +1526,7 @@ function stackTopEffect(card: GameCard): TriggerEffect | undefined {
   return effects.length === 1 ? effects[0] : { kind: "seq", effects };
 }
 
-/** v12: does the stack's top entry still need a FRESH target choice (no chosenTarget yet)? */
+/** v13: does the stack's top entry still need a FRESH target choice (no chosenTarget yet)? */
 function topNeedsFreshTarget(s: GameState): boolean {
   const top = s.stack[s.stack.length - 1];
   if (!top) return false;
@@ -1447,7 +1534,7 @@ function topNeedsFreshTarget(s: GameState): boolean {
 }
 
 /**
- * v12: pop and resolve the top of the stack — shared by the explicit
+ * v13: pop and resolve the top of the stack — shared by the explicit
  * resolveTopOfStack action and passPriority's automatic resolution (CR
  * 117.4) once both players have passed. `actorId` only matters for a FRESH
  * target choice (action.target); auto-resolution never supplies one, so it
@@ -2031,8 +2118,21 @@ function enforceCastFromHand(
 ): void {
   const typeLine = frontTypeLine(card);
   const isLand = typeLine !== undefined && /\bLand\b/i.test(typeLine);
+  const inMainPhase = s.step === "main1" || s.step === "main2";
+  const isActive = s.activePlayerId === actor.playerId;
 
   if (isLand && to === "battlefield") {
+    // v12 timing (CR 305.1): your turn, a main phase, empty stack.
+    if (!override) {
+      if (!isActive) {
+        throw new EngineError("You may only play lands during your own turn (CR 305.1).");
+      }
+      if (!inMainPhase || s.stack.length > 0) {
+        throw new EngineError(
+          "Lands are played during your main phases while the stack is empty (CR 305.1). (Effects that break this rule: use the override.)"
+        );
+      }
+    }
     if (actor.landsPlayedThisTurn >= 1 && !override) {
       throw new EngineError(
         "You have already played a land this turn (CR 305.2). If an effect grants additional land plays, use the additional-land override."
@@ -2052,6 +2152,22 @@ function enforceCastFromHand(
   if (override) {
     logs.push(`cast ${cardLabel(card)} without paying its mana cost (override)`);
     return;
+  }
+
+  // v12 timing (CR 117.1a): sorcery-speed spells (no Instant type, no Flash)
+  // are cast during your own main phases with an empty stack. Instant-speed
+  // casts stay open to either player (house response-window model).
+  if (!hasInstantSpeed(data)) {
+    if (!isActive) {
+      throw new EngineError(
+        `${cardLabel(card)} is a sorcery-speed spell — you can only cast it during your own turn (CR 117.1a). (Effects that grant flash-like timing: use the override.)`
+      );
+    }
+    if (!inMainPhase || s.stack.length > 0) {
+      throw new EngineError(
+        `${cardLabel(card)} is a sorcery-speed spell — cast it during a main phase while the stack is empty (CR 117.1a). (Effects that grant flash-like timing: use the override.)`
+      );
+    }
   }
 
   const rawCost = data.faces?.[0]?.manaCost ?? data.manaCost;
@@ -2093,6 +2209,18 @@ function enforceCastFromHand(
   }
   const xNote = cost.x > 0 ? " (X not auto-charged)" : "";
   logs.push(`auto-paid ${rawCost} for ${cardLabel(card)}${xNote}${parts.length ? ` — ${parts.join("; ")}` : ""}`);
+}
+
+/**
+ * v12: does the card's own printed text include Vigilance (CR 702.21)?
+ * Reminder text is stripped; granted vigilance (anthems, auras) is invisible
+ * here — the player untaps the attacker by hand in that case.
+ */
+function hasVigilance(card: GameCard): boolean {
+  const data = ctx.cards?.[card.cardId];
+  if (!data) return false;
+  const oracle = (data.faces?.[0]?.oracleText ?? data.oracleText ?? "").replace(/\([^)]*\)/g, "");
+  return /\bvigilance\b/i.test(oracle);
 }
 
 /** Front-face type line of a card (DFC-aware); undefined without card data. */
@@ -2145,6 +2273,36 @@ function castFilterMatches(
       return /\bCreature\b/i.test(typeLine);
     case "artifact":
       return /\bArtifact\b/i.test(typeLine);
+  }
+}
+
+/**
+ * v12: while the current step is TRANSIT and nothing needs a player (empty
+ * stack, no search, nobody lost), keep advancing — cleanup advances the turn.
+ * Trigger matching runs INSIDE the loop so triggers emitted by a step land on
+ * the stack before the continue/hold decision (the v9 end-of-action pass
+ * would otherwise decide too late). The guard bounds runaway chains.
+ */
+function autoAdvanceTransit(s: GameState, logs: string[]): void {
+  let guard = 0;
+  for (;;) {
+    runTriggerMatching(s, logs);
+    if (
+      guard++ > 30 ||
+      s.finished ||
+      s.pendingSearch ||
+      s.stack.length > 0 ||
+      !TRANSIT_STEPS.has(s.step) ||
+      s.players.some((p) => p.hasLost)
+    ) {
+      return;
+    }
+    if (s.step === "cleanup") {
+      advanceTurn(s, logs);
+    } else {
+      const next = TURN_STEPS[TURN_STEPS.indexOf(s.step) + 1]!;
+      enterStep(s, next, logs);
+    }
   }
 }
 

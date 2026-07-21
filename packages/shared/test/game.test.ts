@@ -7,6 +7,7 @@ import type {
   GameState,
   TriggerEffect,
   TriggerEvent,
+  TurnStep,
 } from "../src/types.js";
 import { EngineError, applyAction, createGame } from "../src/game/engine.js";
 import type { ActionContext } from "../src/game/engine.js";
@@ -84,7 +85,7 @@ function lastLog(s: GameState): string {
 /**
  * v11: resolveTopOfStack requires both players to have passed priority in
  * succession (CR 117.4). Keyed off `s.priorityPlayerId` (not a fixed player)
- * since who passes first depends on who last touched the stack. v12: the
+ * since who passes first depends on who last touched the stack. v13: the
  * second pass auto-resolves the top of the stack when it doesn't need a
  * fresh target — pass `ctx` whenever the top is a scripted spell so the
  * auto-resolve check can see whether its effect needs one.
@@ -92,6 +93,19 @@ function lastLog(s: GameState): string {
 function bothPass(s: GameState, ctx?: ActionContext): GameState {
   const s1 = applyAction(s, s.priorityPlayerId, { type: "passPriority" }, 0, ctx);
   return applyAction(s1, s1.priorityPlayerId, { type: "passPriority" }, 0, ctx);
+}
+
+/**
+ * v12 setup surgery: place the game in `playerId`'s `step` (default main1)
+ * so timing-gated actions (land plays, sorcery-speed casts, attack/block
+ * declarations) are legal without walking the whole turn structure. Mutates
+ * and returns the same state — setup only, never an assertion target.
+ */
+function atStep(s: GameState, playerId: string, step: TurnStep = "main1"): GameState {
+  s.activePlayerId = playerId;
+  s.priorityPlayerId = playerId;
+  s.step = step;
+  return s;
 }
 
 describe("createGame", () => {
@@ -240,10 +254,13 @@ describe("moveCard", () => {
     const g = newGame();
     const id = handCard(g, "p1");
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" });
+    // v12: attackers are declared in the declare-attackers step, untapped —
+    // declare first (the declaration auto-taps), then pile on the rest.
+    atStep(s, "p1", "declareAttackers");
+    s = applyAction(s, "p1", { type: "setAttacking", instanceId: id, attacking: true });
     s = applyAction(s, "p1", { type: "tapCard", instanceId: id, tapped: true });
     s = applyAction(s, "p1", { type: "setCounters", instanceId: id, counterType: "+1/+1", count: 2 });
     s = applyAction(s, "p1", { type: "setDamage", instanceId: id, damage: 3 });
-    s = applyAction(s, "p1", { type: "setAttacking", instanceId: id, attacking: true });
     s = applyAction(s, "p1", { type: "moveCard", instanceId: id, from: "battlefield", to: "graveyard" });
     const card = player(s, "p1").zones.graveyard.find((c) => c.instanceId === id)!;
     expect(card.tapped).toBe(false);
@@ -318,7 +335,10 @@ describe("tap / mana / counters / attack", () => {
     const blocker = handCard(s, "p2");
     s = applyAction(s, "p2", { type: "moveCard", instanceId: blocker, from: "hand", to: "battlefield" });
 
+    // v12: declarations live in their combat steps.
+    atStep(s, "p1", "declareAttackers");
     s = applyAction(s, "p1", { type: "setAttacking", instanceId: attacker, attacking: true });
+    s = applyAction(s, "p1", { type: "nextStep" }); // -> declareBlockers
     s = applyAction(s, "p2", { type: "setBlocking", instanceId: blocker, blocking: attacker });
     expect(player(s, "p1").zones.battlefield[0]!.attacking).toBe(true);
     expect(player(s, "p2").zones.battlefield[0]!.blocking).toBe(attacker);
@@ -344,29 +364,30 @@ describe("turn structure", () => {
     const inactive = other(g, active);
     expect(() => applyAction(g, inactive, { type: "nextStep" })).toThrow(EngineError);
 
-    // untap -> upkeep -> draw: starting player skips the turn-1 draw.
+    // v12: untap/upkeep/draw are transit — one nextStep lands in main1; the
+    // starting player still skips the turn-1 draw along the way.
     let s = applyAction(g, active, { type: "nextStep" });
-    expect(s.step).toBe("upkeep");
-    s = applyAction(s, active, { type: "nextStep" });
-    expect(s.step).toBe("draw");
+    expect(s.step).toBe("main1");
     expect(player(s, active).zones.hand).toHaveLength(7);
 
     // Mana pools empty at every step boundary (v3 rule), so floating mana
-    // never survives a walk to cleanup; damage also clears at cleanup.
+    // never survives a walk through combat to main2.
     s = applyAction(s, active, { type: "addMana", color: "R", amount: 2 });
-    while (s.step !== "cleanup") s = applyAction(s, active, { type: "nextStep" });
+    while (s.step !== "main2") s = applyAction(s, active, { type: "nextStep" });
     expect(player(s, active).manaPool).toEqual({});
 
-    // nextStep from cleanup = turn passes.
+    // main2 -> end STOPS (the shared instant window); nextStep from end
+    // passes the turn, and the opponent auto-runs untap/upkeep/draw into
+    // their main1, drawing on the way.
+    s = applyAction(s, active, { type: "nextStep" });
+    expect(s.step).toBe("end");
     s = applyAction(s, active, { type: "nextStep" });
     expect(s.activePlayerId).toBe(inactive);
     expect(s.priorityPlayerId).toBe(inactive);
-    expect(s.step).toBe("untap");
+    expect(s.step).toBe("main1");
     expect(s.turnNumber).toBe(1); // increments when it comes back to the starter
 
-    // Non-starting player DOES draw on their turn-1 draw step.
-    s = applyAction(s, inactive, { type: "nextStep" }); // upkeep
-    s = applyAction(s, inactive, { type: "nextStep" }); // draw
+    // Non-starting player DID draw on their turn-1 draw step (in the chain).
     expect(player(s, inactive).zones.hand).toHaveLength(8);
   });
 
@@ -383,12 +404,13 @@ describe("turn structure", () => {
     s = applyAction(s, first, { type: "nextTurn" });
     expect(s.activePlayerId).toBe(second);
     expect(s.turnNumber).toBe(1);
-    expect(s.step).toBe("untap");
+    expect(s.step).toBe("main1"); // v12: the incoming player auto-runs untap/upkeep/draw
     expect(() => applyAction(s, first, { type: "nextTurn" })).toThrow(EngineError);
 
     s = applyAction(s, second, { type: "nextTurn" });
     expect(s.activePlayerId).toBe(first);
     expect(s.turnNumber).toBe(2);
+    expect(s.step).toBe("main1");
     // The returning active player's permanents untapped on their untap step.
     expect(player(s, first).zones.battlefield[0]!.tapped).toBe(false);
   });
@@ -495,7 +517,7 @@ describe("stack", () => {
     const g = newGame();
     const spell = handCard(g, "p1");
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "stack" });
-    // v12: counterTopOfStack is a manual escape hatch, not gated on
+    // v13: counterTopOfStack is a manual escape hatch, not gated on
     // priority passes (it would otherwise be unreachable — a non-targeted
     // top auto-resolves the instant both players pass).
     s = applyAction(s, "p2", { type: "counterTopOfStack" });
@@ -834,6 +856,7 @@ describe("triggered abilities", () => {
 
   it("addCounters resolves onto the source, or fizzles when it left the battlefield", () => {
     const g = newGame();
+    atStep(g, "p1"); // resolve in a manual step so no transit log follows the fizzle
     const id = handCard(g, "p1");
     const cardId = player(g, "p1").zones.hand[0]!.cardId;
     const ctx = {
@@ -892,6 +915,7 @@ describe("triggered abilities", () => {
 
   it("manual and scry trigger effects are log-only", () => {
     const g = newGame();
+    atStep(g, "p1"); // resolve in a manual step so the note stays the last log line
     const id = handCard(g, "p1");
     const cardId = player(g, "p1").zones.hand[0]!.cardId;
     const ctx = { scripts: { [cardId]: mkScript("etb", { kind: "manual", note: "do the thing" }) } };
@@ -904,12 +928,13 @@ describe("triggered abilities", () => {
 
   it("counterTopOfStack removes a trigger without touching graveyards", () => {
     const g = newGame();
+    atStep(g, "p1"); // counter in a manual step so the log line stays last
     const id = handCard(g, "p1");
     const cardId = player(g, "p1").zones.hand[0]!.cardId;
     const ctx = { scripts: { [cardId]: mkScript("etb", { kind: "draw", count: 1 }) } };
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
     const handBefore = player(s, "p1").zones.hand.length;
-    // v12: counterTopOfStack is not gated on priority passes (it would
+    // v13: counterTopOfStack is not gated on priority passes (it would
     // otherwise be unreachable — a non-targeted top auto-resolves the
     // instant both players pass).
     s = applyAction(s, "p2", { type: "counterTopOfStack" }, 0, ctx);
@@ -1049,6 +1074,7 @@ describe("triggered abilities", () => {
     const ctx = { scripts: { [cardId]: mkScript("attack", { kind: "gainLife", amount: 1 }) } };
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
 
+    atStep(s, "p1", "declareAttackers"); // v12: declarations live here
     s = applyAction(s, "p1", { type: "setAttacking", instanceId: id, attacking: true }, 0, ctx);
     expect(s.stack).toHaveLength(1);
     // Redundant re-declare: no second trigger.
@@ -1057,7 +1083,9 @@ describe("triggered abilities", () => {
     // Un-declaring never fires.
     s = applyAction(s, "p1", { type: "setAttacking", instanceId: id, attacking: false }, 0, ctx);
     expect(s.stack).toHaveLength(1);
-    // Declaring again after un-declaring fires again.
+    // Declaring again after un-declaring fires again (untap first — the
+    // original declaration auto-tapped the creature, v12).
+    s = applyAction(s, "p1", { type: "tapCard", instanceId: id, tapped: false }, 0, ctx);
     s = applyAction(s, "p1", { type: "setAttacking", instanceId: id, attacking: true }, 0, ctx);
     expect(s.stack).toHaveLength(2);
   });
@@ -1112,6 +1140,7 @@ describe("triggered abilities", () => {
     const source = handCard(g, "p1");
     const sourceCardId = player(g, "p1").zones.hand[0]!.cardId;
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: source, from: "hand", to: "battlefield" });
+    atStep(s, "p1"); // v12: sorcery-speed casts need p1's main phase
 
     const script: CardScript = {
       triggers: [
@@ -1165,12 +1194,16 @@ describe("triggered abilities", () => {
         [bystanderCardId]: mkScript("combatDamageToPlayer", { kind: "scry", count: 1 }),
       },
     };
+    // v12: walk to declare-attackers (untap chains through main1), declare
+    // there, then blocks happen in declare-blockers.
+    while (s.step !== "declareAttackers") s = applyAction(s, active, { type: "nextStep" }, 0, ctx);
     s = applyAction(s, active, { type: "setAttacking", instanceId: attacker1, attacking: true }, 0, ctx);
     s = applyAction(s, active, { type: "setAttacking", instanceId: attacker2, attacking: true }, 0, ctx);
+    s = applyAction(s, active, { type: "nextStep" }, 0, ctx); // -> declareBlockers
     // attacker2 gets blocked; attacker1 is unblocked; bystander stays home.
     s = applyAction(s, inactive, { type: "setBlocking", instanceId: blocker, blocking: attacker2 }, 0, ctx);
 
-    while (s.step !== "combatDamage") s = applyAction(s, active, { type: "nextStep" }, 0, ctx);
+    s = applyAction(s, active, { type: "nextStep" }, 0, ctx); // -> combatDamage
     const triggers = s.stack.filter((c) => c.isTrigger);
     expect(triggers).toHaveLength(1);
     expect(triggers[0]!.triggerSourceId).toBe(attacker1);
@@ -1198,6 +1231,7 @@ describe("tapForMana", () => {
   /** Fresh game with p1's first hand card on the battlefield + its CardData. */
   function withSource(producedMana?: string[]) {
     const g = newGame();
+    atStep(g, "p1"); // v12: the (Land) card can only be played in p1's main phase
     const id = handCard(g, "p1");
     const cardId = player(g, "p1").zones.hand[0]!.cardId;
     const ctx = { cards: { [cardId]: mkCardData(cardId, producedMana) } };
@@ -1258,6 +1292,7 @@ describe("spell resolution scripts (v4)", () => {
   /** Put p1's first hand card on the stack with the given typeLine + script. */
   function castSpell(typeLine: string, script?: CardScript) {
     const g = newGame();
+    atStep(g, "p1"); // v12: sorcery-speed casts need p1's main phase, empty stack
     const spell = handCard(g, "p1");
     const spellCardId = player(g, "p1").zones.hand[0]!.cardId;
     const ctx = {
@@ -1317,6 +1352,7 @@ describe("spell resolution scripts (v4)", () => {
 
   it("onResolve uses the FRONT-face type line for DFC spells", () => {
     const g = newGame();
+    atStep(g, "p1");
     const spell = handCard(g, "p1");
     const spellCardId = player(g, "p1").zones.hand[0]!.cardId;
     const ctx = {
@@ -1371,6 +1407,7 @@ describe("activated fetch searches (v4)", () => {
     extraScripts: Record<string, CardScript> = {}
   ) {
     const g = newGame();
+    atStep(g, "p1"); // v12: the fetch land can only be played in p1's main phase
     const fetchId = handCard(g, "p1");
     const fetchCardId = player(g, "p1").zones.hand[0]!.cardId;
     const lib = player(g, "p1").zones.library;
@@ -1724,6 +1761,7 @@ describe("cost enforcement & land drops (v5)", () => {
       p1.zones.battlefield.push(gc);
     });
     if (opts.pool) p1.manaPool = { ...opts.pool };
+    atStep(g, "p1"); // v12: land plays + sorcery-speed casts need p1's main phase
     return { g, cards };
   }
 
@@ -1886,6 +1924,7 @@ describe("targeted triggers, opponentDraws & amass (v6)", () => {
   /** p2 controls a "bow" permanent with the watcher script; ctx wired. */
   function bowSetup() {
     const g = newGame();
+    atStep(g, "p1"); // v12: p1's casts/plays below need p1's main phase
     const bow = mkCard("p2", 950);
     bow.cardId = "bow";
     bow.instanceId = "bow1";
@@ -1929,10 +1968,13 @@ describe("targeted triggers, opponentDraws & amass (v6)", () => {
 
   it("the turn-based draw-step draw is exempt", () => {
     const { g, ctx } = bowSetup();
-    let s = g;
-    // Advance the active player's turn into the draw step.
-    const active = s.activePlayerId;
-    while (s.step !== "draw") s = applyAction(s, active, { type: "nextStep" }, 0, ctx);
+    // v12: draw-step draws happen inside the turn-pass auto-run. Pass the
+    // turn twice so EACH player takes a draw-step draw; the exemption means
+    // neither draw fires the bow, so no transit step ever holds the chain.
+    let s = applyAction(g, g.activePlayerId, { type: "nextTurn" }, 0, ctx);
+    expect(s.step).toBe("main1");
+    s = applyAction(s, s.activePlayerId, { type: "nextTurn" }, 0, ctx);
+    expect(s.step).toBe("main1");
     expect(s.stack.filter((c) => c.isTrigger && c.cardId === "bow")).toHaveLength(0);
   });
 
@@ -2006,6 +2048,7 @@ describe("targeted triggers, opponentDraws & amass (v6)", () => {
 
   it("non-targeted triggers still resolve by either player with no target", () => {
     const g = newGame();
+    atStep(g, "p1"); // v12: the (Land-typed) src card needs p1's main phase
     const src = mkCard("p1", 970);
     src.cardId = "src";
     player(g, "p1").zones.hand.push(src);
@@ -2205,7 +2248,7 @@ describe("cast-time targets (v8)", () => {
     expect(s.log.some((e) => /chose .* as the target of Lightning Bolt/.test(e.message))).toBe(true);
     // Either player may resolve — the chosen target already rides the stack
     // entry, so no re-picking is needed; card to graveyard AND damage apply
-    // together in one resolution (v11), automatically once both pass (v12).
+    // together in one resolution (v11), automatically once both pass (v13).
     s = bothPass(s, ctx);
     expect(s.stack).toHaveLength(0);
     expect(player(s, "p1").zones.graveyard.some((c) => c.instanceId === "bolt1")).toBe(true);
@@ -2274,5 +2317,278 @@ describe("cast-time targets (v8)", () => {
     expect(s.stack).toHaveLength(0); // bolt countered, nothing left
     expect(player(s, "p1").zones.graveyard.some((c) => c.instanceId === "bolt1")).toBe(true);
     expect(player(s, "p2").life).toBe(20); // the bolt never resolved
+  });
+});
+
+describe("timing guardrails & transit automation (v12)", () => {
+  const island: CardData = { ...mkCardData("island"), typeLine: "Basic Land — Island" };
+  const bear: CardData = { ...mkCardData("bear"), typeLine: "Creature — Bear" };
+  const shock: CardData = { ...mkCardData("shock"), typeLine: "Instant" };
+  const vigil: CardData = {
+    ...mkCardData("vigil"),
+    typeLine: "Creature — Soldier",
+    oracleText: "Vigilance",
+  };
+  const ctx = { cards: { island, bear, shock, vigil } };
+
+  /** Fresh game with a bespoke card in `owner`'s hand. */
+  function withHand(owner: string, cardId: string): { g: GameState; id: string } {
+    const g = newGame();
+    const c = mkCard(owner, 700);
+    c.cardId = cardId;
+    c.instanceId = `${cardId}_h`;
+    player(g, owner).zones.hand.push(c);
+    return { g, id: c.instanceId };
+  }
+
+  it("land plays: active player + main phase + empty stack only (CR 305.1)", () => {
+    const { g, id } = withHand("p1", "island");
+    const play = { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" } as const;
+    // Off-turn: p2 is active.
+    atStep(g, "p2");
+    expect(() => applyAction(g, "p1", play, 0, ctx)).toThrow(/only play lands during your own turn/);
+    // Outside a main phase (the end step is manual, so it can host the attempt).
+    atStep(g, "p1", "end");
+    expect(() => applyAction(g, "p1", play, 0, ctx)).toThrow(/main phases while the stack is empty/);
+    // Non-empty stack during main1 (a context-less spell keeps the cast permissive).
+    atStep(g, "p1", "main1");
+    const spell = handCard(g, "p1");
+    const stacked = applyAction(g, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "stack" }, 0, ctx);
+    expect(() => applyAction(stacked, "p1", play, 0, ctx)).toThrow(/main phases while the stack is empty/);
+  });
+
+  it("land plays are allowed in main2, and the override bypasses the timing gate", () => {
+    const { g, id } = withHand("p1", "island");
+    atStep(g, "p1", "main2");
+    const s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
+    expect(player(s, "p1").zones.battlefield.map((c) => c.instanceId)).toContain(id);
+    expect(player(s, "p1").landsPlayedThisTurn).toBe(1);
+
+    // override: an off-turn, end-step land play goes through (loud house hatch).
+    const again = withHand("p1", "island");
+    atStep(again.g, "p2", "end");
+    const s2 = applyAction(
+      again.g,
+      "p1",
+      { type: "moveCard", instanceId: again.id, from: "hand", to: "battlefield", override: true },
+      0,
+      ctx
+    );
+    expect(player(s2, "p1").zones.battlefield.map((c) => c.instanceId)).toContain(again.id);
+  });
+
+  it("sorcery-speed casts: active player's main phase with an empty stack (CR 117.1a)", () => {
+    const { g, id } = withHand("p1", "bear");
+    const cast = { type: "moveCard", instanceId: id, from: "hand", to: "stack" } as const;
+    // Off-turn.
+    atStep(g, "p2");
+    expect(() => applyAction(g, "p1", cast, 0, ctx)).toThrow(/only cast it during your own turn/);
+    // Non-empty stack in main1.
+    atStep(g, "p1", "main1");
+    const spell = handCard(g, "p1");
+    const stacked = applyAction(g, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "stack" }, 0, ctx);
+    expect(() => applyAction(stacked, "p1", cast, 0, ctx)).toThrow(/main phase while the stack is empty/);
+    // main1 with an empty stack: allowed.
+    const s = applyAction(g, "p1", cast, 0, ctx);
+    expect(s.stack.map((c) => c.instanceId)).toContain(id);
+  });
+
+  it("instant-speed casts stay open to the NON-active player, even over a non-empty stack", () => {
+    const { g, id } = withHand("p2", "shock");
+    atStep(g, "p1");
+    const spell = handCard(g, "p1");
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "stack" }, 0, ctx);
+    s = applyAction(s, "p2", { type: "moveCard", instanceId: id, from: "hand", to: "stack" }, 0, ctx);
+    expect(s.stack).toHaveLength(2);
+    expect(s.stack[1]!.instanceId).toBe(id); // the response sits on top
+    expect(s.priorityPlayerId).toBe("p2"); // the cast seized priority (v11)
+    expect(s.priorityPasses).toBe(0);
+  });
+
+  it("setAttacking: declare-attackers step, active player, untapped creature only (CR 508.1)", () => {
+    const g = newGame();
+    const id = handCard(g, "p1");
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" });
+    // Wrong step.
+    atStep(s, "p1", "main1");
+    expect(() => applyAction(s, "p1", { type: "setAttacking", instanceId: id, attacking: true })).toThrow(
+      /declare-attackers step/
+    );
+    // Right step, wrong player (p2 tries to declare their own creature).
+    atStep(s, "p1", "declareAttackers");
+    const theirs = handCard(s, "p2");
+    s = applyAction(s, "p2", { type: "moveCard", instanceId: theirs, from: "hand", to: "battlefield" });
+    expect(() => applyAction(s, "p2", { type: "setAttacking", instanceId: theirs, attacking: true })).toThrow(
+      /Only the active player/
+    );
+    // Tapped creatures cannot be declared.
+    const tapped = applyAction(s, "p1", { type: "tapCard", instanceId: id, tapped: true });
+    expect(() => applyAction(tapped, "p1", { type: "setAttacking", instanceId: id, attacking: true })).toThrow(
+      /tapped and can't attack/
+    );
+  });
+
+  it("declaring an attacker auto-taps it (log + becameTapped event) unless it has Vigilance", () => {
+    const g = newGame();
+    const b = mkCard("p1", 710);
+    b.cardId = "bear";
+    b.instanceId = "bear1";
+    player(g, "p1").zones.battlefield.push(b);
+    const v = mkCard("p1", 711);
+    v.cardId = "vigil";
+    v.instanceId = "vig1";
+    player(g, "p1").zones.battlefield.push(v);
+    // A becameTapped self-watcher on the bear proves the event fired.
+    const scripts: Record<string, CardScript> = {
+      bear: {
+        triggers: [
+          {
+            event: "etb",
+            when: { on: "becameTapped", which: "self" },
+            optional: false,
+            description: "tapped watcher",
+            effect: { kind: "scry", count: 1 },
+          },
+        ],
+      },
+    };
+    const ctx2 = { ...ctx, scripts };
+    atStep(g, "p1", "declareAttackers");
+
+    let s = applyAction(g, "p1", { type: "setAttacking", instanceId: "bear1", attacking: true }, 0, ctx2);
+    const bearBf = player(s, "p1").zones.battlefield.find((c) => c.instanceId === "bear1")!;
+    expect(bearBf.attacking).toBe(true);
+    expect(bearBf.tapped).toBe(true); // auto-tapped (CR 508.1f)
+    expect(s.log.filter((e) => /taps as it attacks/.test(e.message))).toHaveLength(1);
+    expect(s.stack.filter((c) => c.isTrigger && c.triggerSourceId === "bear1")).toHaveLength(1);
+
+    s = applyAction(s, "p1", { type: "setAttacking", instanceId: "vig1", attacking: true }, 0, ctx2);
+    const vigBf = player(s, "p1").zones.battlefield.find((c) => c.instanceId === "vig1")!;
+    expect(vigBf.attacking).toBe(true);
+    expect(vigBf.tapped).toBe(false); // Vigilance (CR 702.21)
+    expect(s.log.filter((e) => /taps as it attacks/.test(e.message))).toHaveLength(1); // no new line
+  });
+
+  it("setBlocking: declare-blockers step, defending player, untapped blocker, attacking target (CR 509.1a)", () => {
+    const g = newGame();
+    const atk = mkCard("p1", 720);
+    atk.instanceId = "atk1";
+    player(g, "p1").zones.battlefield.push(atk);
+    const bystander = mkCard("p1", 721);
+    bystander.instanceId = "bys1";
+    player(g, "p1").zones.battlefield.push(bystander);
+    const blk = mkCard("p2", 722);
+    blk.instanceId = "blk1";
+    player(g, "p2").zones.battlefield.push(blk);
+
+    atStep(g, "p1", "declareAttackers");
+    let s = applyAction(g, "p1", { type: "setAttacking", instanceId: "atk1", attacking: true });
+    // Wrong step (still declare-attackers).
+    expect(() => applyAction(s, "p2", { type: "setBlocking", instanceId: "blk1", blocking: "atk1" })).toThrow(
+      /declare-blockers step/
+    );
+    s = applyAction(s, "p1", { type: "nextStep" }); // -> declareBlockers
+    // The active player may not block.
+    expect(() => applyAction(s, "p1", { type: "setBlocking", instanceId: "bys1", blocking: "atk1" })).toThrow(
+      /defending player/
+    );
+    // Blocking a non-attacker is rejected.
+    expect(() => applyAction(s, "p2", { type: "setBlocking", instanceId: "blk1", blocking: "bys1" })).toThrow(
+      /is not attacking/
+    );
+    // A tapped blocker is rejected.
+    const tapped = applyAction(s, "p2", { type: "tapCard", instanceId: "blk1", tapped: true });
+    expect(() => applyAction(tapped, "p2", { type: "setBlocking", instanceId: "blk1", blocking: "atk1" })).toThrow(
+      /tapped and can't block/
+    );
+    // Legal block goes through.
+    s = applyAction(s, "p2", { type: "setBlocking", instanceId: "blk1", blocking: "atk1" });
+    expect(player(s, "p2").zones.battlefield.find((c) => c.instanceId === "blk1")!.blocking).toBe("atk1");
+  });
+
+  it("game start: one nextStep chains untap -> upkeep -> draw (skipped) into main1", () => {
+    const g = newGame();
+    const starter = g.activePlayerId;
+    const s = applyAction(g, starter, { type: "nextStep" });
+    expect(s.step).toBe("main1");
+    expect(s.activePlayerId).toBe(starter);
+    expect(player(s, starter).zones.hand).toHaveLength(7); // starter's turn-1 draw skipped
+    expect(s.log.some((e) => /moved to the main1 step/.test(e.message))).toBe(true);
+  });
+
+  it("an upkeep trigger HOLDS the chain; pass-pass-resolve resumes it into main1 (v11 interlock)", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    const id = handCard(g, active);
+    const cardId = player(g, active).zones.hand[0]!.cardId;
+    const ctx2 = { scripts: { [cardId]: mkScript("upkeep", { kind: "gainLife", amount: 3 }) } };
+    let s = applyAction(g, active, { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx2);
+    s = applyAction(s, active, { type: "nextStep" }, 0, ctx2);
+    expect(s.step).toBe("upkeep"); // held: the trigger needs resolving
+    expect(s.stack).toHaveLength(1);
+    expect(s.stack[0]!.isTrigger).toBe(true);
+    // v11 interlock: the held trigger still needs both players to pass.
+    expect(() => applyAction(s, active, { type: "resolveTopOfStack" }, 0, ctx2)).toThrow(/pass priority/);
+    s = bothPass(s, ctx2); // auto-resolves (v13) and resumes the transit chain
+    expect(player(s, active).life).toBe(23);
+    expect(s.stack).toHaveLength(0);
+    expect(s.step).toBe("main1"); // the resolve resumed the auto-advance
+  });
+
+  it("nextStep from main2 stops at the end step (the shared instant window)", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    atStep(g, active, "main2");
+    const s = applyAction(g, active, { type: "nextStep" });
+    expect(s.step).toBe("end");
+    expect(s.activePlayerId).toBe(active);
+  });
+
+  it("nextStep from the end step passes the turn; the opponent auto-runs to main1, drawing", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    const inactive = other(g, active);
+    atStep(g, active, "end");
+    const handBefore = player(g, inactive).zones.hand.length;
+    const s = applyAction(g, active, { type: "nextStep" });
+    expect(s.activePlayerId).toBe(inactive);
+    expect(s.priorityPlayerId).toBe(inactive);
+    expect(s.step).toBe("main1");
+    expect(player(s, inactive).zones.hand).toHaveLength(handBefore + 1); // drew in the chain
+  });
+
+  it("a draw watcher (when {on:'draw', who:'you'}) holds the draw step mid-chain", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    const inactive = other(g, active);
+    const watcher = mkCard(inactive, 730);
+    watcher.cardId = "watchdraw";
+    watcher.instanceId = "wd1";
+    player(g, inactive).zones.battlefield.push(watcher);
+    const scripts: Record<string, CardScript> = {
+      watchdraw: {
+        triggers: [
+          {
+            event: "etb",
+            when: { on: "draw", who: "you" },
+            optional: false,
+            description: "you drew",
+            effect: { kind: "gainLife", amount: 1 },
+          },
+        ],
+      },
+    };
+    const ctx2 = { scripts };
+    atStep(g, active, "end");
+    let s = applyAction(g, active, { type: "nextStep" }, 0, ctx2);
+    expect(s.activePlayerId).toBe(inactive);
+    expect(s.step).toBe("draw"); // held mid-chain: the draw fired the watcher
+    expect(s.stack).toHaveLength(1);
+    expect(s.stack[0]!.triggerSourceId).toBe("wd1");
+    // Pass-pass-resolve (v11) applies the effect and resumes the chain.
+    s = bothPass(s, ctx2); // auto-resolves (v13)
+    expect(player(s, inactive).life).toBe(21);
+    expect(s.stack).toHaveLength(0);
+    expect(s.step).toBe("main1");
   });
 });
