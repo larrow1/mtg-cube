@@ -96,7 +96,9 @@ function notify(): void {
 export function primeCards(cards: Record<string, CardData>): void {
   let changed = false;
   for (const [id, data] of Object.entries(cards)) {
-    if (!cache.has(id)) {
+    // Server-resolved data is authoritative and should replace a prior null
+    // left by an unsuccessful direct Scryfall lookup.
+    if (!cache.has(id) || cache.get(id) === null) {
       cache.set(id, data);
       changed = true;
     }
@@ -106,6 +108,77 @@ export function primeCards(cards: Record<string, CardData>): void {
 
 export function getCachedCard(id: string): CardData | undefined {
   return cache.get(id) ?? undefined;
+}
+
+export interface CardImagePreloadProgress {
+  loaded: number;
+  total: number;
+  failed: number;
+}
+
+const imagePreloads = new Map<string, Promise<boolean>>();
+
+function cardImageUrls(cards: Record<string, CardData>): string[] {
+  const urls = new Set<string>();
+  for (const card of Object.values(cards)) {
+    const cardUrl = card.imageNormal ?? card.imageSmall;
+    if (cardUrl) urls.add(cardUrl);
+    for (const face of card.faces ?? []) {
+      const faceUrl = face.imageNormal ?? face.imageSmall;
+      if (faceUrl) urls.add(faceUrl);
+    }
+  }
+  return [...urls];
+}
+
+function loadImageOnce(url: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.decoding = "async";
+    img.onload = () => resolve(true);
+    img.onerror = () => resolve(false);
+    img.src = url;
+  });
+}
+
+function preloadImage(url: string): Promise<boolean> {
+  const existing = imagePreloads.get(url);
+  if (existing) return existing;
+
+  // One retry handles brief CDN/network hiccups without making the lobby wait
+  // indefinitely for an image that genuinely does not exist.
+  const request = loadImageOnce(url).then((ok) => (ok ? true : loadImageOnce(url)));
+  imagePreloads.set(url, request);
+  return request;
+}
+
+/**
+ * Warm the browser image cache for every distinct card scan in a cube. The
+ * limited worker pool avoids flooding Scryfall's image CDN while still making
+ * good progress during the lobby.
+ */
+export async function preloadCardImages(
+  cards: Record<string, CardData>,
+  onProgress?: (progress: CardImagePreloadProgress) => void
+): Promise<CardImagePreloadProgress> {
+  const queue = cardImageUrls(cards);
+  const progress: CardImagePreloadProgress = { loaded: 0, total: queue.length, failed: 0 };
+  onProgress?.({ ...progress });
+
+  const worker = async (): Promise<void> => {
+    while (queue.length > 0) {
+      const url = queue.shift();
+      if (!url) return;
+      const ok = await preloadImage(url);
+      progress.loaded += 1;
+      if (!ok) progress.failed += 1;
+      onProgress?.({ ...progress });
+    }
+  };
+
+  const workerCount = Math.min(8, queue.length);
+  await Promise.all(Array.from({ length: workerCount }, worker));
+  return progress;
 }
 
 async function fetchBatch(ids: string[]): Promise<void> {

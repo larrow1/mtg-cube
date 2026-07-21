@@ -6,6 +6,7 @@ import type {
   Account,
   AdminStats,
   AdminUserRow,
+  CardData,
   DraftCard,
   DraftView,
   GameAction,
@@ -37,6 +38,15 @@ export interface ClientToServerEvents {
 
   /** Host uploads a cube list (raw text, one card per line, "4 Name" counts ok). */
   uploadCube: (args: { name: string; list: string }, ack: (r: Ack<{ cardCount: number; unresolved: string[] }>) => void) => void;
+
+  /**
+   * Return the loaded cube's unordered card catalog so room clients can cache
+   * card metadata and artwork before drafting. Pack contents and order are not
+   * included.
+   */
+  getCubeCardCatalog: (
+    ack: (r: Ack<{ cubeId: string; cards: Record<string, CardData> }>) => void
+  ) => void;
 
   /** Host configures + starts the draft. Empty seats are filled with bots. */
   startDraft: (
