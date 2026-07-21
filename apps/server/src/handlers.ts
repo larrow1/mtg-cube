@@ -54,6 +54,7 @@ import {
   listUsersWithDetails,
   setCubeActive,
   setCubeRankedEligible,
+  setUserAdmin,
 } from "./db.js";
 import type { CubeSummaryRow, StoredCubeCards } from "./db.js";
 import {
@@ -862,6 +863,34 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
       }
       reply({ ok: true });
       console.log(`[admin] user deleted: ${target.username} (${userId})`);
+    });
+  });
+
+  // -- adminSetUserAdmin (v7.1) --------------------------------------------
+  socket.on("adminSetUserAdmin", (args, ack) => {
+    const reply = once(ack);
+    guard(reply, () => {
+      const adminId = requireAdmin(socket);
+      const userId = String(args?.userId ?? "");
+      const isAdmin = Boolean(args?.isAdmin);
+      if (userId === adminId && !isAdmin) {
+        throw new Error("You cannot revoke your own admin access — ask another admin");
+      }
+      const target = findUserById(userId);
+      if (!target) throw new Error("User not found");
+      setUserAdmin(userId, isAdmin);
+      // Live sessions learn immediately — no re-login needed.
+      const state = accountStateFor(userId);
+      if (state) {
+        for (const socketId of socketIdsForUser(userId)) {
+          io.to(socketId).emit("accountState", state);
+        }
+      }
+      reply({ ok: true });
+      console.log(
+        `[admin] ${isAdmin ? "granted" : "revoked"} admin for ${target.username} (${userId})` +
+          (isAdmin ? "" : " — note: ADMIN_USERNAMES re-grants listed names on next sign-in")
+      );
     });
   });
 

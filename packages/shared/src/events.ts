@@ -122,6 +122,12 @@ export interface ClientToServerEvents {
    * cannot delete their own account.
    */
   adminDeleteUser: (args: { userId: string }, ack: (r: Ack) => void) => void;
+  /**
+   * v7.1: grant or revoke another user's admin flag. Admins cannot demote
+   * themselves. Live sockets of the target get a fresh accountState. Note:
+   * ADMIN_USERNAMES re-grants listed names on their next sign-in.
+   */
+  adminSetUserAdmin: (args: { userId: string; isAdmin: boolean }, ack: (r: Ack) => void) => void;
 
   // -- Admin engine sandbox (v4.1; admin verified per call) -----------------
   /** Leave any current room and enter a fresh sandbox match vs a phantom

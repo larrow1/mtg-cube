@@ -177,3 +177,9 @@ Fixes the response window: every cast visibly sits on the stack before anything 
 **Spell templates** (parseSpellLine, BEFORE the blanket "target" reject): "counter target spell" -> counterTarget (Counterspell); "~/it deals N damage to any target" -> damageAnyTarget (Lightning Bolt). Everything else mentioning "target" still falls back to whole-spell manual.
 
 **Flow example** — casting Orcish Bowmasters into open blue mana: cast (auto-pays, stack) -> opponent casts Counterspell in response (auto-pays, stack, above) -> resolve Counterspell -> its effect entry appears -> resolve it, picker highlights stack spells -> click Bowmasters -> Bowmasters to graveyard, never entering play. If instead the table resolves Bowmasters first, it lands and its ETB targeting flow (v6) runs.
+
+## Admin grant/revoke toggle (v7.1)
+
+`adminSetUserAdmin({userId, isAdmin}, ack)` — admin-only, verified per call. Grants or revokes the persisted `is_admin` flag (db `setUserAdmin` gains the boolean; revocation now exists, superseding the v2.1 "no revoke path" note). Guards: target must exist; an admin cannot demote THEMSELVES (someone else must — prevents locking the portal shut by accident). Any live sockets of the target immediately receive a fresh `accountState` so their UI gains/loses the admin affordances without a re-login. Interplay with `ADMIN_USERNAMES`: the env bootstrap still re-grants listed usernames on their next sign-in, so revoking someone who is in the env only lasts until then (logged in the handler).
+
+**Admin portal UI**: each row in the Users table gains a Make admin / Revoke admin action (hidden on your own row), with a confirm dialog for revocation. The row's Admin chip reflects the change instantly.

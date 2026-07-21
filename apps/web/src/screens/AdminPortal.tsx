@@ -91,9 +91,11 @@ interface UsersSectionProps {
   selfId: string | undefined;
   onRefresh: () => void;
   onDelete: (user: AdminUserRow) => void;
+  /** v7.1: grant/revoke the admin flag (hidden on your own row). */
+  onToggleAdmin: (user: AdminUserRow) => void;
 }
 
-function UsersSection({ users, error, busy, busyId, selfId, onRefresh, onDelete }: UsersSectionProps): JSX.Element {
+function UsersSection({ users, error, busy, busyId, selfId, onRefresh, onDelete, onToggleAdmin }: UsersSectionProps): JSX.Element {
   const th = "px-2.5 py-2 text-left text-[10px] font-bold uppercase tracking-wider text-zinc-500";
 
   let body: JSX.Element;
@@ -161,6 +163,26 @@ function UsersSection({ users, error, busy, busyId, selfId, onRefresh, onDelete 
                   <td className="px-2.5 py-2.5 text-right tabular-nums text-zinc-300">{user.savedCubes}</td>
                   <td className="whitespace-nowrap px-2.5 py-2.5 text-zinc-400">{formatDate(user.createdAt)}</td>
                   <td className="px-2.5 py-2.5 text-right">
+                    {!isSelf && (
+                      <button
+                        type="button"
+                        className={`btn-ghost mr-1.5 !px-2 !py-1 !text-[10px] ${
+                          user.isAdmin
+                            ? "hover:!border-red-400/40 hover:!text-red-300"
+                            : "hover:!border-brass-400/50 hover:!text-brass-300"
+                        }`}
+                        disabled={rowBusy}
+                        onClick={() => onToggleAdmin(user)}
+                        aria-label={`${user.isAdmin ? "Revoke admin from" : "Make"} ${user.username}${user.isAdmin ? "" : " an admin"}`}
+                        title={
+                          user.isAdmin
+                            ? "Revoke this user's admin access (ADMIN_USERNAMES re-grants listed names on next sign-in)"
+                            : "Grant this user admin access"
+                        }
+                      >
+                        {user.isAdmin ? "Revoke admin" : "Make admin"}
+                      </button>
+                    )}
                     {!isSelf && (
                       <button
                         type="button"
@@ -587,6 +609,23 @@ export function AdminPortal(): JSX.Element | null {
     }
   };
 
+  // v7.1: grant/revoke the admin flag from the users table.
+  const toggleAdmin = async (user: AdminUserRow): Promise<void> => {
+    if (userBusyId) return;
+    setUserBusyId(user.id);
+    const r = await call("adminSetUserAdmin", { userId: user.id, isAdmin: !user.isAdmin });
+    setUserBusyId(null);
+    if (r.ok) {
+      setUsers((cur) => cur?.map((u) => (u.id === user.id ? { ...u, isAdmin: !user.isAdmin } : u)) ?? cur);
+      pushToast(
+        user.isAdmin ? `Revoked admin from “${user.username}”` : `“${user.username}” is now an admin`,
+        "success"
+      );
+    } else {
+      pushToast(r.error ?? "Could not update the admin flag");
+    }
+  };
+
   const confirmDeleteUser = async (): Promise<void> => {
     const user = pendingDeleteUser;
     if (!user || userBusyId) return;
@@ -660,6 +699,7 @@ export function AdminPortal(): JSX.Element | null {
             selfId={state.account?.account.id}
             onRefresh={() => void fetchUsers()}
             onDelete={setPendingDeleteUser}
+            onToggleAdmin={(user) => void toggleAdmin(user)}
           />
 
           <div className="grid gap-4 lg:grid-cols-[1fr_22rem]">

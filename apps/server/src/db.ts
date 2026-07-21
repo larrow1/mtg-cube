@@ -151,9 +151,10 @@ export function findUserById(id: string): UserRow | undefined {
   return getDb().prepare("SELECT * FROM users WHERE id = ?").get(id) as UserRow | undefined;
 }
 
-/** Grant admin (idempotent). There is deliberately no revoke path (v2.1). */
-export function setUserAdmin(userId: string): void {
-  getDb().prepare("UPDATE users SET is_admin = 1 WHERE id = ?").run(userId);
+/** Grant or revoke admin (idempotent). Revocation added in v7.1 — note the
+ *  ADMIN_USERNAMES bootstrap re-grants listed names on their next sign-in. */
+export function setUserAdmin(userId: string, isAdmin = true): void {
+  getDb().prepare("UPDATE users SET is_admin = ? WHERE id = ?").run(isAdmin ? 1 : 0, userId);
 }
 
 /** One row per user for the admin portal user table (rating defaults applied). */
