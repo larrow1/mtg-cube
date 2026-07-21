@@ -491,7 +491,15 @@ export type GameAction =
    *  fail to find. Only the searching player; library shuffles if the
    *  ability says so. */
   | { type: "completeSearch"; instanceId: string | null }
-  | { type: "moveCard"; instanceId: string; from: ZoneName; to: ZoneName; toBottom?: boolean; faceDown?: boolean }
+  /**
+   * v5: moving a card from HAND to STACK/BATTLEFIELD is a cast — the engine
+   * auto-pays its mana cost (pool first, then auto-tapped sources) and throws
+   * when it can't be paid; a front-face Land to the battlefield is a land play
+   * checked against one-per-turn (CR 305.2). `override: true` skips the cost
+   * payment / allows an additional land drop, loudly logged (alternative
+   * costs, cost reducers, extra-land effects).
+   */
+  | { type: "moveCard"; instanceId: string; from: ZoneName; to: ZoneName; toBottom?: boolean; faceDown?: boolean; override?: boolean }
   | { type: "tapCard"; instanceId: string; tapped: boolean }
   /** Tap a mana source and add `color` to your pool in one validated action
    *  (color must be among the card's producedMana; card must be untapped). */

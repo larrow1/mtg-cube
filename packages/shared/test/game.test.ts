@@ -1584,3 +1584,174 @@ describe("spawnCard (v4.1 admin sandbox)", () => {
     expect(JSON.stringify(g)).toBe(before);
   });
 });
+
+describe("cost enforcement & land drops (v5)", () => {
+  /** CardData factory with a mana cost + type line. */
+  const data = (id: string, typeLine: string, manaCost?: string, extra?: Partial<CardData>): CardData => ({
+    id,
+    name: `Card ${id}`,
+    cmc: 0,
+    typeLine,
+    colors: [],
+    colorIdentity: [],
+    layout: "normal",
+    ...(manaCost ? { manaCost } : {}),
+    ...extra,
+  });
+
+  /** Give p1 a hand card + battlefield sources with known card data. */
+  function setup(opts: {
+    handCard: CardData;
+    battlefield?: { cardData: CardData; tapped?: boolean }[];
+    pool?: Record<string, number>;
+  }) {
+    const g = newGame();
+    const p1 = player(g, "p1");
+    const cards: Record<string, CardData> = { [opts.handCard.id]: opts.handCard };
+    const hand = mkCard("p1", 900);
+    hand.cardId = opts.handCard.id;
+    hand.instanceId = "castme";
+    p1.zones.hand.push(hand);
+    (opts.battlefield ?? []).forEach((b, i) => {
+      cards[b.cardData.id] = b.cardData;
+      const gc = mkCard("p1", 910 + i);
+      gc.cardId = b.cardData.id;
+      gc.instanceId = `src${i}`;
+      gc.tapped = b.tapped ?? false;
+      p1.zones.battlefield.push(gc);
+    });
+    if (opts.pool) p1.manaPool = { ...opts.pool };
+    return { g, cards };
+  }
+
+  const island = data("island", "Basic Land — Island", undefined, { producedMana: ["U"] });
+  const mountain = data("mountain", "Basic Land — Mountain", undefined, { producedMana: ["R"] });
+
+  it("rejects casting a spell you cannot pay for", () => {
+    const { g, cards } = setup({ handCard: data("counsel", "Sorcery", "{2}{U}"), battlefield: [{ cardData: island }] });
+    expect(() =>
+      applyAction(g, "p1", { type: "moveCard", instanceId: "castme", from: "hand", to: "stack" }, 0, { cards })
+    ).toThrow(/can't pay \{2\}\{U\}/);
+  });
+
+  it("auto-taps sources and drains the pool to pay (pool first)", () => {
+    const { g, cards } = setup({
+      handCard: data("bear", "Creature — Bear", "{1}{U}"),
+      battlefield: [{ cardData: island }, { cardData: island }],
+      pool: { U: 1 },
+    });
+    const s = applyAction(g, "p1", { type: "moveCard", instanceId: "castme", from: "hand", to: "stack" }, 0, { cards });
+    const p1 = player(s, "p1");
+    expect(p1.manaPool.U).toBeUndefined(); // pool U spent on the colored pip
+    expect(p1.zones.battlefield.filter((c) => c.tapped)).toHaveLength(1); // one island for {1}
+    expect(s.log.some((e) => /auto-paid \{1\}\{U\}/.test(e.message))).toBe(true);
+  });
+
+  it("casting straight to the battlefield also pays", () => {
+    const { g, cards } = setup({
+      handCard: data("bear", "Creature — Bear", "{R}"),
+      battlefield: [{ cardData: mountain }],
+    });
+    const s = applyAction(g, "p1", { type: "moveCard", instanceId: "castme", from: "hand", to: "battlefield" }, 0, { cards });
+    expect(player(s, "p1").zones.battlefield.find((c) => c.instanceId === "src0")!.tapped).toBe(true);
+  });
+
+  it("zero-cost spells and X-only costs need no payment", () => {
+    const { g, cards } = setup({ handCard: data("zero", "Artifact", "{0}") });
+    const s = applyAction(g, "p1", { type: "moveCard", instanceId: "castme", from: "hand", to: "stack" }, 0, { cards });
+    expect(s.stack.some((c) => c.instanceId === "castme")).toBe(true);
+    const { g: g2, cards: cards2 } = setup({ handCard: data("xonly", "Sorcery", "{X}") });
+    expect(() =>
+      applyAction(g2, "p1", { type: "moveCard", instanceId: "castme", from: "hand", to: "stack" }, 0, { cards: cards2 })
+    ).not.toThrow();
+  });
+
+  it("unenforceable costs are allowed and loudly logged", () => {
+    const { g, cards } = setup({ handCard: data("px", "Instant", "{U/P}") });
+    const s = applyAction(g, "p1", { type: "moveCard", instanceId: "castme", from: "hand", to: "stack" }, 0, { cards });
+    expect(s.log.some((e) => /not auto-enforced/.test(e.message))).toBe(true);
+  });
+
+  it("override skips payment and is loudly logged", () => {
+    const { g, cards } = setup({ handCard: data("big", "Creature — Giant", "{6}{G}{G}") });
+    const s = applyAction(
+      g,
+      "p1",
+      { type: "moveCard", instanceId: "castme", from: "hand", to: "stack", override: true },
+      0,
+      { cards }
+    );
+    expect(s.stack.some((c) => c.instanceId === "castme")).toBe(true);
+    expect(s.log.some((e) => /without paying its mana cost \(override\)/.test(e.message))).toBe(true);
+  });
+
+  it("face-down plays (morph) skip enforcement", () => {
+    const { g, cards } = setup({ handCard: data("morpher", "Creature — Beast", "{4}{G}") });
+    expect(() =>
+      applyAction(
+        g,
+        "p1",
+        { type: "moveCard", instanceId: "castme", from: "hand", to: "battlefield", faceDown: true },
+        0,
+        { cards }
+      )
+    ).not.toThrow();
+  });
+
+  it("context-less engine stays permissive (no card data)", () => {
+    const g = newGame();
+    const id = handCard(g, "p1");
+    expect(() =>
+      applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "stack" })
+    ).not.toThrow();
+  });
+
+  it("enforces one land per turn (CR 305.2) with override for extras", () => {
+    const { g, cards } = setup({ handCard: island });
+    const land2 = mkCard("p1", 901);
+    land2.cardId = "island";
+    land2.instanceId = "castme2";
+    player(g, "p1").zones.hand.push(land2);
+
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: "castme", from: "hand", to: "battlefield" }, 0, { cards });
+    expect(player(s, "p1").landsPlayedThisTurn).toBe(1);
+    expect(() =>
+      applyAction(s, "p1", { type: "moveCard", instanceId: "castme2", from: "hand", to: "battlefield" }, 0, { cards })
+    ).toThrow(/already played a land/);
+
+    s = applyAction(
+      s,
+      "p1",
+      { type: "moveCard", instanceId: "castme2", from: "hand", to: "battlefield", override: true },
+      0,
+      { cards }
+    );
+    expect(player(s, "p1").landsPlayedThisTurn).toBe(2);
+    expect(s.log.some((e) => /additional land \(override\)/.test(e.message))).toBe(true);
+  });
+
+  it("land count resets on turn change", () => {
+    const { g, cards } = setup({ handCard: island });
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: "castme", from: "hand", to: "battlefield" }, 0, { cards });
+    const active = s.activePlayerId;
+    s = applyAction(s, active, { type: "nextTurn" }, 0, { cards });
+    expect(player(s, "p1").landsPlayedThisTurn).toBe(0);
+  });
+
+  it("'put onto the battlefield' does not count as a land play (CR 305.4)", () => {
+    const { g, cards } = setup({ handCard: island });
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: "castme", from: "hand", to: "battlefield" }, 0, { cards });
+    // Sandbox spawn of a second land: a "put", must neither check nor count.
+    s = applyAction(s, "p1", { type: "spawnCard", cardId: "island", zone: "battlefield" }, 0, { cards });
+    expect(player(s, "p1").landsPlayedThisTurn).toBe(1);
+  });
+
+  it("casting from the graveyard notes the unenforced cost", () => {
+    const { g, cards } = setup({ handCard: data("flash", "Sorcery", "{1}{B}") });
+    const p1 = player(g, "p1");
+    const gy = p1.zones.hand.pop()!;
+    p1.zones.graveyard.push(gy);
+    const s = applyAction(g, "p1", { type: "moveCard", instanceId: "castme", from: "graveyard", to: "stack" }, 0, { cards });
+    expect(s.log.some((e) => /not enforced when casting from the graveyard/.test(e.message))).toBe(true);
+  });
+});

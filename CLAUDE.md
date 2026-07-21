@@ -70,16 +70,23 @@ Release gate = typecheck + test + web build, then commit, push, deploy.
 
 Shipped: rooms/draft/deckbuild/match core; accounts + saved cubes + admin
 portal (system cubes = ranked pool, user management); ranked matchmaking with
-Elo/ranks; card scripts v1–v4 (9 trigger events, 196 shared tests, LSV cube
-audited to 0 gaps); draw restrictions + fetch-land searches; Arena-style UI
-(draft lanes/drag-to-pick, deck builder, battlefield art tiles with color
-frames + keyword chips, mana symbols everywhere).
+Elo/ranks; card scripts v1–v4 (9 trigger events, LSV cube audited to 0 gaps);
+draw restrictions + fetch-land searches; admin engine sandbox (v4.1:
+sandboxStart/sandboxAddCard/sandboxSwitchSeat, spawnCard action); v5
+casting-cost enforcement (mana.ts parser/auto-tapper, pool-first payment,
+override escape hatches), one-land-per-turn enforcement, client Auto mode
+(auto step-advance / priority-pass when nothing castable at instant speed);
+229 shared tests; Arena-style UI (draft lanes/drag-to-pick, deck builder,
+battlefield art tiles with color frames + keyword chips, mana symbols).
+
+The MTG Comprehensive Rules live in `docs/rules/` (plain text, split by
+section) — query them via the `mtg-rules` subagent instead of guessing rules.
 
 Roadmap (rough priority): targeting (unlocks automating most of the 132
-manual triggers) → casting-cost enforcement (auto-spend floating mana) →
-remaining trigger events (landfall, begin-of-combat, observer triggers — see
-UNSUPPORTED_TRIGGER_CARDS) → account management (password change) → spectator
-mode → Redis persistence for live games / multi-instance (see DEPLOY.md).
+manual triggers) → remaining trigger events (landfall, begin-of-combat,
+observer triggers — see UNSUPPORTED_TRIGGER_CARDS) → account management
+(password change) → spectator mode → Redis persistence for live games /
+multi-instance (see DEPLOY.md).
 
 Known nits: pre-existing setState-in-render warning from `apps/web/src/store.tsx`;
-`landsPlayedThisTurn` tracked but not enforced.
+mana sources always produce exactly 1 (Sol Ring pays 1 toward auto-payment).

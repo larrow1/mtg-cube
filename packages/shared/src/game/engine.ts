@@ -75,6 +75,13 @@ import type {
 } from "../types.js";
 import { TURN_STEPS } from "../types.js";
 import { createRng, shuffle } from "../rng.js";
+import {
+  describePoolSpend,
+  manaSourcesOf,
+  parseManaCost,
+  parsedCostSize,
+  planManaPayment,
+} from "./mana.js";
 
 export class EngineError extends Error {
   constructor(message: string) {
@@ -1147,6 +1154,14 @@ function applyMoveCard(
     throw new EngineError(`moveCard: from and to are both "${from}"`);
   }
 
+  // v5: leaving the hand for the stack or battlefield is the cast/play path —
+  // enforce land drops (CR 305.2) and pay mana costs (CR 601.2h) up front.
+  // Face-down plays (morph) stay fully manual.
+  if (from === "hand" && (to === "stack" || to === "battlefield") && action.faceDown !== true) {
+    const handCard = actor.zones.hand.find((c) => c.instanceId === instanceId);
+    if (handCard) enforceCastFromHand(s, actor, handCard, to, action.override === true, logs);
+  }
+
   // Remove the card from exactly the stated `from` zone.
   let card: GameCard;
   if (from === "stack") {
@@ -1222,6 +1237,13 @@ function applyMoveCard(
       pushTriggers(s, card, actor.playerId, "leaves", logs);
     }
   } else if (to === "stack" && (from === "hand" || from === "graveyard" || from === "exile" || from === "library")) {
+    // v5: only hand-casts are cost-enforced; note the gap for other zones
+    // (flashback, reanimation shortcuts, ...) so it is never silent.
+    if (from !== "hand") {
+      const castData = ctx.cards?.[card.cardId];
+      const rawCost = castData?.faces?.[0]?.manaCost ?? castData?.manaCost;
+      if (rawCost) logs.push(`(cost ${rawCost} is not enforced when casting from the ${from})`);
+    }
     // Casting a spell: castSpell triggers fire on the caster's OWN battlefield
     // permanents (never on the spell itself), filtered by each trigger's
     // castFilter against the cast card's typeLine. They are pushed after the
@@ -1234,6 +1256,94 @@ function applyMoveCard(
       );
     }
   }
+}
+
+/**
+ * v5 cast/play enforcement, called before a card leaves the hand for the
+ * stack or battlefield. Mutates only on success paths (payments tap sources
+ * and drain the pool on the CLONED state); throws EngineError otherwise.
+ *
+ *  - Front-face Land -> battlefield: a land play. Rejected once
+ *    landsPlayedThisTurn >= 1 unless `override` (CR 305.2a-b); the count
+ *    increments either way. Lands never pay mana costs.
+ *  - Anything else: parse the mana cost. Unparseable-but-present costs are
+ *    allowed and loudly logged as unenforced (wrong automation is worse than
+ *    none); missing card data stays silent (context-less engine, tokens).
+ *    Parseable costs are paid from the pool first, then by auto-tapping
+ *    untapped producers (CR 106.4, 601.2g-h); failure throws. `override`
+ *    skips payment entirely (alternative costs), loudly logged.
+ */
+function enforceCastFromHand(
+  s: GameState,
+  actor: PlayerGameState,
+  card: GameCard,
+  to: "stack" | "battlefield",
+  override: boolean,
+  logs: string[]
+): void {
+  const typeLine = frontTypeLine(card);
+  const isLand = typeLine !== undefined && /\bLand\b/i.test(typeLine);
+
+  if (isLand && to === "battlefield") {
+    if (actor.landsPlayedThisTurn >= 1 && !override) {
+      throw new EngineError(
+        "You have already played a land this turn (CR 305.2). If an effect grants additional land plays, use the additional-land override."
+      );
+    }
+    actor.landsPlayedThisTurn += 1;
+    if (actor.landsPlayedThisTurn > 1) {
+      logs.push(`played an additional land (override) — land #${actor.landsPlayedThisTurn} this turn`);
+    }
+    return;
+  }
+  if (isLand) return; // lands aren't spells; nothing to pay wherever they go
+
+  const data = ctx.cards?.[card.cardId];
+  if (!data) return; // no card data — the context-less engine stays permissive
+
+  if (override) {
+    logs.push(`cast ${cardLabel(card)} without paying its mana cost (override)`);
+    return;
+  }
+
+  const rawCost = data.faces?.[0]?.manaCost ?? data.manaCost;
+  const cost = parseManaCost(rawCost);
+  if (!cost) {
+    if (rawCost) logs.push(`cast ${cardLabel(card)} — its cost ${rawCost} is not auto-enforced`);
+    return;
+  }
+  if (parsedCostSize(cost) === 0) return; // {0} / X-only: nothing fixed to pay
+
+  const plan = planManaPayment(cost, actor.manaPool, manaSourcesOf(actor, ctx.cards ?? {}));
+  if (!plan) {
+    throw new EngineError(
+      `You can't pay ${rawCost} for ${cardLabel(card)} — not enough mana in your pool or untapped sources. ` +
+        "(Alternative or reduced costs: use the cast-without-paying override.)"
+    );
+  }
+
+  // Execute the plan: drain the pool, tap the chosen sources.
+  const parts: string[] = [];
+  const poolSpend = describePoolSpend(plan.fromPool);
+  for (const [color, count] of Object.entries(plan.fromPool)) {
+    const left = (actor.manaPool[color] ?? 0) - (count ?? 0);
+    if (left <= 0) delete actor.manaPool[color];
+    else actor.manaPool[color] = left;
+  }
+  if (poolSpend) parts.push(`spent ${poolSpend} from their pool`);
+  if (plan.taps.length > 0) {
+    const names: string[] = [];
+    for (const tap of plan.taps) {
+      const source = actor.zones.battlefield.find((c) => c.instanceId === tap.instanceId);
+      if (source) {
+        source.tapped = true;
+        names.push(cardLabel(source));
+      }
+    }
+    parts.push(`tapped ${names.join(", ")}`);
+  }
+  const xNote = cost.x > 0 ? " (X not auto-charged)" : "";
+  logs.push(`auto-paid ${rawCost} for ${cardLabel(card)}${xNote}${parts.length ? ` — ${parts.join("; ")}` : ""}`);
 }
 
 /** Front-face type line of a card (DFC-aware); undefined without card data. */

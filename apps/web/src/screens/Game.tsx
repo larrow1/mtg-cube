@@ -18,7 +18,7 @@ import type {
   SpawnZone,
   ZoneName,
 } from "@mtg-cube/shared";
-import { scriptFor } from "@mtg-cube/shared";
+import { canPayFor, hasInstantSpeed, scriptFor } from "@mtg-cube/shared";
 import { call } from "../socket";
 import { useApp } from "../store";
 import { classifyRow, compareByCmcName, nameOf, randomSeed, type RowKind } from "../lib/cards";
@@ -286,6 +286,8 @@ export function Game(): JSX.Element {
   const [blockSource, setBlockSource] = useState<string | null>(null);
   const [manaPicker, setManaPicker] = useState<ManaPickerState | null>(null);
   const [logOpen, setLogOpen] = useState(true);
+  const [autoMode, setAutoMode] = useState(false);
+  const lastAutoSeq = useRef(-1);
   const [, forceRender] = useState(0);
 
   // Esc cancels attach/block targeting modes, the mana picker and the hand selection.
@@ -309,6 +311,72 @@ export function Game(): JSX.Element {
     );
     return active?.id ?? view.gameId;
   }, [room, session, view]);
+
+  /**
+   * v5 Auto mode (CR 500.2-inspired house rule): with nothing castable at
+   * instant speed (CR 117.1a instants, CR 702.8a flash) and an empty stack,
+   * the active player's non-decision steps advance themselves and the
+   * non-active player passes priority back. Suspended by anything on the
+   * stack, a pending search, the mulligan window, or a rejected action.
+   */
+  useEffect(() => {
+    if (!autoMode || !view || !session) return;
+    const gs = view.state;
+    const cards = view.cards;
+    if (gs.finished || gs.pendingSearch || gs.stack.length > 0) return;
+    const me = gs.players.find((p) => p.playerId === session.playerId);
+    const opp = gs.players.find((p) => p.playerId !== session.playerId);
+    if (!me || !opp) return;
+    if (lastAutoSeq.current >= gs.seq) return;
+
+    // Mulligan window: same conditions the keep/mull banner uses.
+    const boardEmpty =
+      me.zones.battlefield.length === 0 &&
+      opp.zones.battlefield.length === 0 &&
+      me.zones.graveyard.length === 0;
+    if (gs.turnNumber === 1 && gs.step === "untap" && boardEmpty && !getMull(view).kept) return;
+
+    const canActNow = me.zones.hand.some((gc) => {
+      const d = cards[gc.cardId];
+      return d !== undefined && hasInstantSpeed(d) && canPayFor(d, me, cards);
+    });
+    const isUntappedCreature = (gc: GameCard): boolean => {
+      if (gc.tapped) return false;
+      const tl = gc.isToken
+        ? gc.tokenTypeLine ?? ""
+        : cards[gc.cardId]?.faces?.[0]?.typeLine ?? cards[gc.cardId]?.typeLine ?? "";
+      return /\bCreature\b/i.test(tl);
+    };
+
+    let action: GameAction | null = null;
+    if (gs.activePlayerId === me.playerId) {
+      if (!canActNow) {
+        const AUTO_STEPS = ["untap", "upkeep", "draw", "beginCombat", "endCombat", "end", "cleanup"];
+        if (AUTO_STEPS.includes(gs.step)) action = { type: "nextStep" };
+        else if (gs.step === "declareAttackers" && !me.zones.battlefield.some(isUntappedCreature)) {
+          action = { type: "nextStep" };
+        } else if (gs.step === "declareBlockers" && !opp.zones.battlefield.some(isUntappedCreature)) {
+          action = { type: "nextStep" };
+        } else if (gs.step === "combatDamage") {
+          action = { type: "nextStep" };
+        }
+      }
+    } else if (gs.priorityPlayerId === me.playerId && !canActNow) {
+      action = { type: "passPriority" };
+    }
+    if (!action) return;
+
+    const chosen = action;
+    const seq = gs.seq;
+    // Short beat so triggers/log stay readable as steps flow past.
+    const timer = window.setTimeout(() => {
+      lastAutoSeq.current = seq;
+      void call("gameAction", { matchId, action: chosen }).then((r) => {
+        if (!r.ok) setAutoMode(false); // engine disagreed — hand control back
+      });
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [autoMode, view, session, matchId]);
 
   if (!view || !session) {
     return (
@@ -518,15 +586,23 @@ export function Game(): JSX.Element {
     return items;
   };
 
-  const handMenu = (gc: GameCard): MenuItem[] => [
-    { label: "Play to battlefield", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "battlefield" }) },
-    { label: "Play face down", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "battlefield", faceDown: true }) },
-    { label: "Cast (put on stack)", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "stack" }) },
-    { label: "Discard", separator: true, onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "graveyard" }) },
-    { label: "Exile", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "exile" }) },
-    { label: "Top of library", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "library" }) },
-    { label: "Bottom of library", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "library", toBottom: true }) },
-  ];
+  const handMenu = (gc: GameCard): MenuItem[] => {
+    const tl = cards[gc.cardId]?.faces?.[0]?.typeLine ?? cards[gc.cardId]?.typeLine ?? "";
+    const isLand = /\bLand\b/i.test(tl);
+    return [
+      { label: "Play to battlefield", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "battlefield" }) },
+      { label: "Play face down", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "battlefield", faceDown: true }) },
+      { label: "Cast (put on stack)", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "stack" }) },
+      // v5 escape hatches: additional-land effects / alternative & reduced costs.
+      isLand
+        ? { label: "Play as additional land (override)", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "battlefield", override: true }) }
+        : { label: "Cast without paying (override)", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "stack", override: true }) },
+      { label: "Discard", separator: true, onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "graveyard" }) },
+      { label: "Exile", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "exile" }) },
+      { label: "Top of library", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "library" }) },
+      { label: "Bottom of library", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "library", toBottom: true }) },
+    ];
+  };
 
   const libraryMenu = (): MenuItem[] => {
     const top = me.zones.library[0];
@@ -780,11 +856,28 @@ export function Game(): JSX.Element {
               disabled={!canAct || gs.stack.length === 0}
             />
             <div className="flex min-w-0 flex-1 flex-col justify-center gap-1">
-              {ranked && (
-                <span className="chip self-center border-brass-400/60 font-black tracking-widest text-brass-300">
-                  RANKED
-                </span>
-              )}
+              <div className="flex items-center justify-center gap-2">
+                {ranked && (
+                  <span className="chip border-brass-400/60 font-black tracking-widest text-brass-300">
+                    RANKED
+                  </span>
+                )}
+                {viewerIsPlayer && !gs.finished && (
+                  <button
+                    type="button"
+                    onClick={() => setAutoMode((a) => !a)}
+                    className={`chip transition-colors duration-150 ${
+                      autoMode
+                        ? "border-emerald-400/60 font-black tracking-widest text-emerald-300 shadow-[0_0_10px_rgba(52,211,153,0.25)]"
+                        : "border-white/15 font-semibold tracking-widest text-zinc-400 hover:text-zinc-200"
+                    }`}
+                    title="Auto mode: steps advance and priority passes by themselves whenever you have no castable instant-speed play (main phases and attack/block decisions always stop)"
+                  >
+                    <span className={`h-1.5 w-1.5 rounded-full ${autoMode ? "animate-pulse bg-emerald-400" : "bg-zinc-600"}`} />
+                    AUTO {autoMode ? "ON" : "OFF"}
+                  </button>
+                )}
+              </div>
               {pendingSearch && !myPendingSearch && (
                 <span className="chip animate-pop-in self-center border-sky-400/50 font-semibold text-sky-300">
                   <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-400" />
