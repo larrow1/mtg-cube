@@ -75,6 +75,73 @@ export function colorBucket(data: CardData | undefined): ColorBucket {
   return only ?? "C";
 }
 
+/**
+ * Evergreen keyword abilities we render as icon chips on battlefield art
+ * tiles. Order here is canonical for display.
+ */
+export const KNOWN_KEYWORDS = [
+  "flying",
+  "first strike",
+  "double strike",
+  "deathtouch",
+  "lifelink",
+  "trample",
+  "haste",
+  "vigilance",
+  "menace",
+  "reach",
+  "hexproof",
+  "indestructible",
+  "flash",
+  "defender",
+  "ward",
+  "protection",
+] as const;
+
+const KNOWN_KEYWORD_SET = new Set<string>(KNOWN_KEYWORDS);
+
+/**
+ * Parse the FRONT face's oracle text for keyword abilities. Reminder text
+ * (parenthesized) is stripped first; a line only counts when it consists
+ * entirely of comma/semicolon-separated known keywords ("Flying, deathtouch"),
+ * so ability sentences like "Flying, then draw a card" never false-positive.
+ * "Ward {2}" / "Ward—pay 3 life" map to `ward`, "Protection from X" to
+ * `protection`. Deduped, original order preserved.
+ */
+export function keywordAbilities(card: CardData): string[] {
+  const front = card.faces && card.faces.length > 0 ? card.faces[0] : undefined;
+  const oracle = front?.oracleText ?? card.oracleText;
+  if (!oracle) return [];
+  const stripped = oracle.replace(/\s*\([^)]*\)/g, "");
+  const found: string[] = [];
+  for (const line of stripped.split("\n")) {
+    const parts = line
+      .split(/[,;]/)
+      .map((p) => p.trim().replace(/\.$/, ""))
+      .filter((p) => p.length > 0);
+    if (parts.length === 0) continue;
+    const lineKeywords: string[] = [];
+    let allKnown = true;
+    for (const part of parts) {
+      const lower = part.toLowerCase();
+      if (KNOWN_KEYWORD_SET.has(lower)) {
+        lineKeywords.push(lower);
+      } else if (/^ward[\s{—-]/.test(lower)) {
+        lineKeywords.push("ward");
+      } else if (/^protection from /.test(lower)) {
+        lineKeywords.push("protection");
+      } else {
+        // An unknown word disqualifies the whole line — it's a sentence, not
+        // a keyword list.
+        allKnown = false;
+        break;
+      }
+    }
+    if (allKnown) found.push(...lineKeywords);
+  }
+  return [...new Set(found)];
+}
+
 /** "{2}{W}{U}" -> ["2","W","U"]; bare costs pass through. */
 export function parseManaCost(cost: string | undefined): string[] {
   if (!cost) return [];

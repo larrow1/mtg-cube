@@ -19,15 +19,20 @@ import {
   type SetStateAction,
 } from "react";
 import type { CardData, GameCard } from "@mtg-cube/shared";
+// Mana icon font (SIL OFL / MIT) — supplies the Arena-style keyword ability
+// glyphs for battlefield tile chips. Vite bundles the font files locally.
+import "mana-font/css/mana.css";
 import {
   activeFace,
   colorBucket,
   frameClasses,
-  manaPipClasses,
+  keywordAbilities,
   nameOf,
   parseManaCost,
   powerToughnessOf,
+  type ColorBucket,
 } from "../lib/cards";
+import { ManaSymbol } from "./ManaSymbol";
 
 export type CardSize = "xs" | "sm" | "md" | "lg";
 
@@ -53,21 +58,22 @@ const ART_TILE_SIZE_CLASSES: Record<CardSize, string> = {
 /**
  * CSS crop of a full-card scan down to its art band. Modern frames paint the
  * art between roughly 11% and 55.5% of card height; the band is horizontally
- * centered. We scale the scan so the band's height fills the 4:3 tile and
- * center it — the slight horizontal overshoot crops evenly off both edges.
+ * centered. The scan fills the art window's width, and the band's vertical
+ * center is pinned to the window's center (translateY percentages are of the
+ * image's own height) — the window crops the frame above/below the band.
  * Tuned visually against real Scryfall scans.
  */
 const ART_CROP_TOP = 0.115;
 const ART_CROP_BOTTOM = 0.555;
-const ART_BAND = ART_CROP_BOTTOM - ART_CROP_TOP;
+const ART_BAND_CENTER = (ART_CROP_TOP + ART_CROP_BOTTOM) / 2;
 
 const ART_IMG_STYLE: CSSProperties = {
   position: "absolute",
-  height: `${(100 / ART_BAND).toFixed(2)}%`,
-  top: `${((-ART_CROP_TOP * 100) / ART_BAND).toFixed(2)}%`,
-  left: "50%",
-  transform: "translateX(-50%)",
+  left: 0,
+  top: "50%",
+  width: "100%",
   maxWidth: "none",
+  transform: `translateY(-${(ART_BAND_CENTER * 100).toFixed(2)}%)`,
 };
 
 // ---------------------------------------------------------------------------
@@ -183,12 +189,7 @@ function ManaCost({ cost }: { cost: string | undefined }): JSX.Element | null {
   return (
     <span className="flex flex-wrap items-center gap-[2px]">
       {symbols.map((s, i) => (
-        <span
-          key={`${s}-${i}`}
-          className={`flex h-4 w-4 items-center justify-center rounded-full text-[10px] font-bold leading-none shadow-[0_1px_2px_rgba(8,6,30,0.5)] ${manaPipClasses(s)}`}
-        >
-          {s}
-        </span>
+        <ManaSymbol key={`${s}-${i}`} symbol={s} className="h-4 w-4" />
       ))}
     </span>
   );
@@ -246,43 +247,188 @@ export function CardBack({ className = "" }: { className?: string }): JSX.Elemen
 // Art tile (Arena-style battlefield rendering)
 // ---------------------------------------------------------------------------
 
-/** Subtle tile border tint per color bucket. */
-function tileBorderClass(bucket: ReturnType<typeof colorBucket>): string {
-  switch (bucket) {
-    case "W":
-      return "border-amber-200/40";
-    case "U":
-      return "border-sky-400/40";
-    case "B":
-      return "border-purple-500/35";
-    case "R":
-      return "border-red-400/40";
-    case "G":
-      return "border-green-500/40";
-    case "M":
-      return "border-yellow-400/45";
-    case "L":
-      return "border-orange-400/35";
-    default:
-      return "border-zinc-400/30";
-  }
+/**
+ * Arena-style frame treatment per color bucket: a ~2px gradient frame border
+ * plus a matching tint for the name strip (top) and stat bar (bottom). Text
+ * color flips per tint for contrast (dark on ivory/gold, light elsewhere).
+ */
+interface TileFrameStyle {
+  /** Gradient painted on the 2px frame ring. */
+  frame: string;
+  /** Gradient for the name strip and bottom bar. */
+  bar: string;
+  /** Name text color (contrast-matched to `bar`). */
+  text: string;
 }
 
-/** Slim translucent name strip across the top of an art tile. */
-function TileNameStrip({ name }: { name: string }): JSX.Element {
+const TILE_FRAMES: Record<ColorBucket, TileFrameStyle> = {
+  // White: ivory / parchment with a silvered edge.
+  W: {
+    frame: "linear-gradient(155deg, #f8f0da, #cfc19b 45%, #8f8264)",
+    bar: "linear-gradient(#efe6cd, #d5c69f)",
+    text: "#37301d",
+  },
+  // Blue: rich lapis.
+  U: {
+    frame: "linear-gradient(155deg, #8cc0ee, #2c62a2 45%, #123a6b)",
+    bar: "linear-gradient(#20518a, #143764)",
+    text: "#dcecfd",
+  },
+  // Black: charcoal with silver text.
+  B: {
+    frame: "linear-gradient(155deg, #63636c, #26262c 45%, #0d0d11)",
+    bar: "linear-gradient(#2c2c33, #141418)",
+    text: "#d6d6db",
+  },
+  // Red: ember red-orange.
+  R: {
+    frame: "linear-gradient(155deg, #f29c72, #b23e24 45%, #6d1c0f)",
+    bar: "linear-gradient(#8f3220, #5c1f11)",
+    text: "#ffe5d7",
+  },
+  // Green: forest.
+  G: {
+    frame: "linear-gradient(155deg, #86c481, #2f6d3b 45%, #14371c)",
+    bar: "linear-gradient(#286034, #163e20)",
+    text: "#dcf6df",
+  },
+  // Multicolor: gold.
+  M: {
+    frame: "linear-gradient(155deg, #f8e88f, #cda43e 45%, #86661d)",
+    bar: "linear-gradient(#c39733, #94701f)",
+    text: "#2a1e05",
+  },
+  // Colorless / artifact: steel with a bronze undertone.
+  C: {
+    frame: "linear-gradient(155deg, #ccd1d8, #8d959f 45%, #4d545e)",
+    bar: "linear-gradient(#6d7580, #484f58)",
+    text: "#eef1f4",
+  },
+  // Land: warm tan.
+  L: {
+    frame: "linear-gradient(155deg, #dcbf93, #a37e50 45%, #5e442a)",
+    bar: "linear-gradient(#87663e, #5c4327)",
+    text: "#f4e5cb",
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Keyword ability icon chips
+// ---------------------------------------------------------------------------
+
+/**
+ * Arena-style ability glyphs from the bundled Mana icon font (mana-font,
+ * imported in this module — Vite inlines the woff/ttf). Every keyword in
+ * KNOWN_KEYWORDS has a font glyph in mana-font 1.18, so no SVG fallback is
+ * needed; if a keyword ever misses this map, its chip falls back to a shield.
+ */
+const KEYWORD_MS_CLASS: Record<string, string> = {
+  flying: "ms-ability-flying",
+  "first strike": "ms-ability-first-strike",
+  "double strike": "ms-ability-double-strike",
+  deathtouch: "ms-ability-deathtouch",
+  lifelink: "ms-ability-lifelink",
+  trample: "ms-ability-trample",
+  haste: "ms-ability-haste",
+  vigilance: "ms-ability-vigilance",
+  menace: "ms-ability-menace",
+  reach: "ms-ability-reach",
+  hexproof: "ms-ability-hexproof",
+  indestructible: "ms-ability-indestructible",
+  flash: "ms-ability-flash",
+  defender: "ms-ability-defender",
+  ward: "ms-ability-ward",
+  protection: "ms-ability-protection",
+};
+
+const MAX_KEYWORD_CHIPS = 4;
+
+/** Small dark rounded-square chips, one per keyword, bottom-left of a tile. */
+function KeywordChips({ keywords }: { keywords: string[] }): JSX.Element | null {
+  if (keywords.length === 0) return null;
+  const overflow = keywords.length > MAX_KEYWORD_CHIPS;
+  const shown = overflow ? keywords.slice(0, MAX_KEYWORD_CHIPS - 1) : keywords;
+  const hidden = keywords.slice(shown.length);
   return (
-    <div className="pointer-events-none absolute inset-x-0 top-0 bg-gradient-to-b from-black/80 via-black/45 to-transparent px-1.5 pb-2.5 pt-0.5">
-      <div className="truncate text-[9px] font-semibold leading-tight text-zinc-50 text-shadow">{name}</div>
-    </div>
+    <span className="pointer-events-auto flex items-center gap-[2px]">
+      {shown.map((kw) => (
+        <span
+          key={kw}
+          title={kw}
+          className="flex h-3.5 w-3.5 items-center justify-center rounded-[3px] border border-white/20 bg-black/75 shadow-[0_1px_2px_rgba(8,6,30,0.6)]"
+        >
+          <i
+            aria-hidden
+            className={`ms ${KEYWORD_MS_CLASS[kw] ?? "ms-ability-protection"}`}
+            style={{ fontSize: "10px", color: "#f4f4f5" }}
+          />
+        </span>
+      ))}
+      {overflow && (
+        <span
+          title={hidden.join(", ")}
+          className="flex h-3.5 min-w-3.5 items-center justify-center rounded-[3px] border border-white/20 bg-black/75 px-0.5 text-[8px] font-bold leading-none text-zinc-100 shadow-[0_1px_2px_rgba(8,6,30,0.6)]"
+        >
+          +{hidden.length}
+        </span>
+      )}
+    </span>
   );
 }
 
-/** P/T plate bottom-right of an art tile. */
+/** P/T plate anchored in the tile's bottom stat bar. */
 function TilePtPlate({ pt }: { pt: string }): JSX.Element {
   return (
-    <span className="pointer-events-none absolute bottom-0.5 right-0.5 rounded-md border border-white/25 bg-black/80 px-1 py-px text-[10px] font-black leading-tight tracking-tight text-zinc-50 shadow-[0_1px_3px_rgba(8,6,30,0.7)]">
+    <span className="pointer-events-none ml-auto rounded border border-white/25 bg-black/80 px-1 py-px text-[10px] font-black leading-tight tracking-tight text-zinc-50 shadow-[0_1px_3px_rgba(8,6,30,0.7)]">
       {pt}
     </span>
+  );
+}
+
+interface ArtTileFrameProps {
+  bucket: ColorBucket;
+  name: string;
+  pt: string | null;
+  keywords: string[];
+  /** Art-window content: cropped scan or fallback filler. */
+  children: ReactNode;
+}
+
+/**
+ * Arena-style mini card: color-tinted gradient frame ring, tinted name strip
+ * across the top, art window in the middle, and a tinted bottom bar holding
+ * keyword chips (left) and the P/T plate (right). The bottom bar collapses
+ * when there is nothing to show (e.g. lands), giving the art the room back.
+ */
+function ArtTileFrame({ bucket, name, pt, keywords, children }: ArtTileFrameProps): JSX.Element {
+  const f = TILE_FRAMES[bucket];
+  const hasBottomBar = pt !== null || keywords.length > 0;
+  return (
+    <div
+      className="absolute inset-0 rounded-lg p-[2px] shadow-[0_0_0_1px_rgba(8,6,30,0.65)]"
+      style={{ background: f.frame }}
+    >
+      <div className="flex h-full w-full flex-col overflow-hidden rounded-[5px] bg-felt-950">
+        <div
+          className="flex h-[15px] shrink-0 items-center border-b border-black/40 px-1"
+          style={{ background: f.bar }}
+        >
+          <span className="truncate text-[9px] font-semibold leading-none" style={{ color: f.text }}>
+            {name}
+          </span>
+        </div>
+        <div className="relative min-h-0 flex-1 overflow-hidden bg-felt-950">{children}</div>
+        {hasBottomBar && (
+          <div
+            className="flex h-[18px] shrink-0 items-center border-t border-black/40 px-[3px]"
+            style={{ background: f.bar }}
+          >
+            <KeywordChips keywords={keywords} />
+            {pt && <TilePtPlate pt={pt} />}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -290,21 +436,23 @@ interface ArtTileFallbackProps {
   name: string;
   typeLine?: string;
   pt: string | null;
-  bucket: ReturnType<typeof colorBucket>;
+  bucket: ColorBucket;
+  keywords: string[];
 }
 
-/** Art-tile-shaped fallback for cards with no image (and for tokens). */
-function ArtTileFallback({ name, typeLine, pt, bucket }: ArtTileFallbackProps): JSX.Element {
+/** Art-tile fallback for cards with no image (and for tokens): same frame,
+ * with a tinted filler and the type line where the art would be. */
+function ArtTileFallback({ name, typeLine, pt, bucket, keywords }: ArtTileFallbackProps): JSX.Element {
   return (
-    <div
-      className={`relative flex h-full w-full flex-col items-center justify-center overflow-hidden rounded-lg border bg-gradient-to-br to-felt-950 px-1.5 ${frameClasses(bucket)} bg-felt-900`}
-    >
-      <span className="line-clamp-2 text-center text-[10px] font-semibold leading-tight text-zinc-100">{name}</span>
-      {typeLine && (
-        <span className="mt-0.5 max-w-full truncate text-center text-[8px] leading-tight text-zinc-400">{typeLine}</span>
-      )}
-      {pt && <TilePtPlate pt={pt} />}
-    </div>
+    <ArtTileFrame bucket={bucket} name={name} pt={pt} keywords={keywords}>
+      <div
+        className={`flex h-full w-full flex-col items-center justify-center bg-gradient-to-br to-felt-950 px-1.5 ${frameClasses(bucket)} bg-felt-900`}
+      >
+        {typeLine && (
+          <span className="max-w-full truncate text-center text-[8px] leading-tight text-zinc-300/90">{typeLine}</span>
+        )}
+      </div>
+    </ArtTileFrame>
   );
 }
 
@@ -416,6 +564,12 @@ export function Card(props: CardProps): JSX.Element {
   const counters = gameCard ? Object.entries(gameCard.counters).filter(([, n]) => n !== 0) : [];
   const damage = gameCard?.damage ?? 0;
 
+  // Keyword ability chips (art tiles only; tokens carry no oracle text).
+  const keywords = useMemo(
+    () => (artTile && data && !isToken ? keywordAbilities(data) : []),
+    [artTile, data, isToken]
+  );
+
   let body: JSX.Element;
   if (showBack) {
     body = artTile ? (
@@ -432,6 +586,7 @@ export function Card(props: CardProps): JSX.Element {
         typeLine={gameCard.tokenTypeLine}
         pt={powerToughnessOf(gameCard, undefined)}
         bucket="C"
+        keywords={keywords}
       />
     ) : (
       <TextFrame
@@ -444,7 +599,7 @@ export function Card(props: CardProps): JSX.Element {
     );
   } else if (imgSrc && !imageFailed) {
     body = artTile ? (
-      <div className={`absolute inset-0 overflow-hidden rounded-lg border bg-felt-950 ${tileBorderClass(colorBucket(data))}`}>
+      <ArtTileFrame bucket={colorBucket(data)} name={name} pt={pt} keywords={keywords}>
         <img
           src={imgSrc}
           alt={name}
@@ -453,9 +608,7 @@ export function Card(props: CardProps): JSX.Element {
           onError={() => setImageFailed(true)}
           style={ART_IMG_STYLE}
         />
-        <TileNameStrip name={name} />
-        {pt && <TilePtPlate pt={pt} />}
-      </div>
+      </ArtTileFrame>
     ) : (
       <img
         src={imgSrc}
@@ -473,6 +626,7 @@ export function Card(props: CardProps): JSX.Element {
         typeLine={face?.typeLine ?? data?.typeLine}
         pt={pt}
         bucket={colorBucket(data)}
+        keywords={keywords}
       />
     );
   } else {
@@ -561,8 +715,13 @@ export function Card(props: CardProps): JSX.Element {
             <svg viewBox="0 0 24 24" className="h-3 w-3 fill-current"><path d="M13 2 4.5 13.5H10L8.5 22 17.5 10H12L13 2Z" /></svg>
           </button>
         )}
+        {/* On art tiles the bottom bar owns keyword chips + P/T, so counters
+            stack vertically up the left edge just above it — clear of the
+            damage badge (top-right) and attack badge (top-left). */}
         {counters.length > 0 && (
-          <div className={`absolute bottom-1 left-1 flex flex-wrap gap-0.5 ${artTile ? "right-8" : "right-1"}`}>
+          <div
+            className={`absolute flex gap-0.5 ${artTile ? "bottom-[22px] left-0.5 flex-col items-start" : "bottom-1 left-1 right-1 flex-wrap"}`}
+          >
             {counters.map(([type, n]) => (
               <span key={type} className="rounded bg-amber-400 px-1 py-0.5 text-[9px] font-bold leading-none text-amber-950 shadow" title={`${n} ${type} counter${n === 1 ? "" : "s"}`}>
                 {n} {type}
