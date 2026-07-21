@@ -5,9 +5,9 @@
  * `gameAction` emit — no optimistic local mutation; rejected actions toast.
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
-import type { CardData, GameAction, GameCard, GameView, PlayerGameState, ZoneName } from "@mtg-cube/shared";
+import type { CardData, GameAction, GameCard, GameView, PlayerGameState, RoomState, ZoneName } from "@mtg-cube/shared";
 import { call } from "../socket";
-import { useApp } from "../store";
+import { useApp, type Session } from "../store";
 import { classifyRow, manaPipClasses, nameOf, randomSeed, type RowKind } from "../lib/cards";
 import { Card, CardBack } from "../components/Card";
 import { ContextMenu, type ContextMenuState, type MenuItem } from "../components/ContextMenu";
@@ -108,11 +108,19 @@ function readDragPayload(e: DragEvent): DragPayload | null {
 // Screen
 // ---------------------------------------------------------------------------
 
-export function Game(): JSX.Element {
+interface GameProps {
+  /** Supplies a local game state for visual UI work; game actions are disabled. */
+  demoView?: GameView;
+  demoRoom?: RoomState;
+  demoSession?: Session;
+}
+
+export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.Element {
   const { state, dispatch, pushToast } = useApp();
-  const view = state.game;
-  const room = state.room;
-  const session = state.session;
+  const view = demoView ?? state.game;
+  const room = demoRoom ?? state.room;
+  const session = demoSession ?? state.session;
+  const isDemo = demoView !== undefined;
 
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
   const [selectedHand, setSelectedHand] = useState<string | null>(null);
@@ -176,6 +184,10 @@ export function Game(): JSX.Element {
   const canBlockToggle = canAct && !isMyTurn && (gs.step === "declareBlockers" || gs.step === "combatDamage");
 
   const send = (action: GameAction): void => {
+    if (isDemo) {
+      pushToast("Demo table — interactions are disabled", "info");
+      return;
+    }
     if (!viewerIsPlayer) {
       pushToast("Spectators cannot act", "info");
       return;
@@ -511,7 +523,7 @@ export function Game(): JSX.Element {
   // -------------------------------------------------------------------------
 
   return (
-    <div className="mx-auto flex h-full max-w-[120rem] flex-col gap-2 overflow-hidden p-2 lg:p-3">
+    <div className="game-scene mx-auto flex h-full max-w-[120rem] flex-col gap-2 overflow-hidden p-2 lg:p-3">
       {/* Mode hints */}
       {(attachSource || blockSource) && (
         <div className="fixed left-1/2 top-2 z-[60] flex -translate-x-1/2 animate-fade-in items-center gap-2 rounded-full border border-brass-400/50 bg-felt-900 px-4 py-1.5 text-xs font-semibold text-brass-300 shadow-card-lg">

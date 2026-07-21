@@ -87,12 +87,11 @@ const TRAY_PREFS_KEY = "mtg-cube-picks-tray";
 
 interface TrayPrefs {
   h: number;
-  min: boolean;
   view: "cards" | "list";
   rail: boolean;
 }
 
-const DEFAULT_PREFS: TrayPrefs = { h: 232, min: false, view: "cards", rail: true };
+const DEFAULT_PREFS: TrayPrefs = { h: 232, view: "list", rail: true };
 
 function loadTrayPrefs(): TrayPrefs {
   try {
@@ -102,8 +101,7 @@ function loadTrayPrefs(): TrayPrefs {
     if (!p || typeof p !== "object") return DEFAULT_PREFS;
     return {
       h: typeof p.h === "number" && Number.isFinite(p.h) ? clampTrayH(p.h) : DEFAULT_PREFS.h,
-      min: p.min === true,
-      view: p.view === "list" ? "list" : "cards",
+      view: "list",
       rail: p.rail !== false,
     };
   } catch {
@@ -189,7 +187,12 @@ export function Draft(): JSX.Element {
   };
 
   const timerDanger = remaining !== null && remaining > 0 && remaining < 10_000;
-  const timerTotalMs = (state.room?.draftConfig.pickTimerSeconds ?? 0) * 1000;
+  const timerSetting = state.room?.draftConfig.pickTimerSeconds ?? null;
+  const cardsRemaining = draft.currentPack?.cards.length ?? 0;
+  const timerSeconds = timerSetting === "dynamic"
+    ? cardsRemaining >= 13 ? 45 : cardsRemaining >= 10 ? 35 : cardsRemaining >= 7 ? 30 : cardsRemaining >= 4 ? 20 : cardsRemaining > 0 ? 10 : 0
+    : (timerSetting ?? 0);
+  const timerTotalMs = timerSeconds * 1000;
   const timerPercent = remaining === null || timerTotalMs <= 0
     ? 0
     : Math.max(0, Math.min(100, (remaining / timerTotalMs) * 100));
@@ -205,12 +208,12 @@ export function Draft(): JSX.Element {
       {/* Header */}
       <header className="panel draft-header flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5">
         <div className="flex shrink-0 items-baseline gap-3">
-          <span className="text-lg font-black text-zinc-50">
-            Pack <span className="text-brass-300">{draft.packNumber}</span>
-            <span className="text-zinc-500">/{draft.packsPerPlayer}</span>
+          <span className="text-lg font-black text-orange-300 drop-shadow-[0_0_8px_rgba(251,146,60,0.45)]">
+            Pack <span className="text-orange-400">{draft.packNumber}</span>
+            <span className="text-orange-300/70">/{draft.packsPerPlayer}</span>
           </span>
-          <span className="text-sm font-semibold text-zinc-400">
-            Pick <span className="text-zinc-100">{Math.min(pickNumber, draft.cardsPerPack)}</span>
+          <span className="text-sm font-semibold text-orange-300 drop-shadow-[0_0_7px_rgba(251,146,60,0.32)]">
+            Pick <span className="text-orange-400">{Math.min(pickNumber, draft.cardsPerPack)}</span>
           </span>
         </div>
         {ranked && <span className="chip border-brass-400/60 font-black tracking-widest text-brass-300">RANKED</span>}
@@ -220,9 +223,9 @@ export function Draft(): JSX.Element {
         <div className="draft-pick-controls flex shrink-0 items-center gap-2.5">
           {remaining !== null && draft.currentPack && (
             <div className={`draft-timer-shell ${timerDanger ? "is-danger" : ""}`} title="Time left to pick">
-              <span className={`draft-timer-clock ${timerDanger ? "animate-pulse" : ""}`}>
-                {formatSeconds(remaining)}
-              </span>
+              <div className="draft-timer-readout">
+                <span className="draft-timer-clock">{formatSeconds(remaining)}</span>
+              </div>
               <div
                 className="draft-timer-track"
                 role="progressbar"
@@ -231,11 +234,11 @@ export function Draft(): JSX.Element {
                 aria-valuemax={timerTotalMs}
                 aria-valuenow={Math.max(0, remaining)}
               >
-              <div
-                className="draft-timer-fill"
-                style={{ width: `${timerPercent}%` }}
-              />
-                <div className="draft-timer-particles" style={{ left: `${timerPercent}%` }} aria-hidden="true" />
+                <div
+                  className="draft-timer-fill"
+                  style={{ width: `${timerPercent}%` }}
+                />
+                <div className="draft-timer-gem" style={{ left: `${timerPercent}%` }} aria-hidden="true" />
               </div>
             </div>
           )}
@@ -320,9 +323,7 @@ export function Draft(): JSX.Element {
           cards={cards}
           lanesApi={lanesApi}
           trayH={prefs.h}
-          minimized={prefs.min}
-          onResize={(h) => setPrefs((p) => ({ ...p, h, min: false }))}
-          onToggleMinimized={() => setPrefs((p) => ({ ...p, min: !p.min }))}
+          onResize={(h) => setPrefs((p) => ({ ...p, h }))}
           view={prefs.view}
           onView={(view) => setPrefs((p) => ({ ...p, view }))}
           onPackPick={(id, laneId) => void pickToLane(id, laneId)}

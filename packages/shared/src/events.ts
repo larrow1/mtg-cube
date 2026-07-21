@@ -39,7 +39,7 @@ export interface ClientToServerEvents {
 
   /** Host configures + starts the draft. Empty seats are filled with bots. */
   startDraft: (
-    args: { seatCount: number; packsPerPlayer: number; cardsPerPack: number; pickTimerSeconds: number | null },
+    args: { seatCount: number; packsPerPlayer: number; cardsPerPack: number; pickTimerSeconds: number | "dynamic" | null },
     ack: (r: Ack) => void
   ) => void;
   makePick: (args: { instanceId: string }, ack: (r: Ack) => void) => void;

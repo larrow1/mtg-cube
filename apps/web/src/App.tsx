@@ -6,9 +6,11 @@
  */
 import { useState } from "react";
 import { AccountMenu } from "./components/AccountMenu";
+import { AuthModal } from "./components/AuthModal";
 import { CardPreviewProvider } from "./components/Card";
 import { Modal } from "./components/Modal";
 import { ToastLayer } from "./components/Toast";
+import { useVisualTheme, VisualThemeProvider } from "./components/VisualThemeProvider";
 import { useApp } from "./store";
 import { AdminPortal } from "./screens/AdminPortal";
 import { Home } from "./screens/Home";
@@ -16,10 +18,16 @@ import { Lobby } from "./screens/Lobby";
 import { Draft } from "./screens/Draft";
 import { Deckbuild } from "./screens/Deckbuild";
 import { Game } from "./screens/Game";
+import { demoGameView, demoRoom, demoSession } from "./lib/demoGame";
 
 function Router(): JSX.Element {
   const { state } = useApp();
   const { session, joined, room, game } = state;
+
+  // A standalone, fully populated table for visual UI work — no room or draft needed.
+  if (new URLSearchParams(window.location.search).get("demo") === "game") {
+    return <Game demoView={demoGameView} demoRoom={demoRoom} demoSession={demoSession} />;
+  }
 
   if (!joined || !room || !session) return <Home />;
 
@@ -112,6 +120,10 @@ function TopBar(): JSX.Element {
   const { state, leaveRoom } = useApp();
   const [confirmOpen, setConfirmOpen] = useState(false);
   const joined = state.joined && state.room != null;
+  const demoGame = new URLSearchParams(window.location.search).get("demo") === "game";
+
+  if ((!joined && !demoGame) || (joined && state.room?.phase === "lobby")) return <></>;
+
   const room = state.room;
   const inActiveMatch =
     joined &&
@@ -173,18 +185,30 @@ function TopBar(): JSX.Element {
   );
 }
 
-export default function App(): JSX.Element {
+function AppShell(): JSX.Element {
+  const { state } = useApp();
+  const { theme } = useVisualTheme();
+
   return (
     <CardPreviewProvider>
-      <div className="flex h-full flex-col">
+      <div className="visual-theme-shell flex h-full flex-col" data-visual-theme={theme}>
         <ConnectionBanner />
         <TopBar />
         <div className="min-h-0 flex-1 overflow-y-auto">
           <Router />
         </div>
+        {state.authOpen && <AuthModal />}
         <AdminLayer />
         <ToastLayer />
       </div>
     </CardPreviewProvider>
+  );
+}
+
+export default function App(): JSX.Element {
+  return (
+    <VisualThemeProvider>
+      <AppShell />
+    </VisualThemeProvider>
   );
 }

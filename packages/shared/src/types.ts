@@ -189,8 +189,8 @@ export interface DraftConfig {
   seatCount: number;       // total seats incl. bots (2-8)
   packsPerPlayer: number;  // default 3
   cardsPerPack: number;    // default 15
-  /** Seconds per pick, null = no timer. */
-  pickTimerSeconds: number | null;
+  /** Seconds per pick, "dynamic" = shorter as packs empty, null = no timer. */
+  pickTimerSeconds: number | "dynamic" | null;
   seed: string;
 }
 

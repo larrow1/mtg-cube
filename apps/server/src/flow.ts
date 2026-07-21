@@ -144,10 +144,22 @@ export function advanceDraft(room: Room): void {
 }
 
 /** Start/stop per-seat auto-pick timers to match who currently has a pack. */
+export function pickTimerSecondsForCards(
+  setting: number | "dynamic" | null,
+  cardsRemaining: number
+): number | null {
+  if (setting !== "dynamic") return setting;
+  if (cardsRemaining >= 13) return 45;
+  if (cardsRemaining >= 10) return 35;
+  if (cardsRemaining >= 7) return 30;
+  if (cardsRemaining >= 4) return 20;
+  return cardsRemaining > 0 ? 10 : null;
+}
+
 export function reconcilePickTimers(io: AppServer, room: Room): void {
   const state = room.draftState;
-  const seconds = state?.config.pickTimerSeconds;
-  if (!state || state.complete || room.phase !== "drafting" || !seconds) {
+  const timerSetting = state?.config.pickTimerSeconds;
+  if (!state || state.complete || room.phase !== "drafting" || timerSetting == null) {
     room.clearAllPickTimers();
     return;
   }
@@ -158,6 +170,8 @@ export function reconcilePickTimers(io: AppServer, room: Room): void {
     }
     const waiting = seat.packQueue.length > 0;
     if (waiting && !room.hasPickTimer(seat.seatIndex)) {
+      const seconds = pickTimerSecondsForCards(timerSetting, seat.packQueue[0]?.cards.length ?? 0);
+      if (seconds === null) continue;
       const deadline = Date.now() + seconds * 1000;
       const handle = setTimeout(() => autoPick(io, room, seat.seatIndex), seconds * 1000);
       room.setPickTimer(seat.seatIndex, deadline, handle);
@@ -228,7 +242,7 @@ export function finishDraft(io: AppServer, room: Room): void {
 export function startDraftInRoom(
   io: AppServer,
   room: Room,
-  args: { seatCount: number; packsPerPlayer: number; cardsPerPack: number; pickTimerSeconds: number | null }
+  args: { seatCount: number; packsPerPlayer: number; cardsPerPack: number; pickTimerSeconds: number | "dynamic" | null }
 ): void {
   if (room.phase !== "lobby") throw new Error("The draft can only be started from the lobby");
   const cube = room.cube;

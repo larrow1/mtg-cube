@@ -645,7 +645,7 @@ export function Deckbuild(): JSX.Element {
   );
 
   return (
-    <div className="mx-auto flex h-full max-w-[110rem] animate-fade-in flex-col gap-2.5 p-3">
+    <div className="deckbuilder-scene mx-auto flex h-full max-w-[110rem] animate-fade-in flex-col gap-2.5 p-3">
       {myLiveMatch && (
         <div className="panel flex shrink-0 flex-wrap items-center justify-between gap-3 border-brass-400/40 px-4 py-2.5">
           <div className="flex items-center gap-2 text-sm text-zinc-200">
