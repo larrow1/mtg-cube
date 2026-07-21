@@ -305,8 +305,33 @@ export interface CardTrigger {
   castFilter?: "any" | "instantOrSorcery" | "noncreature" | "creature" | "artifact";
 }
 
+/** Which library cards are eligible for a pending search. */
+export type SearchFilter =
+  | { kind: "basicLand" }
+  | { kind: "landSubtype"; subtypes: string[] } // e.g. ["Plains","Island"] for Flooded Strand
+  | { kind: "any" };
+
+/** v4: activated abilities, currently scoped to fetch-style library searches. */
+export interface ActivatedSearchAbility {
+  costTap: boolean;
+  costSacrifice: boolean;
+  costLife: number;
+  description: string;
+  filter: SearchFilter;
+  destination: "battlefield" | "hand";
+  entersTapped: boolean;
+  shuffle: boolean;
+}
+
+/** Effects applied automatically when an instant/sorcery resolves off the stack. */
+export interface SpellResolutionScript {
+  effects: TriggerEffect[];
+}
+
 export interface CardScript {
   triggers: CardTrigger[];
+  activated?: ActivatedSearchAbility[];
+  onResolve?: SpellResolutionScript;
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +426,19 @@ export interface GameState {
   startingPlayerId: string;
   finished: boolean;
   winnerId: string | null;
+  /**
+   * A library search in progress (fetch land activation). While set, the
+   * searching player may only send completeSearch/concede; their own view
+   * reveals their library so the client can present eligible cards.
+   */
+  pendingSearch?: {
+    playerId: string;
+    filter: SearchFilter;
+    destination: "battlefield" | "hand";
+    entersTapped: boolean;
+    shuffle: boolean;
+    sourceName: string;
+  } | null;
   /** Monotonic sequence number: every applied action bumps it. */
   seq: number;
   /** Log of human-readable events for the game log panel. */
@@ -432,7 +470,19 @@ export interface GameView {
 // ---------------------------------------------------------------------------
 
 export type GameAction =
-  | { type: "drawCard"; count?: number }
+  /**
+   * v4: free draws are no longer allowed — draws come from the draw step,
+   * automated effects, or this action WITH `override: true` (a loudly-logged
+   * escape hatch for manually-resolved card text). Without override: rejected.
+   */
+  | { type: "drawCard"; count?: number; override?: boolean }
+  /** Activate an ability (v4: fetch-style searches). Pays costs, then either
+   *  finishes immediately or opens a pendingSearch. */
+  | { type: "activateAbility"; instanceId: string; abilityIndex: number }
+  /** Finish a pendingSearch: chosen library card's instanceId, or null to
+   *  fail to find. Only the searching player; library shuffles if the
+   *  ability says so. */
+  | { type: "completeSearch"; instanceId: string | null }
   | { type: "moveCard"; instanceId: string; from: ZoneName; to: ZoneName; toBottom?: boolean; faceDown?: boolean }
   | { type: "tapCard"; instanceId: string; tapped: boolean }
   /** Tap a mana source and add `color` to your pool in one validated action

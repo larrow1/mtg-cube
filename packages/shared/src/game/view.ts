@@ -9,6 +9,11 @@
  * target). The `cards` record is filtered down to card data the viewer may
  * see.
  *
+ * v4 exception: while `state.pendingSearch` belongs to the viewer, the
+ * viewer's OWN library is revealed (real cardIds, order preserved, card data
+ * included) so the search modal can render eligible cards. The opponent's
+ * view still hides that library — they only see the pendingSearch metadata.
+ *
  * A viewerId that matches neither player (a spectator) gets BOTH hands
  * hidden.
  *
@@ -44,9 +49,18 @@ export function buildGameView(
   const s = structuredClone(state);
   const visibleCardIds = new Set<string>();
 
+  // While the viewer is mid-search, their own library is revealed to them.
+  const revealLibraryOf =
+    s.pendingSearch && s.pendingSearch.playerId === viewerId ? viewerId : null;
+
   for (const p of s.players) {
-    // Both libraries are always hidden (counts + order only).
-    p.zones.library = p.zones.library.map(hiddenPlaceholder);
+    // Both libraries are hidden (counts + order only) — except the viewer's
+    // own library during their pending search.
+    if (p.playerId === revealLibraryOf) {
+      for (const c of p.zones.library) visibleCardIds.add(c.cardId);
+    } else {
+      p.zones.library = p.zones.library.map(hiddenPlaceholder);
+    }
 
     if (p.playerId === viewerId) {
       for (const c of p.zones.hand) visibleCardIds.add(c.cardId);

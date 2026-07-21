@@ -134,6 +134,56 @@ describe("buildGameView", () => {
     expect(state).toEqual(before);
   });
 
+  it("reveals the searcher's OWN library during their pendingSearch (v4)", () => {
+    const { state, cards } = setup();
+    state.pendingSearch = {
+      playerId: "p1",
+      filter: { kind: "basicLand" },
+      destination: "battlefield",
+      entersTapped: true,
+      shuffle: true,
+      sourceName: "Evolving Wilds",
+    };
+
+    // Searcher's view: own library revealed (real cardIds, order preserved)
+    // and its card data included.
+    const mine = buildGameView(state, "p1", cards);
+    const realLib = state.players.find((p) => p.playerId === "p1")!.zones.library;
+    const shownLib = viewPlayer(mine, "p1").zones.library;
+    expect(shownLib).toHaveLength(realLib.length);
+    shownLib.forEach((c, i) => {
+      expect(c.cardId).toBe(realLib[i]!.cardId);
+      expect(c.instanceId).toBe(realLib[i]!.instanceId);
+    });
+    for (const c of realLib) expect(mine.cards[c.cardId]).toBeDefined();
+    // The opponent's library stays hidden even in the searcher's view.
+    for (const c of viewPlayer(mine, "p2").zones.library) expect(c.cardId).toBe("hidden");
+    expect(mine.state.pendingSearch?.playerId).toBe("p1");
+
+    // Opponent's view: metadata passes through, but the searcher's library
+    // (and card data) stays hidden.
+    const theirs = buildGameView(state, "p2", cards);
+    expect(theirs.state.pendingSearch?.playerId).toBe("p1");
+    expect(theirs.state.pendingSearch?.sourceName).toBe("Evolving Wilds");
+    for (const c of viewPlayer(theirs, "p1").zones.library) expect(c.cardId).toBe("hidden");
+    for (const c of realLib) expect(theirs.cards[c.cardId]).toBeUndefined();
+
+    // Spectators see nothing extra either.
+    const spec = buildGameView(state, "spectator", cards);
+    for (const p of spec.state.players) {
+      for (const c of p.zones.library) expect(c.cardId).toBe("hidden");
+    }
+  });
+
+  it("hides libraries again once pendingSearch is cleared", () => {
+    const { state, cards } = setup();
+    state.pendingSearch = null;
+    const view = buildGameView(state, "p1", cards);
+    for (const p of view.state.players) {
+      for (const c of p.zones.library) expect(c.cardId).toBe("hidden");
+    }
+  });
+
   it("keeps stack and battlefield cards visible to both players", () => {
     const { state, cards } = setup();
     let s = state;

@@ -25,8 +25,29 @@
  *    UNSUPPORTED_TRIGGER_CARDS below so the omission is explicit.
  *  - Targeted effects are never automated (there is no targeting UI), so
  *    cards like Flametongue Kavu are curated as `manual`.
+ *
+ * v4 additions:
+ *  - `onResolve` (instants/sorceries only): every oracle line must parse into
+ *    a supported effect or the whole script omits onResolve — partial
+ *    automation of a spell is worse than none (all-or-nothing). Targeted
+ *    lines, library manipulation, and modal/compound text all fail parsing
+ *    naturally and stay manual.
+ *  - `activated` fetch searches: template regexes for the Evolving
+ *    Wilds/Terramorphic wording, the ten true fetches ("Pay 1 life,
+ *    Sacrifice ...: Search ... for a X or Y card"), Prismatic Vista, and
+ *    reveal-to-hand variants; cards the templates miss (Fabled Passage's
+ *    conditional untap rider) live in CARD_OVERRIDES.
  */
-import type { CardData, CardScript, CardTrigger, TriggerEffect, TriggerEvent } from "./types.js";
+import type {
+  ActivatedSearchAbility,
+  CardData,
+  CardScript,
+  CardTrigger,
+  SearchFilter,
+  SpellResolutionScript,
+  TriggerEffect,
+  TriggerEvent,
+} from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Small parsing helpers
@@ -225,6 +246,104 @@ function parseEffect(clause: string, self: string): TriggerEffect | null {
 }
 
 // ---------------------------------------------------------------------------
+// Spell resolution parsing (instants/sorceries, v4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse ONE oracle line of an instant/sorcery into automated resolution
+ * effects. Returns null when the line cannot be fully automated — the caller
+ * then omits `onResolve` entirely (all-or-nothing).
+ *
+ * Differences from trigger-effect parsing:
+ *  - Any line mentioning "target" is rejected outright (Lightning Bolt): a
+ *    resolving spell has no targeting UI, and the trigger template's
+ *    "any target -> opponent" shorthand is NOT safe for real targeted spells.
+ *  - "You draw N cards and you lose N life" is a dedicated compound template
+ *    because the pattern is a cube staple (Night's Whisper; Sign in Blood
+ *    says "Target player draws", so it correctly fails on the target rule).
+ *    It expands to two effects, matching how compound overrides are split.
+ *  - Keyword lines, modal text, library manipulation (Brainstorm, Ponder,
+ *    Stock Up), and anything else unparseable fail naturally.
+ */
+function parseSpellLine(line: string, self: string): TriggerEffect[] | null {
+  const text = line.trim().replace(/\.+$/, "");
+  if (!text) return null;
+
+  // Compound draw-and-lose (Night's Whisper: "You draw two cards and you
+  // lose 2 life.").
+  const compound = text.match(/^you draw (\w+) cards? and you lose (\w+) life$/i);
+  if (compound) {
+    const count = parseCount(compound[1]!);
+    const amount = parseCount(compound[2]!);
+    if (count === null || amount === null) return null;
+    return [
+      { kind: "draw", count },
+      { kind: "loseLife", amount },
+    ];
+  }
+
+  // Targeted text is never automated for spells.
+  if (/\btargets?\b/i.test(text)) return null;
+
+  const effect = parseEffect(text, self);
+  return effect === null ? null : [effect];
+}
+
+// ---------------------------------------------------------------------------
+// Activated fetch-search abilities (v4)
+// ---------------------------------------------------------------------------
+
+const BASIC_LAND_TYPES = "Plains|Island|Swamp|Mountain|Forest";
+
+/**
+ * Parse one oracle line as a fetch-style activated search ability. Covers:
+ *  - Evolving Wilds / Terramorphic Expanse:
+ *    "{T}, Sacrifice this land: Search your library for a basic land card,
+ *     put it onto the battlefield tapped, then shuffle."
+ *  - the ten true fetches (Flooded Strand, ...):
+ *    "{T}, Pay 1 life, Sacrifice this land: Search your library for a
+ *     Plains or Island card, put it onto the battlefield, then shuffle."
+ *  - Prismatic Vista (basic land + 1 life), and reveal-to-hand variants
+ *    ("..., reveal it, put it into your hand, then shuffle.").
+ * Older printings say "Sacrifice CARDNAME" — the self alternation covers both.
+ * Lines with extra riders (Fabled Passage) fail the anchors and belong in
+ * CARD_OVERRIDES.
+ */
+function parseActivatedSearch(line: string, self: string): ActivatedSearchAbility | null {
+  const m = line.match(
+    new RegExp(
+      `^(\\{T\\}, )?(?:Pay (\\d+) life, )?Sacrifice (?:${self}): ` +
+        `Search your library for a (basic land|(?:${BASIC_LAND_TYPES}) or (?:${BASIC_LAND_TYPES})) card, ` +
+        `(?:reveal it, )?put it (onto the battlefield( tapped)?|into your hand), then shuffle(?: your library)?\\.?$`,
+      "i"
+    )
+  );
+  if (!m) return null;
+
+  let filter: SearchFilter;
+  const what = m[3]!;
+  if (/^basic land$/i.test(what)) {
+    filter = { kind: "basicLand" };
+  } else {
+    const subtypes = what
+      .split(/\s+or\s+/i)
+      .map((w) => w[0]!.toUpperCase() + w.slice(1).toLowerCase());
+    filter = { kind: "landSubtype", subtypes };
+  }
+
+  return {
+    costTap: m[1] !== undefined,
+    costSacrifice: true,
+    costLife: m[2] !== undefined ? Number(m[2]) : 0,
+    description: line,
+    filter,
+    destination: /into your hand/i.test(m[4]!) ? "hand" : "battlefield",
+    entersTapped: m[5] !== undefined,
+    shuffle: true,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Trigger clause detection
 // ---------------------------------------------------------------------------
 
@@ -392,25 +511,56 @@ function parseLine(line: string, self: string): CardTrigger[] {
 /**
  * Infer a CardScript from oracle text. Front face only for multi-faced cards
  * (the back face is reached in play via flipCard and stays manual). Returns
- * null when no trigger clause is detected at all.
+ * null when nothing at all is detected (no triggers, no activated searches,
+ * no spell-resolution script).
  */
 export function inferScript(card: CardData): CardScript | null {
   const face = card.faces?.[0];
   const name = face?.name ?? card.name;
   const oracle = face ? face.oracleText ?? "" : card.oracleText ?? "";
+  const typeLine = face?.typeLine ?? card.typeLine;
   if (!oracle) return null;
 
   // Strip reminder text (parenthesized), then examine each line on its own.
   const stripped = oracle.replace(/\s*\([^)]*\)/g, "");
   const self = selfAlternation(name);
+  const lines = stripped
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
 
   const triggers: CardTrigger[] = [];
-  for (const raw of stripped.split("\n")) {
-    const line = raw.trim();
-    if (!line) continue;
+  const activated: ActivatedSearchAbility[] = [];
+  for (const line of lines) {
     triggers.push(...parseLine(line, self));
+    const search = parseActivatedSearch(line, self);
+    if (search) activated.push(search);
   }
-  return triggers.length > 0 ? { triggers } : null;
+
+  // onResolve: instants/sorceries only, and ALL-OR-NOTHING — one unparseable
+  // line means the whole spell resolves manually (partial automation of a
+  // spell is worse than none).
+  let onResolve: SpellResolutionScript | undefined;
+  if (/\b(?:Instant|Sorcery)\b/i.test(typeLine)) {
+    const effects: TriggerEffect[] = [];
+    let allParsed = lines.length > 0;
+    for (const line of lines) {
+      const parsed = parseSpellLine(line, self);
+      if (parsed === null) {
+        allParsed = false;
+        break;
+      }
+      effects.push(...parsed);
+    }
+    if (allParsed && effects.length > 0) onResolve = { effects };
+  }
+
+  if (triggers.length === 0 && activated.length === 0 && onResolve === undefined) return null;
+  return {
+    triggers,
+    ...(activated.length > 0 ? { activated } : {}),
+    ...(onResolve !== undefined ? { onResolve } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -959,6 +1109,26 @@ export const CARD_OVERRIDES: Record<string, CardScript> = {
         optional: false,
         description: "At the beginning of your end step, you draw a card and lose 1 life.",
         effect: { kind: "loseLife", amount: 1 },
+      },
+    ],
+  },
+  // v4 fetch search the template misses: the trailing "Then if you control
+  // four or more lands, untap that land." rider defeats the anchored regex.
+  // The fetched land enters tapped; with four or more lands, untap it by hand
+  // (the description keeps the full wording for the players).
+  "Fabled Passage": {
+    triggers: [],
+    activated: [
+      {
+        costTap: true,
+        costSacrifice: true,
+        costLife: 0,
+        description:
+          "{T}, Sacrifice this land: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle. Then if you control four or more lands, untap that land.",
+        filter: { kind: "basicLand" },
+        destination: "battlefield",
+        entersTapped: true,
+        shuffle: true,
       },
     ],
   },

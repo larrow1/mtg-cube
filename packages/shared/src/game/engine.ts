@@ -8,16 +8,32 @@
  * Card EFFECTS are manual (players move cards / tap / count) — the engine
  * enforces zone integrity, permissions, turn structure, and loss conditions.
  *
- * Stack semantics (the engine has no CardData, so it cannot inspect
- * typeLines):
- *  - `resolveTopOfStack` pops the top of the stack onto its CONTROLLER's
- *    battlefield (the permanent case), or — for trigger pseudo-cards —
- *    applies the trigger's effect mechanically.
+ * Stack semantics:
+ *  - `resolveTopOfStack` pops the top of the stack. Trigger pseudo-cards apply
+ *    their effect mechanically. With a `cards` context, a spell whose
+ *    front-face type line is Instant/Sorcery goes to its OWNER's graveyard and
+ *    applies its script's `onResolve` effects for its CONTROLLER (or logs a
+ *    resolve-by-hand reminder when there is no onResolve script). Everything
+ *    else (permanents, or any card without card data) lands on its
+ *    CONTROLLER's battlefield and fires ETB triggers.
  *  - `counterTopOfStack` pops the top of the stack into its OWNER's graveyard
  *    (triggers are simply removed).
- *  - Instants/sorceries that resolve and finish are handled by the client
- *    sending `moveCard {from:"stack", to:"graveyard"}` (or exile), which is
- *    fully supported.
+ *  - `moveCard {from:"stack", to:"graveyard"}` (or exile) stays fully
+ *    supported as the manual fallback for finishing a spell.
+ *
+ * v4 restrictions & fetch searches:
+ *  - `drawCard` requires `override:true` (loudly logged); the draw step and
+ *    scripted draw effects are engine-internal and unaffected.
+ *  - `activateAbility` pays a fetch ability's costs atomically (tap, life,
+ *    sacrifice — routed through the normal battlefield-departure machinery so
+ *    leaves/dies triggers fire) and opens `GameState.pendingSearch`. While a
+ *    search is pending its player may ONLY send completeSearch or concede;
+ *    the opponent plays on normally; restartGame/endMatch clear it.
+ *  - `completeSearch` validates the chosen card against the search filter via
+ *    the `cards` context type line (or takes null = fail to find), moves it to
+ *    the destination (entersTapped applies on battlefield), shuffles with a
+ *    seeded rng, clears pendingSearch, and fires ETB triggers for battlefield
+ *    arrivals.
  *
  * Triggered abilities (v3): when the server passes `scripts` in the
  * ActionContext, the engine pushes trigger pseudo-cards onto the stack
@@ -50,6 +66,8 @@ import type {
   GameCard,
   GameState,
   PlayerGameState,
+  SearchFilter,
+  TriggerEffect,
   TriggerEvent,
   TurnStep,
   ZoneName,
@@ -223,6 +241,18 @@ export function applyAction(
   if (state.finished && action.type !== "restartGame") {
     throw new EngineError("The game is finished; only restartGame is allowed");
   }
+  // A player mid-search is locked to finishing (or conceding); the opponent
+  // plays on normally. A finished game is exempt (only restartGame reaches
+  // here anyway, and it clears the search).
+  if (
+    !state.finished &&
+    state.pendingSearch &&
+    state.pendingSearch.playerId === actorId &&
+    action.type !== "completeSearch" &&
+    action.type !== "concede"
+  ) {
+    throw new EngineError("You are searching your library — choose a card (or fail to find) first");
+  }
 
   const s = structuredClone(state);
   const actor = s.players[actorIdx]!;
@@ -231,12 +261,119 @@ export function applyAction(
 
   switch (action.type) {
     case "drawCard": {
+      // v4: free draws are gated. Draws normally come from the draw step or
+      // scripted effects (both engine-internal, calling drawCards directly);
+      // the override is a loudly-logged escape hatch for manually-resolved
+      // card text.
+      if (!action.override) {
+        throw new EngineError(
+          "Draws come from the draw step or card effects. If a manually-resolved card instructs you to draw, use the Draw (manual override) option."
+        );
+      }
       const count = action.count ?? 1;
       if (!Number.isInteger(count) || count < 1) {
         throw new EngineError(`drawCard count must be a positive integer (got ${count})`);
       }
       const drawn = drawCards(actor, count);
-      logs.push(`drew ${drawn} card${drawn === 1 ? "" : "s"}`);
+      logs.push(`drew ${drawn} card${drawn === 1 ? "" : "s"} (manual override)`);
+      break;
+    }
+
+    case "activateAbility": {
+      if (s.pendingSearch) throw new EngineError("A library search is already in progress");
+      const card = findControlled(actor, action.instanceId, ["battlefield"]);
+      const ability = ctx.scripts?.[card.cardId]?.activated?.[action.abilityIndex];
+      if (!ability) {
+        throw new EngineError(`${cardLabel(card)} has no activated ability to use here`);
+      }
+      if (ability.costTap && card.tapped) {
+        throw new EngineError(`${cardLabel(card)} is already tapped`);
+      }
+      // Validation done — pay every cost atomically.
+      const sourceName = cardLabel(card);
+      const costParts: string[] = [];
+      if (ability.costTap) {
+        card.tapped = true;
+        costParts.push("tapping it");
+      }
+      if (ability.costLife > 0) {
+        actor.life -= ability.costLife;
+        costParts.push(`paying ${ability.costLife} life`);
+      }
+      if (ability.costSacrifice) costParts.push("sacrificing it");
+      logs.push(
+        `activated ${sourceName}${costParts.length > 0 ? ` (${costParts.join(", ")})` : ""}: ${ability.description}`
+      );
+      if (ability.costSacrifice) {
+        // Route through the normal battlefield-departure machinery so
+        // leaves/dies triggers fire exactly like any other death.
+        applyMoveCard(
+          s,
+          actor,
+          { type: "moveCard", instanceId: card.instanceId, from: "battlefield", to: "graveyard" },
+          logs
+        );
+      }
+      s.pendingSearch = {
+        playerId: actorId,
+        filter: ability.filter,
+        destination: ability.destination,
+        entersTapped: ability.entersTapped,
+        shuffle: ability.shuffle,
+        sourceName,
+      };
+      break;
+    }
+
+    case "completeSearch": {
+      const search = s.pendingSearch;
+      if (!search) throw new EngineError("No library search is in progress");
+      if (search.playerId !== actorId) {
+        throw new EngineError("Only the searching player may complete the search");
+      }
+      let fetched: GameCard | null = null;
+      if (action.instanceId !== null) {
+        const idx = actor.zones.library.findIndex((c) => c.instanceId === action.instanceId);
+        if (idx === -1) {
+          throw new EngineError(`Card ${action.instanceId} is not in your library`);
+        }
+        const card = actor.zones.library[idx]!;
+        if (!searchFilterMatches(search.filter, frontTypeLine(card))) {
+          throw new EngineError(
+            `${cardLabel(card)} does not match the search (${describeSearchFilter(search.filter)})`
+          );
+        }
+        actor.zones.library.splice(idx, 1);
+        fetched = card;
+      }
+      if (fetched) {
+        if (search.destination === "battlefield") {
+          fetched.controllerId = actor.playerId;
+          fetched.tapped = search.entersTapped;
+          fetched.sortIndex = actor.zones.battlefield.length;
+          actor.zones.battlefield.push(fetched);
+          logs.push(
+            `searched their library with ${search.sourceName} and put ${cardLabel(fetched)} onto the battlefield${
+              search.entersTapped ? " tapped" : ""
+            }`
+          );
+        } else {
+          actor.zones.hand.push(fetched);
+          logs.push(
+            `searched their library with ${search.sourceName} and put ${cardLabel(fetched)} into their hand`
+          );
+        }
+      } else {
+        logs.push(`searched their library with ${search.sourceName} and failed to find`);
+      }
+      if (search.shuffle) {
+        actor.zones.library = shuffle(actor.zones.library, createRng(`${s.id}:search:${s.seq + 1}`));
+        logs.push("shuffled their library");
+      }
+      s.pendingSearch = null;
+      if (fetched && search.destination === "battlefield") {
+        pushTriggers(s, fetched, actor.playerId, "etb", logs);
+      }
       break;
     }
 
@@ -508,6 +645,31 @@ export function applyAction(
         resolveTrigger(s, card, logs);
         break;
       }
+      // v4: with card data, instants/sorceries (front-face type line) resolve
+      // into their OWNER's graveyard and apply onResolve effects for their
+      // CONTROLLER. Real card copies never sit on the stack as tokens, but
+      // guard anyway: tokens have no CardData so frontTypeLine is undefined.
+      const typeLine = frontTypeLine(card);
+      if (!card.isToken && typeLine !== undefined && /\b(?:Instant|Sorcery)\b/i.test(typeLine)) {
+        const owner = s.players.find((p) => p.playerId === card.ownerId) ?? actor;
+        const controller = s.players.find((p) => p.playerId === card.controllerId) ?? owner;
+        const spellOpponent = s.players.find((p) => p.playerId !== controller.playerId)!;
+        resetCardState(card);
+        owner.zones.graveyard.push(card);
+        const effects = ctx.scripts?.[card.cardId]?.onResolve?.effects;
+        if (effects && effects.length > 0) {
+          // Same executor as triggers; effects that need a battlefield source
+          // (addCounters) fizzle-log since a spell has none.
+          for (const effect of effects) {
+            applyEffect(s, controller, spellOpponent, effect, cardLabel(card), undefined, logs);
+          }
+        } else {
+          logs.push(
+            `resolved ${cardLabel(card)} — carry out its effects by hand (it was put into the graveyard)`
+          );
+        }
+        break;
+      }
       const controller = s.players.find((p) => p.playerId === card.controllerId) ?? actor;
       card.sortIndex = controller.zones.battlefield.length;
       controller.zones.battlefield.push(card);
@@ -594,6 +756,7 @@ export function applyAction(
       // Friendly abandon: either player may end the game with no result.
       s.finished = true;
       s.winnerId = null;
+      s.pendingSearch = null;
       logs.push("ended the match (no result)");
       break;
     }
@@ -811,52 +974,69 @@ function resolveTrigger(s: GameState, trigger: GameCard, logs: string[]): void {
     kind: "manual" as const,
     note: trigger.triggerText ?? "unknown trigger",
   };
-  const label = cardLabel(trigger);
+  applyEffect(s, controller, opponent, effect, `${cardLabel(trigger)} trigger`, trigger.triggerSourceId, logs);
+}
+
+/**
+ * Mechanically apply one TriggerEffect for `controller` — shared by trigger
+ * resolution and instant/sorcery onResolve scripts. `sourceId` is the
+ * battlefield permanent counters land on; effects that need one (addCounters)
+ * fizzle-log when it is undefined or gone. `label` names the source in the
+ * log ("Wall of Omens trigger", "Night's Whisper").
+ */
+function applyEffect(
+  s: GameState,
+  controller: PlayerGameState,
+  opponent: PlayerGameState,
+  effect: TriggerEffect,
+  label: string,
+  sourceId: string | undefined,
+  logs: string[]
+): void {
   const who = playerLabel(controller.playerId);
 
   switch (effect.kind) {
     case "draw": {
       const drawn = drawCards(controller, effect.count);
-      logs.push(`resolved ${label} trigger: ${who} drew ${drawn} card${drawn === 1 ? "" : "s"}`);
+      logs.push(`resolved ${label}: ${who} drew ${drawn} card${drawn === 1 ? "" : "s"}`);
       break;
     }
     case "gainLife": {
       controller.life += effect.amount;
-      logs.push(`resolved ${label} trigger: ${who} gained ${effect.amount} life`);
+      logs.push(`resolved ${label}: ${who} gained ${effect.amount} life`);
       break;
     }
     case "loseLife": {
       controller.life -= effect.amount;
-      logs.push(`resolved ${label} trigger: ${who} lost ${effect.amount} life`);
+      logs.push(`resolved ${label}: ${who} lost ${effect.amount} life`);
       break;
     }
     case "eachOpponentLosesLife": {
       opponent.life -= effect.amount;
-      logs.push(
-        `resolved ${label} trigger: ${playerLabel(opponent.playerId)} lost ${effect.amount} life`
-      );
+      logs.push(`resolved ${label}: ${playerLabel(opponent.playerId)} lost ${effect.amount} life`);
       break;
     }
     case "damageOpponent": {
       opponent.life -= effect.amount;
       logs.push(
-        `resolved ${label} trigger: dealt ${effect.amount} damage to ${playerLabel(opponent.playerId)}`
+        `resolved ${label}: dealt ${effect.amount} damage to ${playerLabel(opponent.playerId)}`
       );
       break;
     }
     case "addCounters": {
       // Counters land on the SOURCE permanent — if it already left its
-      // controller's battlefield, the trigger fizzles (logged, no effect).
-      const source = trigger.triggerSourceId
-        ? controller.zones.battlefield.find((c) => c.instanceId === trigger.triggerSourceId)
+      // controller's battlefield (or never had one: a resolving spell),
+      // the effect fizzles (logged, no effect).
+      const source = sourceId
+        ? controller.zones.battlefield.find((c) => c.instanceId === sourceId)
         : undefined;
       if (!source) {
-        logs.push(`${label} trigger fizzled: its source is no longer on the battlefield`);
+        logs.push(`${label} fizzled: its source is no longer on the battlefield`);
         break;
       }
       source.counters[effect.counterType] = (source.counters[effect.counterType] ?? 0) + effect.count;
       logs.push(
-        `resolved ${label} trigger: put ${effect.count} ${effect.counterType} counter${
+        `resolved ${label}: put ${effect.count} ${effect.counterType} counter${
           effect.count === 1 ? "" : "s"
         } on ${cardLabel(source)}`
       );
@@ -875,18 +1055,18 @@ function resolveTrigger(s: GameState, trigger: GameCard, logs: string[]): void {
           tapped: false,
         },
         logs,
-        `resolved ${label} trigger: `
+        `resolved ${label}: `
       );
       break;
     }
     case "scry": {
       // Log-only, like the scry action: the client follows up with
       // scry/reorderLibraryTop to actually look and reorder.
-      logs.push(`resolved ${label} trigger: ${who} scries ${effect.count} (use scry to finish)`);
+      logs.push(`resolved ${label}: ${who} scries ${effect.count} (use scry to finish)`);
       break;
     }
     case "manual": {
-      logs.push(`resolved ${label} trigger — carry it out by hand: ${effect.note}`);
+      logs.push(`resolved ${label} — carry it out by hand: ${effect.note}`);
       break;
     }
   }
@@ -1000,7 +1180,7 @@ function applyMoveCard(
     // permanents (never on the spell itself), filtered by each trigger's
     // castFilter against the cast card's typeLine. They are pushed after the
     // spell, so they sit ABOVE it on the stack and resolve first.
-    const typeLine = castTypeLine(card);
+    const typeLine = frontTypeLine(card);
     const permanents = [...actor.zones.battlefield].sort((a, b) => a.sortIndex - b.sortIndex);
     for (const permanent of permanents) {
       pushTriggers(s, permanent, permanent.controllerId, "castSpell", logs, (t) =>
@@ -1010,11 +1190,36 @@ function applyMoveCard(
   }
 }
 
-/** Type line of a card being cast (front face for DFCs); undefined without card data. */
-function castTypeLine(card: GameCard): string | undefined {
+/** Front-face type line of a card (DFC-aware); undefined without card data. */
+function frontTypeLine(card: GameCard): string | undefined {
   const data = ctx.cards?.[card.cardId];
   if (!data) return undefined;
   return data.faces?.[0]?.typeLine ?? data.typeLine;
+}
+
+/** Does a library card's type line satisfy a pending search's filter? */
+function searchFilterMatches(filter: SearchFilter, typeLine: string | undefined): boolean {
+  if (filter.kind === "any") return true;
+  // Without card data the card's type is unknowable — reject rather than guess.
+  if (typeLine === undefined) return false;
+  if (filter.kind === "basicLand") {
+    return /\bBasic\b/i.test(typeLine) && /\bLand\b/i.test(typeLine);
+  }
+  return filter.subtypes.some((st) =>
+    new RegExp(`\\b${st.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(typeLine)
+  );
+}
+
+/** Human-readable filter description for error messages. */
+function describeSearchFilter(filter: SearchFilter): string {
+  switch (filter.kind) {
+    case "basicLand":
+      return "a basic land card";
+    case "landSubtype":
+      return `a ${filter.subtypes.join(" or ")} card`;
+    case "any":
+      return "any card";
+  }
 }
 
 /** Does a castSpell trigger's filter accept a spell with this type line? */
@@ -1170,6 +1375,7 @@ function restartGame(s: GameState, seed: string, logs: string[]): void {
   s.step = "untap";
   s.finished = false;
   s.winnerId = null;
+  s.pendingSearch = null;
   logs.push(`restarted the game; ${newStarter.playerId} is on the play`);
 }
 

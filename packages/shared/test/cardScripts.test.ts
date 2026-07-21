@@ -579,6 +579,243 @@ describe("inferScript — oracle-text templates (real card texts)", () => {
   });
 });
 
+describe("inferScript — onResolve spell scripts (v4, real card texts)", () => {
+  it("Night's Whisper: the compound draw-and-lose line expands to two effects", () => {
+    const script = inferScript(
+      card("Night's Whisper", "You draw two cards and you lose 2 life.", { typeLine: "Sorcery" })
+    );
+    expect(script).toEqual({
+      triggers: [],
+      onResolve: {
+        effects: [
+          { kind: "draw", count: 2 },
+          { kind: "loseLife", amount: 2 },
+        ],
+      },
+    });
+  });
+
+  it("Divination: a plain draw line", () => {
+    const script = inferScript(card("Divination", "Draw two cards.", { typeLine: "Sorcery" }));
+    expect(script?.onResolve).toEqual({ effects: [{ kind: "draw", count: 2 }] });
+    expect(script?.triggers).toEqual([]);
+  });
+
+  it("Revitalize: two standalone lines, both parsed", () => {
+    const script = inferScript(
+      card("Revitalize", "You gain 3 life.\nDraw a card.", { typeLine: "Instant" })
+    );
+    expect(script?.onResolve).toEqual({
+      effects: [
+        { kind: "gainLife", amount: 3 },
+        { kind: "draw", count: 1 },
+      ],
+    });
+  });
+
+  it("Lightning Bolt: targeted spells are never automated", () => {
+    // No triggers, no activated abilities, no onResolve -> null script.
+    expect(
+      inferScript(
+        card("Lightning Bolt", "Lightning Bolt deals 3 damage to any target.", { typeLine: "Instant" })
+      )
+    ).toBeNull();
+  });
+
+  it("Sign in Blood: 'Target player draws' fails on the target rule (unlike Night's Whisper)", () => {
+    expect(
+      inferScript(
+        card("Sign in Blood", "Target player draws two cards and loses 2 life.", { typeLine: "Sorcery" })
+      )
+    ).toBeNull();
+  });
+
+  it("library manipulation stays manual: Brainstorm, Ponder, Stock Up", () => {
+    expect(
+      inferScript(
+        card(
+          "Brainstorm",
+          "Draw three cards, then put two cards from your hand on top of your library in any order.",
+          { typeLine: "Instant" }
+        )
+      )
+    ).toBeNull();
+    // Ponder: all-or-nothing — the final "Draw a card." line parses, but the
+    // look-and-reorder line does not, so NO onResolve at all.
+    expect(
+      inferScript(
+        card(
+          "Ponder",
+          "Look at the top three cards of your library, then put them back in any order. You may shuffle your library.\nDraw a card.",
+          { typeLine: "Sorcery" }
+        )
+      )
+    ).toBeNull();
+    expect(
+      inferScript(
+        card(
+          "Stock Up",
+          "Look at the top five cards of your library. Put two of them into your hand and the rest into your graveyard.",
+          { typeLine: "Sorcery" }
+        )
+      )
+    ).toBeNull();
+  });
+
+  it("Wheel of Fortune: each-player effects stay manual", () => {
+    expect(
+      inferScript(
+        card("Wheel of Fortune", "Each player discards their hand, then draws seven cards.", {
+          typeLine: "Sorcery",
+        })
+      )
+    ).toBeNull();
+  });
+
+  it("keyword lines defeat the all-or-nothing rule: Treasure Cruise", () => {
+    expect(
+      inferScript(card("Treasure Cruise", "Delve (Each card you exile from your graveyard while casting this spell pays for {1}.)\nDraw three cards.", { typeLine: "Sorcery" }))
+    ).toBeNull();
+  });
+
+  it("non-spells never get onResolve", () => {
+    const wall = inferScript(
+      card("Wall of Omens", "Defender\nWhen Wall of Omens enters the battlefield, draw a card.")
+    );
+    expect(wall?.onResolve).toBeUndefined();
+    expect(wall?.triggers).toHaveLength(1);
+  });
+});
+
+describe("inferScript — activated fetch searches (v4, real card texts)", () => {
+  it("Evolving Wilds: basic land, enters tapped, no life cost", () => {
+    const script = inferScript(
+      card(
+        "Evolving Wilds",
+        "{T}, Sacrifice this land: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
+        { typeLine: "Land" }
+      )
+    );
+    expect(script).toEqual({
+      triggers: [],
+      activated: [
+        {
+          costTap: true,
+          costSacrifice: true,
+          costLife: 0,
+          description:
+            "{T}, Sacrifice this land: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
+          filter: { kind: "basicLand" },
+          destination: "battlefield",
+          entersTapped: true,
+          shuffle: true,
+        },
+      ],
+    });
+  });
+
+  it("all ten true fetches parse with the right subtype pairs (untapped, 1 life)", () => {
+    const fetches: Record<string, [string, string]> = {
+      "Flooded Strand": ["Plains", "Island"],
+      "Polluted Delta": ["Island", "Swamp"],
+      "Bloodstained Mire": ["Swamp", "Mountain"],
+      "Wooded Foothills": ["Mountain", "Forest"],
+      "Windswept Heath": ["Forest", "Plains"],
+      "Marsh Flats": ["Plains", "Swamp"],
+      "Scalding Tarn": ["Island", "Mountain"],
+      "Verdant Catacombs": ["Swamp", "Forest"],
+      "Arid Mesa": ["Mountain", "Plains"],
+      "Misty Rainforest": ["Forest", "Island"],
+    };
+    for (const [name, [a, b]] of Object.entries(fetches)) {
+      const script = inferScript(
+        card(
+          name,
+          `{T}, Pay 1 life, Sacrifice this land: Search your library for a ${a} or ${b} card, put it onto the battlefield, then shuffle.`,
+          { typeLine: "Land" }
+        )
+      );
+      expect(script?.activated, name).toEqual([
+        expect.objectContaining({
+          costTap: true,
+          costSacrifice: true,
+          costLife: 1,
+          filter: { kind: "landSubtype", subtypes: [a, b] },
+          destination: "battlefield",
+          entersTapped: false,
+          shuffle: true,
+        }),
+      ]);
+    }
+  });
+
+  it("Prismatic Vista: basic land for 1 life, untapped", () => {
+    const script = inferScript(
+      card(
+        "Prismatic Vista",
+        "{T}, Pay 1 life, Sacrifice this land: Search your library for a basic land card, put it onto the battlefield, then shuffle.",
+        { typeLine: "Land" }
+      )
+    );
+    expect(script?.activated).toEqual([
+      expect.objectContaining({
+        costLife: 1,
+        filter: { kind: "basicLand" },
+        entersTapped: false,
+      }),
+    ]);
+  });
+
+  it("older 'Sacrifice CARDNAME' printings parse via the self alternation", () => {
+    const script = inferScript(
+      card(
+        "Flooded Strand",
+        "{T}, Pay 1 life, Sacrifice Flooded Strand: Search your library for a Plains or Island card, put it onto the battlefield, then shuffle your library.",
+        { typeLine: "Land" }
+      )
+    );
+    expect(script?.activated?.[0]).toMatchObject({
+      filter: { kind: "landSubtype", subtypes: ["Plains", "Island"] },
+    });
+  });
+
+  it("reveal-to-hand variants parse with destination hand", () => {
+    // Synthetic-but-standard tutor-to-hand templating.
+    const script = inferScript(
+      card(
+        "Coastal Cache",
+        "{T}, Sacrifice this land: Search your library for a Plains or Island card, reveal it, put it into your hand, then shuffle.",
+        { typeLine: "Land" }
+      )
+    );
+    expect(script?.activated?.[0]).toMatchObject({
+      destination: "hand",
+      entersTapped: false,
+      filter: { kind: "landSubtype", subtypes: ["Plains", "Island"] },
+    });
+  });
+
+  it("Fabled Passage's untap rider defeats the template; the override covers it", () => {
+    const fabled = card(
+      "Fabled Passage",
+      "{T}, Sacrifice this land: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle. Then if you control four or more lands, untap that land.",
+      { typeLine: "Land" }
+    );
+    expect(inferScript(fabled)).toBeNull();
+    const script = scriptFor(fabled);
+    expect(script).toBe(CARD_OVERRIDES["Fabled Passage"]);
+    expect(script?.activated?.[0]).toMatchObject({
+      filter: { kind: "basicLand" },
+      entersTapped: true,
+      costLife: 0,
+    });
+  });
+
+  it("plain lands still yield null", () => {
+    expect(inferScript(card("Command Tower", "{T}: Add one mana of any color in your commander's color identity.", { typeLine: "Land" }))).toBeNull();
+  });
+});
+
 describe("scriptFor — override registry", () => {
   it("overrides win over inference (Flametongue Kavu stays manual)", () => {
     const ftk = card(

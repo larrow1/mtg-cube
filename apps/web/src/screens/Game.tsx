@@ -5,11 +5,24 @@
  * `gameAction` emit — no optimistic local mutation; rejected actions toast.
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
-import type { CardData, GameAction, GameCard, GameView, PlayerGameState, ZoneName } from "@mtg-cube/shared";
+import type {
+  ActivatedSearchAbility,
+  CardData,
+  CardScript,
+  GameAction,
+  GameCard,
+  GameState,
+  GameView,
+  PlayerGameState,
+  SearchFilter,
+  ZoneName,
+} from "@mtg-cube/shared";
+import { scriptFor } from "@mtg-cube/shared";
 import { call } from "../socket";
 import { useApp } from "../store";
-import { classifyRow, manaPipClasses, nameOf, randomSeed, type RowKind } from "../lib/cards";
+import { classifyRow, compareByCmcName, manaPipClasses, nameOf, randomSeed, type RowKind } from "../lib/cards";
 import { Card, CardBack } from "../components/Card";
+import { CardGrid } from "../components/CardGrid";
 import { ContextMenu, type ContextMenuState, type MenuItem } from "../components/ContextMenu";
 import { Modal } from "../components/Modal";
 import { LifeCounter } from "../components/LifeCounter";
@@ -105,6 +118,35 @@ function readDragPayload(e: DragEvent): DragPayload | null {
 }
 
 // ---------------------------------------------------------------------------
+// Card scripts (shared inference) — memoized per Scryfall card id so the
+// battlefield render loop doesn't re-parse oracle text on every render.
+// ---------------------------------------------------------------------------
+
+const scriptCache = new Map<string, CardScript | null>();
+
+function cachedScript(data: CardData | undefined): CardScript | null {
+  if (!data) return null;
+  let script = scriptCache.get(data.id);
+  if (script === undefined) {
+    script = scriptFor(data);
+    scriptCache.set(data.id, script);
+  }
+  return script;
+}
+
+/**
+ * Client-side mirror of the engine's pendingSearch eligibility check — for
+ * DISPLAY filtering only; the engine re-validates the chosen card.
+ */
+function matchesSearchFilter(data: CardData | undefined, filter: SearchFilter): boolean {
+  if (!data) return false;
+  const tl = data.typeLine;
+  if (filter.kind === "any") return true;
+  if (filter.kind === "basicLand") return tl.includes("Basic") && tl.includes("Land");
+  return filter.subtypes.some((s) => tl.includes(s));
+}
+
+// ---------------------------------------------------------------------------
 // Screen
 // ---------------------------------------------------------------------------
 
@@ -121,6 +163,7 @@ export function Game(): JSX.Element {
   const [scryCount, setScryCount] = useState<number | null>(null);
   const [concedeOpen, setConcedeOpen] = useState(false);
   const [endMatchOpen, setEndMatchOpen] = useState(false);
+  const [drawOverrideOpen, setDrawOverrideOpen] = useState(false);
   const [londonOpen, setLondonOpen] = useState(false);
   const [attachSource, setAttachSource] = useState<string | null>(null);
   const [blockSource, setBlockSource] = useState<string | null>(null);
@@ -175,6 +218,14 @@ export function Game(): JSX.Element {
   const canAttackToggle = canAct && isMyTurn && (gs.step === "declareAttackers" || gs.step === "beginCombat");
   const canBlockToggle = canAct && !isMyTurn && (gs.step === "declareBlockers" || gs.step === "combatDamage");
 
+  // v4 pendingSearch: mine opens the blocking search modal; anyone else's
+  // (opponent, or either player for spectators) shows the searching chip.
+  const pendingSearch = gs.pendingSearch ?? null;
+  const myPendingSearch =
+    pendingSearch && viewerIsPlayer && !gs.finished && pendingSearch.playerId === me.playerId
+      ? pendingSearch
+      : null;
+
   const send = (action: GameAction): void => {
     if (!viewerIsPlayer) {
       pushToast("Spectators cannot act", "info");
@@ -216,6 +267,27 @@ export function Game(): JSX.Element {
   const tapForMana = (gc: GameCard, color: string): void => {
     send({ type: "tapForMana", instanceId: gc.instanceId, color });
     setManaPicker(null);
+  };
+
+  /**
+   * v4 activated abilities (fetch-style searches) from the shared card
+   * scripts. Tokens have no CardData and face-down cards must not leak their
+   * identity — both report none.
+   */
+  const activatedOf = (gc: GameCard): ActivatedSearchAbility[] => {
+    if (gc.isToken || gc.faceDown) return [];
+    return cachedScript(cards[gc.cardId])?.activated ?? [];
+  };
+
+  const activationMenuItems = (gc: GameCard, abilities: ActivatedSearchAbility[], separator = false): MenuItem[] => {
+    const items: MenuItem[] = [{ label: "Activate", heading: true, separator }];
+    abilities.forEach((ability, abilityIndex) => {
+      items.push({
+        label: ability.description,
+        onClick: () => send({ type: "activateAbility", instanceId: gc.instanceId, abilityIndex }),
+      });
+    });
+    return items;
   };
 
   // -------------------------------------------------------------------------
@@ -281,6 +353,8 @@ export function Game(): JSX.Element {
         });
       }
     }
+    const abilities = activatedOf(gc);
+    if (abilities.length > 0) items.push(...activationMenuItems(gc, abilities, true));
     if (canAttackToggle) {
       items.push({
         label: gc.attacking ? "Remove from combat" : "Attack",
@@ -339,9 +413,10 @@ export function Game(): JSX.Element {
   const libraryMenu = (): MenuItem[] => {
     const top = me.zones.library[0];
     const items: MenuItem[] = [
-      { label: "Draw 1", onClick: () => send({ type: "drawCard", count: 1 }) },
-      { label: "Draw 7", onClick: () => send({ type: "drawCard", count: 7 }) },
       { label: "Shuffle", onClick: () => send({ type: "shuffleLibrary" }) },
+      // v4: free draws are engine-rejected; the only manual path is the
+      // confirmed override below (for manually-resolved card text).
+      { label: "Draw (manual override)…", onClick: () => setDrawOverrideOpen(true) },
     ];
     items.push({ label: "Scry", heading: true, separator: true });
     for (const n of [1, 2, 3, 5]) {
@@ -490,6 +565,14 @@ export function Game(): JSX.Element {
             onDragStart={(e) => setDragPayload(e, { instanceId: gc.instanceId, from: "battlefield" })}
             onClick={mine ? (e) => clickMyBattlefieldCard(gc, e) : () => clickOppBattlefieldCard(gc)}
             onContextMenu={mine && canAct ? (e) => openMenu(e, battlefieldMenu(gc)) : (e) => e.preventDefault()}
+            activateHint={
+              mine && canAct && activatedOf(gc).length > 0
+                ? {
+                    title: "Activate ability",
+                    onClick: (e) => openMenu(e, activationMenuItems(gc, activatedOf(gc))),
+                  }
+                : undefined
+            }
             // Landscape tile rotated 90° overhangs vertically (not horizontally
             // like the old portrait cards) — trade margin axes accordingly.
             className={gc.tapped ? "my-4 -mx-2" : ""}
@@ -577,6 +660,12 @@ export function Game(): JSX.Element {
               {ranked && (
                 <span className="chip self-center border-brass-400/60 font-black tracking-widest text-brass-300">
                   RANKED
+                </span>
+              )}
+              {pendingSearch && !myPendingSearch && (
+                <span className="chip animate-pop-in self-center border-sky-400/50 font-semibold text-sky-300">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-400" />
+                  {nameFor(pendingSearch.playerId)} is searching their library…
                 </span>
               )}
               <PhaseRibbon
@@ -722,7 +811,6 @@ export function Game(): JSX.Element {
                 count={me.zones.library.length}
                 faceDown
                 accent="emerald"
-                onClick={canAct ? () => send({ type: "drawCard", count: 1 }) : undefined}
                 onContextMenu={canAct ? (e) => openMenu(e, libraryMenu()) : undefined}
               />
             </div>
@@ -753,18 +841,16 @@ export function Game(): JSX.Element {
             </div>
           </div>
 
-          {/* Quick actions */}
+          {/* Quick actions (v4: no free Draw — draws come from the draw step
+              and card effects; the library menu keeps a confirmed override) */}
           <div className="grid grid-cols-2 gap-1.5">
-            <button type="button" className="btn-ghost !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => send({ type: "drawCard", count: 1 })}>
-              Draw
-            </button>
             <button type="button" className="btn-ghost !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => send({ type: "untapAll" })}>
               Untap all
             </button>
             <button type="button" className="btn-ghost !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => setTokenOpen(true)}>
               Create token
             </button>
-            <button type="button" className="btn-ghost !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => send({ type: "revealHand" })}>
+            <button type="button" className="btn-ghost col-span-2 !py-1.5 !text-[11px]" disabled={!canAct} onClick={() => send({ type: "revealHand" })}>
               Reveal hand
             </button>
           </div>
@@ -980,6 +1066,35 @@ export function Game(): JSX.Element {
             ending the game, use "Back to room" instead.
           </p>
         </Modal>
+      )}
+
+      {/* Draw override confirm */}
+      {drawOverrideOpen && (
+        <Modal
+          title="Draw (manual override)"
+          onClose={() => setDrawOverrideOpen(false)}
+          onConfirm={() => {
+            send({ type: "drawCard", count: 1, override: true });
+            setDrawOverrideOpen(false);
+          }}
+          confirmLabel="Draw 1"
+          width="sm"
+        >
+          <p className="text-sm text-zinc-300">
+            Draws normally come from the draw step and card effects. Use this only to execute
+            manually-resolved card text — it is logged as an override.
+          </p>
+        </Modal>
+      )}
+
+      {/* Library search (fetch activation) — blocks until completeSearch */}
+      {myPendingSearch && (
+        <SearchLibraryModal
+          pending={myPendingSearch}
+          library={me.zones.library}
+          cards={cards}
+          onComplete={(instanceId) => send({ type: "completeSearch", instanceId })}
+        />
       )}
 
       {/* Winner banner */}
@@ -1297,6 +1412,95 @@ function ScryModal({ count, library, cards, onCancel, onConfirm }: ScryModalProp
         {order.length === 0 && <div className="py-6 text-center text-sm text-zinc-500">Library is empty.</div>}
       </div>
     </Modal>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Library search modal (v4 fetch activation) — deliberately NOT the shared
+// Modal: it must block (no backdrop close, no Esc, no X) until the player
+// either picks an eligible card or fails to find. Driven purely by server
+// state: it disappears when the view's pendingSearch clears; a rejected ack
+// toasts and the modal stays.
+// ---------------------------------------------------------------------------
+
+interface SearchLibraryModalProps {
+  pending: NonNullable<GameState["pendingSearch"]>;
+  library: GameCard[];
+  cards: Record<string, CardData>;
+  onComplete: (instanceId: string | null) => void;
+}
+
+function SearchLibraryModal({ pending, library, cards, onComplete }: SearchLibraryModalProps): JSX.Element {
+  const [selected, setSelected] = useState<string | null>(null);
+
+  // The view reveals our library during the search; show ONLY eligible cards,
+  // sorted for browsing (never in library order — no free peeks at the top).
+  const eligible = library
+    .filter((gc) => gc.cardId !== "hidden" && matchesSearchFilter(cards[gc.cardId], pending.filter))
+    .sort((a, b) => compareByCmcName(cards[a.cardId], cards[b.cardId]));
+
+  const destLabel =
+    pending.destination === "hand"
+      ? "put it into your hand"
+      : pending.entersTapped
+        ? "put it onto the battlefield tapped"
+        : "put it onto the battlefield";
+  const confirmLabel =
+    pending.destination === "hand"
+      ? "Put into hand"
+      : pending.entersTapped
+        ? "Put onto battlefield tapped"
+        : "Put onto battlefield";
+
+  return (
+    // z-[65]: above the board and mode hints (z-60), below the hover-preview
+    // layer (z-70) so card previews still work inside the search grid.
+    <div className="fixed inset-0 z-[65] flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+      <div className="panel flex max-h-[88vh] w-full max-w-3xl animate-pop-in flex-col overflow-hidden border-brass-400/30">
+        <div className="border-b border-amber-100/[0.08] px-4 py-3">
+          <h2 className="text-sm font-bold uppercase tracking-wider text-zinc-200">
+            Search your library — {pending.sourceName}
+          </h2>
+          <p className="mt-0.5 text-[11px] text-zinc-400">Choose an eligible card to {destLabel}, or fail to find.</p>
+        </div>
+        <div className="scrollbar-slim flex-1 overflow-y-auto p-4">
+          {eligible.length === 0 ? (
+            <div className="py-10 text-center text-sm text-zinc-500">No eligible cards in your library.</div>
+          ) : (
+            <CardGrid min={100}>
+              {eligible.map((gc) => (
+                <Card
+                  key={gc.instanceId}
+                  gameCard={gc}
+                  data={cards[gc.cardId]}
+                  size="sm"
+                  selected={selected === gc.instanceId}
+                  onClick={() => setSelected((cur) => (cur === gc.instanceId ? null : gc.instanceId))}
+                />
+              ))}
+            </CardGrid>
+          )}
+          {pending.shuffle && (
+            <p className="mt-3 text-center text-[11px] text-zinc-500">Your library will be shuffled.</p>
+          )}
+        </div>
+        <div className="flex items-center justify-end gap-2 border-t border-amber-100/[0.08] px-4 py-3">
+          <button type="button" className="btn-ghost" onClick={() => onComplete(null)}>
+            Fail to find
+          </button>
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={selected === null}
+            onClick={() => {
+              if (selected !== null) onComplete(selected);
+            }}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

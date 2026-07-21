@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import type { CardData, CardScript, GameCard, GameState, TriggerEffect, TriggerEvent } from "../src/types.js";
+import type {
+  ActivatedSearchAbility,
+  CardData,
+  CardScript,
+  GameCard,
+  GameState,
+  TriggerEffect,
+  TriggerEvent,
+} from "../src/types.js";
 import { EngineError, applyAction, createGame } from "../src/game/engine.js";
 
 function mkCard(owner: string, i: number): GameCard {
@@ -105,7 +113,7 @@ describe("applyAction basics", () => {
   it("bumps seq and appends a log entry, without mutating the input", () => {
     const g = newGame();
     const before = structuredClone(g);
-    const next = applyAction(g, "p1", { type: "drawCard" }, 777);
+    const next = applyAction(g, "p1", { type: "drawCard", override: true }, 777);
     expect(g).toEqual(before);
     expect(next.seq).toBe(1);
     const entry = next.log[next.log.length - 1]!;
@@ -116,34 +124,54 @@ describe("applyAction basics", () => {
   });
 
   it("rejects unknown actors", () => {
-    expect(() => applyAction(newGame(), "nobody", { type: "drawCard" })).toThrow(EngineError);
+    expect(() => applyAction(newGame(), "nobody", { type: "drawCard", override: true })).toThrow(EngineError);
   });
 });
 
 describe("drawCard", () => {
-  it("moves the top of the library to hand", () => {
+  it("is rejected without override (v4 draw restriction)", () => {
+    expect(() => applyAction(newGame(), "p1", { type: "drawCard" })).toThrow(
+      /Draws come from the draw step or card effects/
+    );
+    expect(() => applyAction(newGame(), "p1", { type: "drawCard", count: 2 })).toThrow(EngineError);
+    expect(() => applyAction(newGame(), "p1", { type: "drawCard", override: false })).toThrow(EngineError);
+  });
+
+  it("with override moves the top of the library to hand and logs the override loudly", () => {
     const g = newGame();
     const top = player(g, "p1").zones.library[0]!.instanceId;
-    const next = applyAction(g, "p1", { type: "drawCard", count: 2 });
+    const next = applyAction(g, "p1", { type: "drawCard", count: 2, override: true });
     const p = player(next, "p1");
     expect(p.zones.hand).toHaveLength(9);
     expect(p.zones.library).toHaveLength(31);
     expect(p.zones.hand[7]!.instanceId).toBe(top);
+    expect(lastLog(next)).toBe("drew 2 cards (manual override)");
   });
 
   it("rejects non-positive counts", () => {
-    expect(() => applyAction(newGame(), "p1", { type: "drawCard", count: 0 })).toThrow(EngineError);
-    expect(() => applyAction(newGame(), "p1", { type: "drawCard", count: -3 })).toThrow(EngineError);
+    expect(() => applyAction(newGame(), "p1", { type: "drawCard", count: 0, override: true })).toThrow(EngineError);
+    expect(() => applyAction(newGame(), "p1", { type: "drawCard", count: -3, override: true })).toThrow(EngineError);
   });
 
   it("drawing from an empty library loses the game", () => {
     const g = newGame();
-    const next = applyAction(g, "p1", { type: "drawCard", count: 999 });
+    const next = applyAction(g, "p1", { type: "drawCard", count: 999, override: true });
     const p = player(next, "p1");
     expect(p.hasLost).toBe(true);
     expect(p.lossReason).toMatch(/empty library/);
     expect(next.finished).toBe(true);
     expect(next.winnerId).toBe("p2");
+  });
+
+  it("the draw-step auto-draw is unaffected by the gate", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    const inactive = other(g, active);
+    let s = applyAction(g, active, { type: "nextTurn" });
+    s = applyAction(s, inactive, { type: "nextStep" }); // upkeep
+    s = applyAction(s, inactive, { type: "nextStep" }); // draw
+    expect(player(s, inactive).zones.hand).toHaveLength(8);
+    expect(lastLog(s)).not.toMatch(/override/);
   });
 });
 
@@ -1121,6 +1149,339 @@ describe("tapForMana", () => {
     expect(() => applyAction(s, "p2", { type: "tapForMana", instanceId: id, color: "G" }, 0, ctx)).toThrow(
       EngineError
     );
+  });
+});
+
+describe("spell resolution scripts (v4)", () => {
+  /** Put p1's first hand card on the stack with the given typeLine + script. */
+  function castSpell(typeLine: string, script?: CardScript) {
+    const g = newGame();
+    const spell = handCard(g, "p1");
+    const spellCardId = player(g, "p1").zones.hand[0]!.cardId;
+    const ctx = {
+      cards: { [spellCardId]: { ...mkCardData(spellCardId), typeLine } },
+      ...(script ? { scripts: { [spellCardId]: script } } : {}),
+    };
+    const s = applyAction(g, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "stack" }, 0, ctx);
+    return { s, ctx, spell };
+  }
+
+  it("a sorcery with onResolve goes to the owner's graveyard and applies effects for the controller", () => {
+    // Night's Whisper-style script: draw 2, lose 2.
+    const { s, ctx, spell } = castSpell("Sorcery", {
+      triggers: [],
+      onResolve: { effects: [{ kind: "draw", count: 2 }, { kind: "loseLife", amount: 2 }] },
+    });
+    const handBefore = player(s, "p1").zones.hand.length;
+    // Either player may click resolve; effects apply to the CONTROLLER (p1).
+    const next = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(next.stack).toHaveLength(0);
+    expect(player(next, "p1").zones.graveyard.map((c) => c.instanceId)).toEqual([spell]);
+    expect(player(next, "p1").zones.battlefield).toHaveLength(0);
+    expect(player(next, "p1").zones.hand).toHaveLength(handBefore + 2);
+    expect(player(next, "p1").life).toBe(18);
+    expect(player(next, "p2").life).toBe(20);
+    expect(next.log.map((e) => e.message).join("\n")).toMatch(/drew 2 cards/);
+  });
+
+  it("an instant WITHOUT onResolve goes to the graveyard with a resolve-by-hand log (targeted spells stay manual)", () => {
+    const { s, ctx, spell } = castSpell("Instant");
+    const next = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(player(next, "p1").zones.graveyard.map((c) => c.instanceId)).toEqual([spell]);
+    expect(player(next, "p1").zones.battlefield).toHaveLength(0);
+    expect(lastLog(next)).toMatch(/carry out its effects by hand/);
+  });
+
+  it("permanents keep the battlefield + ETB path even with a cards context", () => {
+    const { s, ctx, spell } = castSpell("Creature — Bear", {
+      triggers: [{ event: "etb", optional: false, description: "etb", effect: { kind: "gainLife", amount: 1 } }],
+    });
+    const next = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(player(next, "p1").zones.battlefield.map((c) => c.instanceId)).toEqual([spell]);
+    expect(next.stack).toHaveLength(1);
+    expect(next.stack[0]!.isTrigger).toBe(true);
+  });
+
+  it("onResolve addCounters fizzle-logs (a spell has no battlefield source)", () => {
+    const { s, ctx, spell } = castSpell("Sorcery", {
+      triggers: [],
+      onResolve: { effects: [{ kind: "addCounters", counterType: "+1/+1", count: 1 }] },
+    });
+    const next = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(player(next, "p1").zones.graveyard.map((c) => c.instanceId)).toEqual([spell]);
+    expect(lastLog(next)).toMatch(/fizzled/);
+  });
+
+  it("onResolve uses the FRONT-face type line for DFC spells", () => {
+    const g = newGame();
+    const spell = handCard(g, "p1");
+    const spellCardId = player(g, "p1").zones.hand[0]!.cardId;
+    const ctx = {
+      cards: {
+        [spellCardId]: {
+          ...mkCardData(spellCardId),
+          typeLine: "Sorcery // Land",
+          faces: [
+            { name: "Front", typeLine: "Sorcery" },
+            { name: "Back", typeLine: "Land" },
+          ],
+        },
+      },
+      scripts: { [spellCardId]: { triggers: [], onResolve: { effects: [{ kind: "gainLife", amount: 3 }] } } as CardScript },
+    };
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "stack" }, 0, ctx);
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(player(s, "p1").zones.graveyard.map((c) => c.instanceId)).toEqual([spell]);
+    expect(player(s, "p1").life).toBe(23);
+  });
+
+  it("without a cards context the legacy battlefield path applies", () => {
+    const g = newGame();
+    const spell = handCard(g, "p1");
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "stack" });
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" });
+    expect(player(s, "p1").zones.battlefield.map((c) => c.instanceId)).toEqual([spell]);
+  });
+});
+
+describe("activated fetch searches (v4)", () => {
+  function fetchAbility(overrides: Partial<ActivatedSearchAbility> = {}): ActivatedSearchAbility {
+    return {
+      costTap: true,
+      costSacrifice: true,
+      costLife: 1,
+      description: "Search your library for a Plains or Island card, put it onto the battlefield, then shuffle.",
+      filter: { kind: "landSubtype", subtypes: ["Plains", "Island"] },
+      destination: "battlefield",
+      entersTapped: false,
+      shuffle: true,
+      ...overrides,
+    };
+  }
+
+  /**
+   * p1's first hand card becomes a fetch land on the battlefield. Two of
+   * p1's library cards get card data: one matching Plains, one Instant.
+   */
+  function fetchSetup(
+    ability = fetchAbility(),
+    extraScripts: Record<string, CardScript> = {}
+  ) {
+    const g = newGame();
+    const fetchId = handCard(g, "p1");
+    const fetchCardId = player(g, "p1").zones.hand[0]!.cardId;
+    const lib = player(g, "p1").zones.library;
+    const plains = lib[5]!;
+    const bolt = lib[6]!;
+    const cards: Record<string, CardData> = {
+      [fetchCardId]: { ...mkCardData(fetchCardId), typeLine: "Land" },
+      [plains.cardId]: { ...mkCardData(plains.cardId), typeLine: "Basic Land — Plains" },
+      [bolt.cardId]: { ...mkCardData(bolt.cardId), typeLine: "Instant" },
+    };
+    const scripts: Record<string, CardScript> = {
+      [fetchCardId]: { triggers: [], activated: [ability] },
+      ...extraScripts,
+    };
+    const ctx = { cards, scripts };
+    const s = applyAction(g, "p1", { type: "moveCard", instanceId: fetchId, from: "hand", to: "battlefield" }, 0, ctx);
+    return { s, ctx, fetchId, fetchCardId, plains, bolt };
+  }
+
+  function activate(setup: ReturnType<typeof fetchSetup>) {
+    return applyAction(setup.s, "p1", { type: "activateAbility", instanceId: setup.fetchId, abilityIndex: 0 }, 0, setup.ctx);
+  }
+
+  it("activateAbility pays every cost atomically and opens pendingSearch", () => {
+    const setup = fetchSetup();
+    const s = activate(setup);
+    const p1 = player(s, "p1");
+    expect(p1.life).toBe(19); // paid 1 life
+    expect(p1.zones.battlefield).toHaveLength(0); // sacrificed
+    expect(p1.zones.graveyard.map((c) => c.instanceId)).toEqual([setup.fetchId]);
+    expect(s.pendingSearch).toMatchObject({
+      playerId: "p1",
+      filter: { kind: "landSubtype", subtypes: ["Plains", "Island"] },
+      destination: "battlefield",
+      entersTapped: false,
+      shuffle: true,
+    });
+    expect(s.log.map((e) => e.message).join("\n")).toMatch(/activated .*paying 1 life/);
+  });
+
+  it("the sacrifice routes through the normal departure machinery (dies triggers fire)", () => {
+    const setup = fetchSetup();
+    // Give the fetch land itself a dies trigger.
+    setup.ctx.scripts[setup.fetchCardId] = {
+      triggers: [{ event: "dies", optional: false, description: "dies", effect: { kind: "loseLife", amount: 1 } }],
+      activated: [fetchAbility()],
+    };
+    const s = activate(setup);
+    expect(s.stack).toHaveLength(1);
+    expect(s.stack[0]!.isTrigger).toBe(true);
+    expect(s.stack[0]!.triggerText).toBe("dies");
+  });
+
+  it("validates the ability, tap state, ownership, and single pending search", () => {
+    const setup = fetchSetup();
+    // No such ability index.
+    expect(() =>
+      applyAction(setup.s, "p1", { type: "activateAbility", instanceId: setup.fetchId, abilityIndex: 3 }, 0, setup.ctx)
+    ).toThrow(/no activated ability/);
+    // No scripts context at all.
+    expect(() =>
+      applyAction(setup.s, "p1", { type: "activateAbility", instanceId: setup.fetchId, abilityIndex: 0 })
+    ).toThrow(/no activated ability/);
+    // Not on your battlefield (opponent's attempt).
+    expect(() =>
+      applyAction(setup.s, "p2", { type: "activateAbility", instanceId: setup.fetchId, abilityIndex: 0 }, 0, setup.ctx)
+    ).toThrow(EngineError);
+    // Tapped source rejected when the ability costs {T}.
+    const tapped = applyAction(setup.s, "p1", { type: "tapCard", instanceId: setup.fetchId, tapped: true }, 0, setup.ctx);
+    expect(() =>
+      applyAction(tapped, "p1", { type: "activateAbility", instanceId: setup.fetchId, abilityIndex: 0 }, 0, setup.ctx)
+    ).toThrow(/already tapped/);
+    // Only one search at a time (even by the opponent).
+    const searching = activate(setup);
+    const theirLand = handCard(searching, "p2");
+    const theirCardId = player(searching, "p2").zones.hand[0]!.cardId;
+    const ctx2 = {
+      ...setup.ctx,
+      scripts: { ...setup.ctx.scripts, [theirCardId]: { triggers: [], activated: [fetchAbility()] } },
+    };
+    const s2 = applyAction(searching, "p2", { type: "moveCard", instanceId: theirLand, from: "hand", to: "battlefield" }, 0, ctx2);
+    expect(() =>
+      applyAction(s2, "p2", { type: "activateAbility", instanceId: theirLand, abilityIndex: 0 }, 0, ctx2)
+    ).toThrow(/already in progress/);
+  });
+
+  it("locks the searcher to completeSearch/concede while the opponent plays on", () => {
+    const setup = fetchSetup();
+    const s = activate(setup);
+    expect(() => applyAction(s, "p1", { type: "drawCard", override: true }, 0, setup.ctx)).toThrow(/searching your library/);
+    expect(() => applyAction(s, "p1", { type: "nextStep" }, 0, setup.ctx)).toThrow(/searching your library/);
+    expect(() => applyAction(s, "p1", { type: "restartGame", seed: "x" }, 0, setup.ctx)).toThrow(/searching your library/);
+    const theirCard = handCard(s, "p2");
+    // The opponent is unaffected.
+    const opp = applyAction(s, "p2", { type: "moveCard", instanceId: theirCard, from: "hand", to: "battlefield" }, 0, setup.ctx);
+    expect(player(opp, "p2").zones.battlefield).toHaveLength(1);
+    // Conceding mid-search is allowed.
+    const conceded = applyAction(s, "p1", { type: "concede" }, 0, setup.ctx);
+    expect(conceded.finished).toBe(true);
+    expect(conceded.winnerId).toBe("p2");
+  });
+
+  it("completeSearch puts a matching card onto the battlefield, shuffles, clears the search", () => {
+    const setup = fetchSetup();
+    const s = activate(setup);
+    const before = player(s, "p1").zones.library.map((c) => c.instanceId);
+    const next = applyAction(s, "p1", { type: "completeSearch", instanceId: setup.plains.instanceId }, 0, setup.ctx);
+    const p1 = player(next, "p1");
+    expect(p1.zones.battlefield.map((c) => c.instanceId)).toEqual([setup.plains.instanceId]);
+    expect(p1.zones.battlefield[0]!.tapped).toBe(false); // entersTapped: false
+    expect(next.pendingSearch).toBeNull();
+    // Shuffled: same cards minus the fetched one, different order.
+    const after = p1.zones.library.map((c) => c.instanceId);
+    expect(after.slice().sort()).toEqual(before.filter((id) => id !== setup.plains.instanceId).sort());
+    expect(after).not.toEqual(before.filter((id) => id !== setup.plains.instanceId));
+    expect(next.log.map((e) => e.message).join("\n")).toMatch(/shuffled their library/);
+  });
+
+  it("completeSearch is deterministic (seeded shuffle)", () => {
+    const setup = fetchSetup();
+    const s = activate(setup);
+    const a = applyAction(s, "p1", { type: "completeSearch", instanceId: setup.plains.instanceId }, 0, setup.ctx);
+    const b = applyAction(s, "p1", { type: "completeSearch", instanceId: setup.plains.instanceId }, 0, setup.ctx);
+    expect(a).toEqual(b);
+  });
+
+  it("entersTapped applies to fetched battlefield arrivals", () => {
+    const setup = fetchSetup(fetchAbility({ entersTapped: true, filter: { kind: "basicLand" }, costLife: 0 }));
+    const s = activate(setup);
+    expect(player(s, "p1").life).toBe(20); // no life cost
+    const next = applyAction(s, "p1", { type: "completeSearch", instanceId: setup.plains.instanceId }, 0, setup.ctx);
+    expect(player(next, "p1").zones.battlefield[0]!.tapped).toBe(true);
+    expect(next.log.map((e) => e.message).join("\n")).toMatch(/onto the battlefield tapped/);
+  });
+
+  it("hand-destination searches put the card into the hand (no ETB)", () => {
+    const setup = fetchSetup(fetchAbility({ destination: "hand" }), {});
+    const s = activate(setup);
+    const handBefore = player(s, "p1").zones.hand.length;
+    const next = applyAction(s, "p1", { type: "completeSearch", instanceId: setup.plains.instanceId }, 0, setup.ctx);
+    expect(player(next, "p1").zones.hand).toHaveLength(handBefore + 1);
+    expect(player(next, "p1").zones.battlefield).toHaveLength(0);
+    expect(next.stack).toHaveLength(0);
+  });
+
+  it("rejects wrong-filter picks, cards not in the library, and non-searchers", () => {
+    const setup = fetchSetup();
+    const s = activate(setup);
+    // The Instant does not match Plains-or-Island.
+    expect(() =>
+      applyAction(s, "p1", { type: "completeSearch", instanceId: setup.bolt.instanceId }, 0, setup.ctx)
+    ).toThrow(/does not match the search/);
+    // A library card with NO card data cannot be validated -> rejected.
+    const unknown = player(s, "p1").zones.library.find(
+      (c) => c.instanceId !== setup.plains.instanceId && c.instanceId !== setup.bolt.instanceId
+    )!;
+    expect(() =>
+      applyAction(s, "p1", { type: "completeSearch", instanceId: unknown.instanceId }, 0, setup.ctx)
+    ).toThrow(/does not match the search/);
+    // Not in the library at all.
+    expect(() => applyAction(s, "p1", { type: "completeSearch", instanceId: "ghost" }, 0, setup.ctx)).toThrow(
+      /not in your library/
+    );
+    // Only the searching player may complete.
+    expect(() => applyAction(s, "p2", { type: "completeSearch", instanceId: null }, 0, setup.ctx)).toThrow(
+      /searching player/
+    );
+    // No search in progress at all.
+    expect(() => applyAction(setup.s, "p1", { type: "completeSearch", instanceId: null }, 0, setup.ctx)).toThrow(
+      /No library search/
+    );
+  });
+
+  it("completeSearch null = fail to find (logged, still shuffles, clears)", () => {
+    const setup = fetchSetup();
+    const s = activate(setup);
+    const before = player(s, "p1").zones.library.map((c) => c.instanceId);
+    const next = applyAction(s, "p1", { type: "completeSearch", instanceId: null }, 0, setup.ctx);
+    expect(next.pendingSearch).toBeNull();
+    const after = player(next, "p1").zones.library.map((c) => c.instanceId);
+    expect(after.slice().sort()).toEqual(before.slice().sort());
+    expect(after).not.toEqual(before);
+    expect(next.log.map((e) => e.message).join("\n")).toMatch(/failed to find/);
+  });
+
+  it("ETB triggers fire for a fetched land with a script", () => {
+    const setup = fetchSetup();
+    setup.ctx.scripts[setup.plains.cardId] = {
+      triggers: [{ event: "etb", optional: false, description: "land etb", effect: { kind: "gainLife", amount: 1 } }],
+    };
+    const s = activate(setup);
+    const next = applyAction(s, "p1", { type: "completeSearch", instanceId: setup.plains.instanceId }, 0, setup.ctx);
+    expect(next.stack).toHaveLength(1);
+    expect(next.stack[0]!.isTrigger).toBe(true);
+    expect(next.stack[0]!.triggerText).toBe("land etb");
+  });
+
+  it("restartGame and endMatch clear pendingSearch (opponent-initiated)", () => {
+    const setup = fetchSetup();
+    const s = activate(setup);
+    const restarted = applyAction(s, "p2", { type: "restartGame", seed: "again" }, 0, setup.ctx);
+    expect(restarted.pendingSearch).toBeNull();
+    const ended = applyAction(s, "p2", { type: "endMatch" }, 0, setup.ctx);
+    expect(ended.pendingSearch).toBeNull();
+    expect(ended.finished).toBe(true);
+  });
+
+  it("a searcher who conceded can still restart the finished game", () => {
+    const setup = fetchSetup();
+    const s = activate(setup);
+    const conceded = applyAction(s, "p1", { type: "concede" }, 0, setup.ctx);
+    const restarted = applyAction(conceded, "p1", { type: "restartGame", seed: "rematch" }, 0, setup.ctx);
+    expect(restarted.finished).toBe(false);
+    expect(restarted.pendingSearch).toBeNull();
   });
 });
 

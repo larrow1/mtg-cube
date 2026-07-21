@@ -334,6 +334,12 @@ export interface CardProps {
   onClick?: (e: ReactMouseEvent<HTMLDivElement>) => void;
   onDoubleClick?: (e: ReactMouseEvent<HTMLDivElement>) => void;
   onContextMenu?: (e: ReactMouseEvent<HTMLDivElement>) => void;
+  /**
+   * Gold spark chip in the top-right corner hinting an activatable ability
+   * (v4 fetch searches). Clicking it is deliberate: propagation stops so the
+   * plain click (tap / tap-for-mana) never fires.
+   */
+  activateHint?: { title: string; onClick: (e: ReactMouseEvent<HTMLElement>) => void };
   draggable?: boolean;
   onDragStart?: (e: DragEvent<HTMLDivElement>) => void;
   className?: string;
@@ -356,6 +362,7 @@ export function Card(props: CardProps): JSX.Element {
     onClick,
     onDoubleClick,
     onContextMenu,
+    activateHint,
     draggable,
     onDragStart,
     className = "",
@@ -538,6 +545,21 @@ export function Card(props: CardProps): JSX.Element {
           <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-red-700 px-1 text-[10px] font-bold text-white shadow-card" title={`${damage} damage marked`}>
             {damage}
           </span>
+        )}
+        {/* Shares the corner with the damage badge; damage (rare on these
+            permanents) wins so the two never overlap. */}
+        {activateHint && !showBack && damage === 0 && (
+          <button
+            type="button"
+            title={activateHint.title}
+            onClick={(e) => {
+              e.stopPropagation();
+              activateHint.onClick(e);
+            }}
+            className="absolute -right-1.5 -top-1.5 z-10 flex h-5 w-5 items-center justify-center rounded-full border border-amber-200/70 bg-gradient-to-b from-amber-300 to-amber-500 text-amber-950 shadow-[0_0_8px_rgba(251,191,36,0.65)] transition-transform duration-150 hover:scale-110 active:scale-95"
+          >
+            <svg viewBox="0 0 24 24" className="h-3 w-3 fill-current"><path d="M13 2 4.5 13.5H10L8.5 22 17.5 10H12L13 2Z" /></svg>
+          </button>
         )}
         {counters.length > 0 && (
           <div className={`absolute bottom-1 left-1 flex flex-wrap gap-0.5 ${artTile ? "right-8" : "right-1"}`}>
