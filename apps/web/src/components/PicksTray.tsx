@@ -141,7 +141,7 @@ function LaneColumn({
     <div
       className={`group flex h-full shrink-0 flex-col rounded-lg px-1 pt-0.5 transition-colors duration-100 ${
         sideboard
-          ? `border border-dashed ${isOver ? "border-amber-300/80 bg-amber-400/10" : "border-amber-400/40 bg-amber-400/[0.04]"}`
+          ? `border border-dashed ${isOver ? "border-amber-300/80 bg-amber-400/10" : "border-amber-400/40"}`
           : isOver
             ? "bg-brass-400/10 ring-1 ring-brass-400/50"
             : ""
@@ -260,9 +260,10 @@ export function PicksTray(props: PicksTrayProps): JSX.Element {
     window.addEventListener("mouseup", onUp);
   };
 
-  // Card width scales with the lane area height (taller tray = bigger cards).
+  // Cards view should visually fill its tray. Size from nearly the full lane
+  // height while retaining a little room for the lane header and scrolling.
   const laneH = Math.max(40, trayH - 64);
-  const cardW = Math.max(66, Math.min(240, Math.round(((laneH * 0.85) * 5) / 7)));
+  const cardW = Math.max(78, Math.min(280, Math.round(((laneH * 0.97) * 5) / 7)));
 
   const sideboardLane: Lane = { id: SIDEBOARD_LANE_ID, name: "Sideboard" };
   const sideCount = lanesApi.grouped.get(SIDEBOARD_LANE_ID)?.length ?? 0;
@@ -280,7 +281,7 @@ export function PicksTray(props: PicksTrayProps): JSX.Element {
 
   if (minimized) {
     return (
-      <footer className="panel shrink-0 animate-fade-in">
+      <footer className="panel draft-tray shrink-0 animate-fade-in">
         {handle}
         <div className="scrollbar-slim flex items-center gap-2 overflow-x-auto px-3 pb-2">
           <span className="shrink-0 text-[10px] font-bold uppercase tracking-wider text-zinc-400">Your picks</span>
@@ -312,7 +313,7 @@ export function PicksTray(props: PicksTrayProps): JSX.Element {
   }
 
   return (
-    <footer className="panel flex shrink-0 flex-col overflow-hidden" style={{ height: trayH }}>
+    <footer className="panel draft-tray flex shrink-0 flex-col overflow-hidden" style={{ height: trayH }}>
       {handle}
       <div className="flex shrink-0 items-center gap-2 px-3 pb-1">
         <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Your picks</span>

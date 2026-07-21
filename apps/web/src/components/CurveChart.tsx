@@ -20,7 +20,7 @@ export function CurveChart({ counts }: CurveChartProps): JSX.Element {
         <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Mana curve</span>
         <span className="text-[10px] font-semibold tabular-nums text-zinc-500">{total} spells</span>
       </div>
-      <div className="flex h-28 items-end gap-1 rounded-lg bg-felt-950/70 px-2 pb-1.5 pt-2 shadow-[inset_0_1px_5px_rgba(8,6,30,0.65),inset_0_-1px_0_rgba(255,221,150,0.05)]">
+      <div className="curve-chart-well flex h-28 items-end gap-1 rounded-lg bg-felt-950/70 px-2 pb-1.5 pt-2 shadow-[inset_0_1px_5px_rgba(8,6,30,0.65),inset_0_-1px_0_rgba(255,221,150,0.05)]">
         {CMC_BUCKET_LABELS.map((label, i) => {
           const n = counts[i] ?? 0;
           const pct = (n / max) * 100;

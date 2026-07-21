@@ -22,11 +22,11 @@ import {
   activeFace,
   colorBucket,
   frameClasses,
-  manaPipClasses,
   nameOf,
   parseManaCost,
   powerToughnessOf,
 } from "../lib/cards";
+import { ManaSymbol } from "./ManaSymbol";
 
 export type CardSize = "xs" | "sm" | "md" | "lg";
 
@@ -150,12 +150,7 @@ function ManaCost({ cost }: { cost: string | undefined }): JSX.Element | null {
   return (
     <span className="flex flex-wrap items-center gap-[2px]">
       {symbols.map((s, i) => (
-        <span
-          key={`${s}-${i}`}
-          className={`flex h-4 w-4 items-center justify-center rounded-full text-[10px] font-bold leading-none shadow-[0_1px_2px_rgba(8,6,30,0.5)] ${manaPipClasses(s)}`}
-        >
-          {s}
-        </span>
+        <ManaSymbol key={`${s}-${i}`} symbol={s} className="h-4 w-4" />
       ))}
     </span>
   );
@@ -222,7 +217,7 @@ export interface CardProps {
   back?: boolean;
   size?: CardSize;
   selected?: boolean;
-  highlight?: "attack" | "block" | null;
+  highlight?: "attack" | "block" | "autopick" | null;
   dimmed?: boolean;
   /** Name of the permanent this card is attached to (renders a chip). */
   attachedName?: string;
@@ -295,7 +290,9 @@ export function Card(props: CardProps): JSX.Element {
       ? "shadow-glow-red"
       : highlight === "block"
         ? "shadow-glow-blue"
-        : "shadow-card hover:shadow-glow-soft";
+        : highlight === "autopick"
+          ? "autopick-highlight"
+          : "shadow-card hover:shadow-glow-soft";
 
   const counters = gameCard ? Object.entries(gameCard.counters).filter(([, n]) => n !== 0) : [];
   const damage = gameCard?.damage ?? 0;
@@ -375,6 +372,11 @@ export function Card(props: CardProps): JSX.Element {
         className={`relative aspect-[5/7] w-full rounded-[6%] transition-all duration-150 ${ring} ${tapped ? "rotate-90" : ""} ${dimmed ? "opacity-50" : ""} ${onClick || onDoubleClick ? "hover:-translate-y-1 hover:scale-[1.03]" : ""}`}
       >
         {body}
+        {highlight === "autopick" && (
+          <span className="absolute -right-1.5 -top-2 z-20 rounded-full border border-red-200/70 bg-gradient-to-b from-red-500 to-red-800 px-2 py-0.5 text-[8px] font-black uppercase tracking-wider text-white shadow-[0_0_12px_rgba(248,113,113,0.65)]">
+            Auto pick
+          </span>
+        )}
         {isFaceDown && !isHidden && (
           <span className="absolute left-1 top-1 rounded bg-black/70 px-1 py-0.5 text-[8px] font-bold uppercase tracking-wide text-zinc-300">
             Face down
