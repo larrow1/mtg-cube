@@ -613,13 +613,18 @@ describe("inferScript — onResolve spell scripts (v4, real card texts)", () => 
     });
   });
 
-  it("Lightning Bolt: targeted spells are never automated", () => {
-    // No triggers, no activated abilities, no onResolve -> null script.
-    expect(
-      inferScript(
-        card("Lightning Bolt", "Lightning Bolt deals 3 damage to any target.", { typeLine: "Instant" })
-      )
-    ).toBeNull();
+  it("Lightning Bolt: 'any target' damage IS automated as a targeted effect (v7)", () => {
+    const script = inferScript(
+      card("Lightning Bolt", "Lightning Bolt deals 3 damage to any target.", { typeLine: "Instant" })
+    );
+    expect(script?.onResolve).toEqual({ effects: [{ kind: "damageAnyTarget", amount: 3 }] });
+  });
+
+  it("Counterspell: 'counter target spell' IS automated (v7)", () => {
+    const script = inferScript(
+      card("Counterspell", "Counter target spell.", { typeLine: "Instant" })
+    );
+    expect(script?.onResolve).toEqual({ effects: [{ kind: "counterTarget" }] });
   });
 
   it("Sign in Blood: 'Target player draws' fails on the target rule (unlike Night's Whisper)", () => {

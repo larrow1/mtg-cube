@@ -80,7 +80,12 @@ v6: main phases and whole turns pass too when no action exists at all); v6
 targeting v1 (damageAnyTarget trigger effect, controller picks the target at
 resolution, client target-picker banner), opponentDraws observer event
 (Bowmasters-style, draw-step first draw exempt), amass (CR 701.47a) and seq
-composite effects — Orcish Bowmasters fully automated; 240 shared tests;
+composite effects — Orcish Bowmasters fully automated; v7 stack-first
+casting (nonland hand->battlefield redirects through the stack for a real
+response window), spell-effect stack entries (instant/sorcery resolution
+pushes its effect as an entry, card to graveyard), counterTarget + stack
+TargetRef (Counterspell and Lightning Bolt fully scripted via inference);
+245 shared tests;
 Arena-style UI (draft lanes/drag-to-pick, deck builder, battlefield art
 tiles with color frames + keyword chips, mana symbols).
 

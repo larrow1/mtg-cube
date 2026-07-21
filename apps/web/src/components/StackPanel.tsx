@@ -26,9 +26,13 @@ interface StackPanelProps {
    *  resolved by their controller only, who picks the target). */
   resolveDisabled?: boolean;
   resolveTitle?: string;
+  /** v7: while picking a spell target (counterspells), these stack entries
+   *  are clickable and highlighted. */
+  targetableIds?: ReadonlySet<string>;
+  onPickTarget?: (instanceId: string) => void;
 }
 
-export function StackPanel({ stack, cards, nameFor, viewerId, onResolve, onCounter, onDecline, disabled, resolveDisabled, resolveTitle }: StackPanelProps): JSX.Element {
+export function StackPanel({ stack, cards, nameFor, viewerId, onResolve, onCounter, onDecline, disabled, resolveDisabled, resolveTitle, targetableIds, onPickTarget }: StackPanelProps): JSX.Element {
   const reversed = [...stack].reverse(); // render top of stack first
 
   // Trigger entries not present in the previous view pop in with an amber
@@ -124,8 +128,20 @@ export function StackPanel({ stack, cards, nameFor, viewerId, onResolve, onCount
                   </div>
                 );
               }
+              const targetable = targetableIds?.has(gc.instanceId) === true && onPickTarget !== undefined;
               return (
-                <div key={gc.instanceId} className={`flex items-center gap-2 rounded-lg p-1 ${isTop ? "bg-amber-400/10 ring-1 ring-brass-400/40" : "bg-white/[0.04]"}`}>
+                <div
+                  key={gc.instanceId}
+                  className={`flex items-center gap-2 rounded-lg p-1 ${
+                    targetable
+                      ? "cursor-pointer bg-red-500/10 ring-1 ring-red-400/70 shadow-[0_0_10px_rgba(248,113,113,0.3)] hover:bg-red-500/20"
+                      : isTop
+                        ? "bg-amber-400/10 ring-1 ring-brass-400/40"
+                        : "bg-white/[0.04]"
+                  }`}
+                  onClick={targetable ? () => onPickTarget(gc.instanceId) : undefined}
+                  title={targetable ? "Choose this spell as the target" : undefined}
+                >
                   <Card gameCard={gc} data={cards[gc.cardId]} size="xs" />
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-[11px] font-semibold text-zinc-100">{nameOf(gc, cards[gc.cardId])}</div>

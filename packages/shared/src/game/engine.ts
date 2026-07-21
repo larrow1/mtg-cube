@@ -667,10 +667,23 @@ export function applyAction(
               `The trigger from ${cardLabel(card)} needs a target — choose a creature, player, or other permanent`
             );
           }
+          const allowedKinds = effectTargetKinds(card.triggerEffect);
+          if (!allowedKinds.includes(target.kind)) {
+            throw new EngineError(
+              `That effect targets ${allowedKinds.join("/")} — a ${target.kind} is not a legal target`
+            );
+          }
           if (target.kind === "player") {
             const pid = target.playerId;
             if (!s.players.some((p) => p.playerId === pid)) {
               throw new EngineError(`Unknown target player "${pid}"`);
+            }
+          } else if (target.kind === "stack") {
+            const targetId = target.instanceId;
+            const spell = s.stack.find((c) => c.instanceId === targetId);
+            if (!spell) throw new EngineError(`Target ${targetId} is not on the stack`);
+            if (spell.isTrigger) {
+              throw new EngineError("Only spells can be targeted on the stack (abilities use the Counter button)");
             }
           } else if (!findOnAnyBattlefield(s, target.instanceId)) {
             throw new EngineError(`Target ${target.instanceId} is not on the battlefield`);
@@ -686,17 +699,42 @@ export function applyAction(
       const typeLine = frontTypeLine(card);
       if (!card.isToken && typeLine !== undefined && /\b(?:Instant|Sorcery)\b/i.test(typeLine)) {
         const owner = s.players.find((p) => p.playerId === card.ownerId) ?? actor;
-        const controller = s.players.find((p) => p.playerId === card.controllerId) ?? owner;
-        const spellOpponent = s.players.find((p) => p.playerId !== controller.playerId)!;
+        const spellName = cardLabel(card);
+        const spellController = card.controllerId;
         resetCardState(card);
         owner.zones.graveyard.push(card);
         const effects = ctx.scripts?.[card.cardId]?.onResolve?.effects;
         if (effects && effects.length > 0) {
-          // Same executor as triggers; effects that need a battlefield source
-          // (addCounters) fizzle-log since a spell has none.
-          for (const effect of effects) {
-            applyEffect(s, controller, spellOpponent, effect, cardLabel(card), undefined, logs);
-          }
+          // v7: the spell's EFFECT becomes its own stack entry (house model —
+          // the card is already in the graveyard); resolving the entry applies
+          // the effects through the trigger executor, target picker included.
+          const effect: TriggerEffect =
+            effects.length === 1 ? effects[0]! : { kind: "seq", effects };
+          const entry: GameCard = {
+            instanceId: `se${s.seq + 1}-${triggerCounter++}`,
+            cardId: card.cardId,
+            ownerId: spellController,
+            controllerId: spellController,
+            tapped: false,
+            faceDown: false,
+            faceIndex: 0,
+            counters: {},
+            attachedTo: null,
+            isToken: false,
+            damage: 0,
+            attacking: false,
+            blocking: null,
+            sortIndex: 0,
+            isTrigger: true,
+            triggerText: ctx.cards?.[card.cardId]?.oracleText ?? `Effect of ${spellName}`,
+            triggerEffect: effect,
+            triggerOptional: false,
+            triggerSourceId: card.instanceId,
+          };
+          s.stack.push(entry);
+          logs.push(
+            `resolved ${spellName} — its effect went on the stack (the card is in the graveyard)`
+          );
         } else {
           logs.push(
             `resolved ${cardLabel(card)} — carry out its effects by hand (it was put into the graveyard)`
@@ -866,7 +904,7 @@ export function applyAction(
 
 function cardLabel(card: GameCard): string {
   if (card.isToken && card.tokenName) return `${card.tokenName} token`;
-  const name = ctx.cardNames?.[card.cardId];
+  const name = ctx.cardNames?.[card.cardId] ?? ctx.cards?.[card.cardId]?.name;
   return name ?? `a card (${card.instanceId})`;
 }
 
@@ -1040,9 +1078,24 @@ function pushTriggers(
 /** Does an effect (recursing seq) require a TargetRef to resolve? */
 export function effectNeedsTarget(effect: TriggerEffect | undefined): boolean {
   if (!effect) return false;
-  if (effect.kind === "damageAnyTarget") return true;
+  if (effect.kind === "damageAnyTarget" || effect.kind === "counterTarget") return true;
   if (effect.kind === "seq") return effect.effects.some((e) => effectNeedsTarget(e));
   return false;
+}
+
+/** Which TargetRef kinds satisfy this effect (recursing seq)? */
+export function effectTargetKinds(effect: TriggerEffect | undefined): TargetRef["kind"][] {
+  if (!effect) return [];
+  if (effect.kind === "damageAnyTarget") return ["player", "permanent"];
+  if (effect.kind === "counterTarget") return ["stack"];
+  if (effect.kind === "seq") {
+    const kinds = new Set<TargetRef["kind"]>();
+    for (const sub of effect.effects) {
+      for (const k of effectTargetKinds(sub)) kinds.add(k);
+    }
+    return [...kinds];
+  }
+  return [];
 }
 
 /**
@@ -1219,6 +1272,28 @@ function applyEffect(
       }
       break;
     }
+    case "counterTarget": {
+      if (!target || target.kind !== "stack") {
+        logs.push(`${label} fizzled: no spell was targeted`);
+        break;
+      }
+      const idx = s.stack.findIndex((c) => c.instanceId === target.instanceId);
+      const spell = idx === -1 ? undefined : s.stack[idx]!;
+      if (!spell || spell.isTrigger) {
+        logs.push(`${label} fizzled: its target is no longer a spell on the stack`);
+        break;
+      }
+      s.stack.splice(idx, 1);
+      if (spell.isToken) {
+        logs.push(`resolved ${label}: countered ${cardLabel(spell)} (token ceased to exist)`);
+      } else {
+        const spellOwner = s.players.find((p) => p.playerId === spell.ownerId) ?? controller;
+        resetCardState(spell);
+        spellOwner.zones.graveyard.push(spell);
+        logs.push(`resolved ${label}: countered ${cardLabel(spell)}`);
+      }
+      break;
+    }
     case "seq": {
       for (const sub of effect.effects) {
         applyEffect(s, controller, opponent, sub, label, sourceId, logs, target);
@@ -1262,9 +1337,22 @@ function applyMoveCard(
   action: Extract<GameAction, { type: "moveCard" }>,
   logs: string[]
 ): void {
-  const { instanceId, from, to } = action;
+  const { instanceId, from } = action;
+  let to = action.to;
   if (!ZONE_NAMES.includes(from)) throw new EngineError(`Unknown zone "${from}"`);
   if (!ZONE_NAMES.includes(to)) throw new EngineError(`Unknown zone "${to}"`);
+
+  // v7: nonland cards are CAST — a face-up hand->battlefield play is
+  // redirected through the stack so opponents get a response window before
+  // ETB ever fires. Lands, morphs, and data-less cards keep the direct path.
+  if (from === "hand" && to === "battlefield" && action.faceDown !== true) {
+    const played = actor.zones.hand.find((c) => c.instanceId === instanceId);
+    const typeLine = played ? frontTypeLine(played) : undefined;
+    if (played && typeLine !== undefined && !/\bLand\b/i.test(typeLine)) {
+      to = "stack";
+      logs.push(`(nonland cards are cast — ${cardLabel(played)} goes to the stack first)`);
+    }
+  }
   if (from === to && from === "battlefield") {
     // In-place face-down/face-up toggle (morph-style); no zone change, no state reset.
     const zone = actor.zones.battlefield;

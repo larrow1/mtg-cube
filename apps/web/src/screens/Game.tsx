@@ -19,7 +19,7 @@ import type {
   TargetRef,
   ZoneName,
 } from "@mtg-cube/shared";
-import { canPayFor, effectNeedsTarget, hasInstantSpeed, scriptFor } from "@mtg-cube/shared";
+import { canPayFor, effectNeedsTarget, effectTargetKinds, hasInstantSpeed, scriptFor } from "@mtg-cube/shared";
 import { call } from "../socket";
 import { useApp } from "../store";
 import { classifyRow, compareByCmcName, nameOf, randomSeed, type RowKind } from "../lib/cards";
@@ -466,11 +466,12 @@ export function Game(): JSX.Element {
     if (items.length > 0) setMenu({ x: e.clientX, y: e.clientY, items });
   };
 
-  // v6: targeted-trigger resolution — the controller picks a target (battle-
-  // field card click or a player button in the banner) then resolves.
+  // v6/v7: targeted resolution — the controller picks a target (battlefield
+  // card, a player button, or a highlighted stack spell) then resolves.
   const topOfStack = gs.stack[gs.stack.length - 1];
   const topNeedsTarget = topOfStack?.isTrigger === true && effectNeedsTarget(topOfStack.triggerEffect);
   const iControlTop = topOfStack !== undefined && topOfStack.controllerId === me.playerId;
+  const topTargetKinds = topNeedsTarget ? effectTargetKinds(topOfStack!.triggerEffect) : [];
   const resolveWithTarget = (target: TargetRef): void => {
     send({ type: "resolveTopOfStack", target });
     setTargetingTrigger(null);
@@ -639,7 +640,11 @@ export function Game(): JSX.Element {
     const tl = cards[gc.cardId]?.faces?.[0]?.typeLine ?? cards[gc.cardId]?.typeLine ?? "";
     const isLand = /\bLand\b/i.test(tl);
     return [
-      { label: "Play to battlefield", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "battlefield" }) },
+      // v7: nonland "plays" are casts — the server routes them through the
+      // stack regardless, so only lands offer the direct battlefield item.
+      ...(isLand
+        ? [{ label: "Play to battlefield", onClick: () => send({ type: "moveCard" as const, instanceId: gc.instanceId, from: "hand" as const, to: "battlefield" as const }) }]
+        : []),
       { label: "Play face down", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "battlefield", faceDown: true }) },
       { label: "Cast (put on stack)", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "stack" }) },
       // v5 escape hatches: additional-land effects / alternative & reduced costs.
@@ -690,7 +695,7 @@ export function Game(): JSX.Element {
 
   const clickMyBattlefieldCard = (gc: GameCard, e: ReactMouseEvent<HTMLDivElement>): void => {
     if (!canAct) return;
-    if (targetingTrigger) {
+    if (targetingTrigger && topTargetKinds.includes("permanent")) {
       resolveWithTarget({ kind: "permanent", instanceId: gc.instanceId });
       return;
     }
@@ -723,7 +728,7 @@ export function Game(): JSX.Element {
   };
 
   const clickOppBattlefieldCard = (gc: GameCard): void => {
-    if (targetingTrigger && canAct) {
+    if (targetingTrigger && canAct && topTargetKinds.includes("permanent")) {
       resolveWithTarget({ kind: "permanent", instanceId: gc.instanceId });
       return;
     }
@@ -854,26 +859,32 @@ export function Game(): JSX.Element {
         <SandboxToolbar meId={me.playerId} oppId={opp.playerId} oppName={nameFor(opp.playerId)} />
       )}
 
-      {/* v6: target picker for the resolving trigger */}
+      {/* v6/v7: target picker for the resolving trigger / spell effect */}
       {targetingTrigger && topOfStack && (
         <div className="fixed left-1/2 top-2 z-[60] flex -translate-x-1/2 animate-fade-in items-center gap-2 rounded-full border border-red-400/50 bg-felt-900 px-4 py-1.5 text-xs font-semibold text-red-200 shadow-card-lg">
           <span>
-            Choose a target for {cards[topOfStack.cardId]?.name ?? "the trigger"} — click any battlefield card, or:
+            {topTargetKinds.includes("stack")
+              ? `Choose a spell for ${cards[topOfStack.cardId]?.name ?? "the effect"} to counter — click a highlighted spell on the stack`
+              : `Choose a target for ${cards[topOfStack.cardId]?.name ?? "the trigger"} — click any battlefield card, or:`}
           </span>
-          <button
-            type="button"
-            className="rounded-full border border-red-400/50 bg-red-500/15 px-2.5 py-0.5 text-[10px] font-bold text-red-200 hover:bg-red-500/30"
-            onClick={() => resolveWithTarget({ kind: "player", playerId: opp.playerId })}
-          >
-            {nameFor(opp.playerId)}
-          </button>
-          <button
-            type="button"
-            className="rounded-full border border-red-400/50 bg-red-500/15 px-2.5 py-0.5 text-[10px] font-bold text-red-200 hover:bg-red-500/30"
-            onClick={() => resolveWithTarget({ kind: "player", playerId: me.playerId })}
-          >
-            yourself
-          </button>
+          {topTargetKinds.includes("player") && (
+            <>
+              <button
+                type="button"
+                className="rounded-full border border-red-400/50 bg-red-500/15 px-2.5 py-0.5 text-[10px] font-bold text-red-200 hover:bg-red-500/30"
+                onClick={() => resolveWithTarget({ kind: "player", playerId: opp.playerId })}
+              >
+                {nameFor(opp.playerId)}
+              </button>
+              <button
+                type="button"
+                className="rounded-full border border-red-400/50 bg-red-500/15 px-2.5 py-0.5 text-[10px] font-bold text-red-200 hover:bg-red-500/30"
+                onClick={() => resolveWithTarget({ kind: "player", playerId: me.playerId })}
+              >
+                yourself
+              </button>
+            </>
+          )}
           <button
             type="button"
             className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] hover:bg-white/20"
@@ -955,6 +966,12 @@ export function Game(): JSX.Element {
                     : "The trigger's controller chooses its target"
                   : undefined
               }
+              targetableIds={
+                targetingTrigger && topTargetKinds.includes("stack")
+                  ? new Set(gs.stack.filter((c) => !c.isTrigger).map((c) => c.instanceId))
+                  : undefined
+              }
+              onPickTarget={(instanceId) => resolveWithTarget({ kind: "stack", instanceId })}
             />
             <div className="flex min-w-0 flex-1 flex-col justify-center gap-1">
               <div className="flex items-center justify-center gap-2">

@@ -1166,17 +1166,23 @@ describe("spell resolution scripts (v4)", () => {
     return { s, ctx, spell };
   }
 
-  it("a sorcery with onResolve goes to the owner's graveyard and applies effects for the controller", () => {
+  it("a sorcery with onResolve: card to graveyard, its EFFECT goes on the stack, then applies (v7)", () => {
     // Night's Whisper-style script: draw 2, lose 2.
     const { s, ctx, spell } = castSpell("Sorcery", {
       triggers: [],
       onResolve: { effects: [{ kind: "draw", count: 2 }, { kind: "loseLife", amount: 2 }] },
     });
     const handBefore = player(s, "p1").zones.hand.length;
-    // Either player may click resolve; effects apply to the CONTROLLER (p1).
-    const next = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx);
-    expect(next.stack).toHaveLength(0);
+    // Step 1: the spell resolves — card to graveyard, effect entry on the stack.
+    let next = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx);
     expect(player(next, "p1").zones.graveyard.map((c) => c.instanceId)).toEqual([spell]);
+    expect(next.stack).toHaveLength(1);
+    expect(next.stack[0]!.isTrigger).toBe(true);
+    expect(next.stack[0]!.controllerId).toBe("p1");
+    // Step 2: the effect entry resolves — either player may click; effects
+    // apply to the CONTROLLER (p1).
+    next = applyAction(next, "p2", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(next.stack).toHaveLength(0);
     expect(player(next, "p1").zones.battlefield).toHaveLength(0);
     expect(player(next, "p1").zones.hand).toHaveLength(handBefore + 2);
     expect(player(next, "p1").life).toBe(18);
@@ -1207,8 +1213,9 @@ describe("spell resolution scripts (v4)", () => {
       triggers: [],
       onResolve: { effects: [{ kind: "addCounters", counterType: "+1/+1", count: 1 }] },
     });
-    const next = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    let next = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
     expect(player(next, "p1").zones.graveyard.map((c) => c.instanceId)).toEqual([spell]);
+    next = applyAction(next, "p1", { type: "resolveTopOfStack" }, 0, ctx); // the effect entry
     expect(lastLog(next)).toMatch(/fizzled/);
   });
 
@@ -1232,6 +1239,7 @@ describe("spell resolution scripts (v4)", () => {
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "stack" }, 0, ctx);
     s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
     expect(player(s, "p1").zones.graveyard.map((c) => c.instanceId)).toEqual([spell]);
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx); // the effect entry
     expect(player(s, "p1").life).toBe(23);
   });
 
@@ -1574,6 +1582,7 @@ describe("spawnCard (v4.1 admin sandbox)", () => {
     const lifeBefore = player(s, "p1").life;
     s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
     expect(player(s, "p1").zones.graveyard.some((c) => c.cardId === "spawned")).toBe(true);
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx); // v7 effect entry
     expect(player(s, "p1").life).toBe(lifeBefore + 3);
   });
 
@@ -1647,13 +1656,18 @@ describe("cost enforcement & land drops (v5)", () => {
     expect(s.log.some((e) => /auto-paid \{1\}\{U\}/.test(e.message))).toBe(true);
   });
 
-  it("casting straight to the battlefield also pays", () => {
+  it("a battlefield-bound nonland cast pays AND is redirected through the stack (v7)", () => {
     const { g, cards } = setup({
       handCard: data("bear", "Creature — Bear", "{R}"),
       battlefield: [{ cardData: mountain }],
     });
     const s = applyAction(g, "p1", { type: "moveCard", instanceId: "castme", from: "hand", to: "battlefield" }, 0, { cards });
     expect(player(s, "p1").zones.battlefield.find((c) => c.instanceId === "src0")!.tapped).toBe(true);
+    // v7: the creature sits on the stack (response window), not in play yet.
+    expect(s.stack.some((c) => c.instanceId === "castme")).toBe(true);
+    expect(player(s, "p1").zones.battlefield.some((c) => c.instanceId === "castme")).toBe(false);
+    const resolved = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, { cards });
+    expect(player(resolved, "p1").zones.battlefield.some((c) => c.instanceId === "castme")).toBe(true);
   });
 
   it("zero-cost spells and X-only costs need no payment", () => {
@@ -1909,5 +1923,151 @@ describe("targeted triggers, opponentDraws & amass (v6)", () => {
     );
     s = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx); // opponent clicks it
     expect(player(s, "p1").life).toBe(22);
+  });
+});
+
+describe("stack-first casting & counterspells (v7)", () => {
+  const bolt: CardData = {
+    id: "bolt",
+    name: "Lightning Bolt",
+    manaCost: "{R}",
+    cmc: 1,
+    typeLine: "Instant",
+    colors: [],
+    colorIdentity: [],
+    layout: "normal",
+  };
+  const counterspell: CardData = {
+    id: "csp",
+    name: "Counterspell",
+    manaCost: "{U}{U}",
+    cmc: 2,
+    typeLine: "Instant",
+    colors: [],
+    colorIdentity: [],
+    layout: "normal",
+  };
+  const bear: CardData = {
+    id: "bear",
+    name: "Runeclaw Bear",
+    manaCost: "{1}{G}",
+    cmc: 2,
+    typeLine: "Creature — Bear",
+    colors: [],
+    colorIdentity: [],
+    layout: "normal",
+  };
+
+  /** p1 casts a bear (free via override); p2 holds a counterspell. */
+  function duel() {
+    const g = newGame();
+    const bearCard = mkCard("p1", 980);
+    bearCard.cardId = "bear";
+    bearCard.instanceId = "bear1";
+    player(g, "p1").zones.hand.push(bearCard);
+    const cspCard = mkCard("p2", 981);
+    cspCard.cardId = "csp";
+    cspCard.instanceId = "csp1";
+    player(g, "p2").zones.hand.push(cspCard);
+    const ctx = {
+      cards: { bolt, csp: counterspell, bear },
+      scripts: {
+        bolt: { triggers: [], onResolve: { effects: [{ kind: "damageAnyTarget", amount: 3 }] } } as CardScript,
+        csp: { triggers: [], onResolve: { effects: [{ kind: "counterTarget" }] } } as CardScript,
+        bear: { triggers: [{ event: "etb", optional: false, description: "etb", effect: { kind: "draw", count: 1 } }] } as CardScript,
+      },
+    };
+    return { g, ctx };
+  }
+
+  it("Counterspell counters a creature spell on the stack before its ETB can happen", () => {
+    const { g, ctx } = duel();
+    // p1 casts the bear (override skips payment; the cast still stacks).
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: "bear1", from: "hand", to: "stack", override: true }, 0, ctx);
+    // p2 responds with Counterspell — it sits ABOVE the bear.
+    s = applyAction(s, "p2", { type: "moveCard", instanceId: "csp1", from: "hand", to: "stack", override: true }, 0, ctx);
+    expect(s.stack.map((c) => c.instanceId)).toEqual(["bear1", "csp1"]);
+    // Counterspell resolves: card to p2's graveyard, its effect entry appears.
+    s = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(player(s, "p2").zones.graveyard.some((c) => c.instanceId === "csp1")).toBe(true);
+    const entry = s.stack[s.stack.length - 1]!;
+    expect(entry.isTrigger).toBe(true);
+    // p2 (controller) resolves the effect, targeting the bear on the stack.
+    s = applyAction(
+      s, "p2",
+      { type: "resolveTopOfStack", target: { kind: "stack", instanceId: "bear1" } },
+      0, ctx
+    );
+    expect(s.stack).toHaveLength(0);
+    expect(player(s, "p1").zones.graveyard.some((c) => c.instanceId === "bear1")).toBe(true);
+    expect(player(s, "p1").zones.battlefield).toHaveLength(0); // never entered; no ETB fired
+    expect(s.log.some((e) => /countered Runeclaw Bear/.test(e.message))).toBe(true);
+  });
+
+  it("counter effects cannot target trigger entries and reject gone targets", () => {
+    const { g, ctx } = duel();
+    // p1's watcher fires a castSpell trigger, so a TRIGGER sits above the bear.
+    const watcher = mkCard("p1", 984);
+    watcher.cardId = "watcher";
+    player(g, "p1").zones.battlefield.push(watcher);
+    const ctx2 = {
+      cards: { ...ctx.cards, watcher: { ...bear, id: "watcher", name: "Watcher" } },
+      scripts: {
+        ...ctx.scripts,
+        watcher: {
+          triggers: [{ event: "castSpell", optional: false, description: "cast", effect: { kind: "gainLife", amount: 1 } }],
+        } as CardScript,
+      },
+    };
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: "bear1", from: "hand", to: "stack", override: true }, 0, ctx2);
+    const triggerId = s.stack.find((c) => c.isTrigger)!.instanceId;
+    s = applyAction(s, "p2", { type: "moveCard", instanceId: "csp1", from: "hand", to: "stack", override: true }, 0, ctx2);
+    s = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx2); // csp -> effect entry on top
+    // Targeting the watcher's trigger (an ability) is rejected.
+    expect(() =>
+      applyAction(s, "p2", { type: "resolveTopOfStack", target: { kind: "stack", instanceId: triggerId } }, 0, ctx2)
+    ).toThrow(/Only spells/);
+    // Targeting something not on the stack is rejected outright.
+    expect(() =>
+      applyAction(s, "p2", { type: "resolveTopOfStack", target: { kind: "stack", instanceId: "ghost" } }, 0, ctx2)
+    ).toThrow(/not on the stack/);
+  });
+
+  it("Lightning Bolt: cast -> effect entry -> targeted damage, card already in graveyard", () => {
+    const { g, ctx } = duel();
+    const boltCard = mkCard("p1", 982);
+    boltCard.cardId = "bolt";
+    boltCard.instanceId = "bolt1";
+    player(g, "p1").zones.hand.push(boltCard);
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: "bolt1", from: "hand", to: "stack", override: true }, 0, ctx);
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(player(s, "p1").zones.graveyard.some((c) => c.instanceId === "bolt1")).toBe(true);
+    expect(s.stack[s.stack.length - 1]!.isTrigger).toBe(true);
+    // Only p1 (controller) may resolve the targeted effect; opponent's face.
+    s = applyAction(s, "p1", { type: "resolveTopOfStack", target: { kind: "player", playerId: "p2" } }, 0, ctx);
+    expect(player(s, "p2").life).toBe(17);
+    // A player is not a legal target for a counter effect and vice versa —
+    // covered by the kind check (see previous test); here damage accepted it.
+  });
+
+  it("the redirect fires castSpell triggers exactly like an explicit stack cast", () => {
+    const { g, ctx } = duel();
+    // p1 controls a permanent with a castSpell trigger.
+    const watcher = mkCard("p1", 983);
+    watcher.cardId = "watcher";
+    player(g, "p1").zones.battlefield.push(watcher);
+    const ctx2 = {
+      cards: { ...ctx.cards, watcher: { ...bear, id: "watcher", name: "Watcher" } },
+      scripts: {
+        ...ctx.scripts,
+        watcher: {
+          triggers: [{ event: "castSpell", optional: false, description: "cast", effect: { kind: "gainLife", amount: 1 } }],
+        } as CardScript,
+      },
+    };
+    const s = applyAction(g, "p1", { type: "moveCard", instanceId: "bear1", from: "hand", to: "battlefield", override: true }, 0, ctx2);
+    expect(s.stack.some((c) => c.instanceId === "bear1")).toBe(true); // redirected
+    expect(s.stack.some((c) => c.isTrigger && c.cardId === "watcher")).toBe(true); // castSpell fired
+    expect(s.log.some((e) => /goes to the stack first/.test(e.message))).toBe(true);
   });
 });

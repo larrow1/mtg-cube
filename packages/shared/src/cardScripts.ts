@@ -299,7 +299,20 @@ function parseSpellLine(line: string, self: string): TriggerEffect[] | null {
     ];
   }
 
-  // Targeted text is never automated for spells.
+  // v7: the two targeted patterns the engine can actually resolve (the
+  // spell-effect stack entry opens the target picker for them).
+  if (/^counter target spell$/i.test(text)) {
+    return [{ kind: "counterTarget" }];
+  }
+  const anyTarget = text.match(
+    new RegExp(`^(?:${self}|it) deals? (\\w+) damage to any target$`, "i")
+  );
+  if (anyTarget) {
+    const amount = parseCount(anyTarget[1]!);
+    return amount === null ? null : [{ kind: "damageAnyTarget", amount }];
+  }
+
+  // All other targeted text is never automated for spells.
   if (/\btargets?\b/i.test(text)) return null;
 
   const effect = parseEffect(text, self);

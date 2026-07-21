@@ -289,10 +289,12 @@ export type TriggerEvent =
    */
   | "opponentDraws";
 
-/** v6: what a targeted effect points at, chosen when the trigger resolves. */
+/** v6: what a targeted effect points at, chosen when the trigger resolves.
+ *  v7 adds "stack" — a non-trigger spell on the stack (counterspells). */
 export type TargetRef =
   | { kind: "player"; playerId: string }
-  | { kind: "permanent"; instanceId: string };
+  | { kind: "permanent"; instanceId: string }
+  | { kind: "stack"; instanceId: string };
 
 export type TriggerEffect =
   | { kind: "draw"; count: number }
@@ -317,6 +319,9 @@ export type TriggerEffect =
   | { kind: "amass"; subtype: string; count: number }
   /** v6: resolve sub-effects in order; a chosen TargetRef is shared by all. */
   | { kind: "seq"; effects: TriggerEffect[] }
+  /** v7: counter target spell — removes a non-trigger entry from the stack
+   *  (owner's graveyard; tokens cease). Needs a stack TargetRef. */
+  | { kind: "counterTarget" }
   /** Recognized trigger with no automated effect: resolve = log; do it by hand. */
   | { kind: "manual"; note: string };
 
