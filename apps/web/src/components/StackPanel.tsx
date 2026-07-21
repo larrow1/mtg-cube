@@ -22,9 +22,13 @@ interface StackPanelProps {
   onCounter: () => void;
   onDecline: (instanceId: string) => void;
   disabled: boolean;
+  /** v6: extra gate for the trigger Resolve button (targeted triggers are
+   *  resolved by their controller only, who picks the target). */
+  resolveDisabled?: boolean;
+  resolveTitle?: string;
 }
 
-export function StackPanel({ stack, cards, nameFor, viewerId, onResolve, onCounter, onDecline, disabled }: StackPanelProps): JSX.Element {
+export function StackPanel({ stack, cards, nameFor, viewerId, onResolve, onCounter, onDecline, disabled, resolveDisabled, resolveTitle }: StackPanelProps): JSX.Element {
   const reversed = [...stack].reverse(); // render top of stack first
 
   // Trigger entries not present in the previous view pop in with an amber
@@ -139,8 +143,8 @@ export function StackPanel({ stack, cards, nameFor, viewerId, onResolve, onCount
                   type="button"
                   className="btn-gold flex-1 !px-2 !py-1.5 !text-[11px]"
                   onClick={onResolve}
-                  disabled={disabled}
-                  title="Resolve this triggered ability"
+                  disabled={disabled || resolveDisabled === true}
+                  title={resolveTitle ?? "Resolve this triggered ability"}
                 >
                   Resolve
                 </button>

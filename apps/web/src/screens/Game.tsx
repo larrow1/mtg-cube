@@ -16,9 +16,10 @@ import type {
   PlayerGameState,
   SearchFilter,
   SpawnZone,
+  TargetRef,
   ZoneName,
 } from "@mtg-cube/shared";
-import { canPayFor, hasInstantSpeed, scriptFor } from "@mtg-cube/shared";
+import { canPayFor, effectNeedsTarget, hasInstantSpeed, scriptFor } from "@mtg-cube/shared";
 import { call } from "../socket";
 import { useApp } from "../store";
 import { classifyRow, compareByCmcName, nameOf, randomSeed, type RowKind } from "../lib/cards";
@@ -288,6 +289,8 @@ export function Game(): JSX.Element {
   const [logOpen, setLogOpen] = useState(true);
   const [autoMode, setAutoMode] = useState(false);
   const lastAutoSeq = useRef(-1);
+  /** v6: instanceId of the top-of-stack trigger awaiting a target choice. */
+  const [targetingTrigger, setTargetingTrigger] = useState<string | null>(null);
   const [, forceRender] = useState(0);
 
   // Esc cancels attach/block targeting modes, the mana picker and the hand selection.
@@ -298,6 +301,7 @@ export function Game(): JSX.Element {
         setBlockSource(null);
         setManaPicker(null);
         setSelectedHand(null);
+        setTargetingTrigger(null);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -348,6 +352,29 @@ export function Game(): JSX.Element {
       return /\bCreature\b/i.test(tl);
     };
 
+    // v6: any possible action at all, for main-phase auto-advance — a castable
+    // card of any speed, an available land drop, or an activatable ability.
+    const hasAnyAction = (): boolean => {
+      for (const gc of me.zones.hand) {
+        const d = cards[gc.cardId];
+        if (!d) continue;
+        const tl = d.faces?.[0]?.typeLine ?? d.typeLine;
+        if (/\bLand\b/i.test(tl)) {
+          if (me.landsPlayedThisTurn < 1) return true;
+        } else if (canPayFor(d, me, cards)) {
+          return true;
+        }
+      }
+      for (const gc of me.zones.battlefield) {
+        if (gc.isToken || gc.faceDown) continue;
+        const d = cards[gc.cardId];
+        if (!d) continue;
+        const activated = scriptFor(d)?.activated ?? [];
+        if (activated.some((a) => !a.costTap || !gc.tapped)) return true;
+      }
+      return false;
+    };
+
     let action: GameAction | null = null;
     if (gs.activePlayerId === me.playerId) {
       if (!canActNow) {
@@ -358,6 +385,10 @@ export function Game(): JSX.Element {
         } else if (gs.step === "declareBlockers" && !opp.zones.battlefield.some(isUntappedCreature)) {
           action = { type: "nextStep" };
         } else if (gs.step === "combatDamage") {
+          action = { type: "nextStep" };
+        } else if ((gs.step === "main1" || gs.step === "main2") && !hasAnyAction()) {
+          // v6: truly nothing to do — main phases pass too, so empty turns
+          // hand themselves over completely.
           action = { type: "nextStep" };
         }
       }
@@ -377,6 +408,14 @@ export function Game(): JSX.Element {
     }, 700);
     return () => window.clearTimeout(timer);
   }, [autoMode, view, session, matchId]);
+
+  // v6: cancel target selection whenever the trigger being targeted stops
+  // being the top of the stack (resolved elsewhere, countered, superseded).
+  useEffect(() => {
+    if (!targetingTrigger) return;
+    const top = view?.state.stack[view.state.stack.length - 1];
+    if (!top || top.instanceId !== targetingTrigger) setTargetingTrigger(null);
+  }, [view, targetingTrigger]);
 
   if (!view || !session) {
     return (
@@ -425,6 +464,16 @@ export function Game(): JSX.Element {
     e.preventDefault();
     e.stopPropagation();
     if (items.length > 0) setMenu({ x: e.clientX, y: e.clientY, items });
+  };
+
+  // v6: targeted-trigger resolution — the controller picks a target (battle-
+  // field card click or a player button in the banner) then resolves.
+  const topOfStack = gs.stack[gs.stack.length - 1];
+  const topNeedsTarget = topOfStack?.isTrigger === true && effectNeedsTarget(topOfStack.triggerEffect);
+  const iControlTop = topOfStack !== undefined && topOfStack.controllerId === me.playerId;
+  const resolveWithTarget = (target: TargetRef): void => {
+    send({ type: "resolveTopOfStack", target });
+    setTargetingTrigger(null);
   };
 
   // All permanents by instanceId, for attachment-name lookups.
@@ -641,6 +690,10 @@ export function Game(): JSX.Element {
 
   const clickMyBattlefieldCard = (gc: GameCard, e: ReactMouseEvent<HTMLDivElement>): void => {
     if (!canAct) return;
+    if (targetingTrigger) {
+      resolveWithTarget({ kind: "permanent", instanceId: gc.instanceId });
+      return;
+    }
     if (attachSource) {
       if (attachSource !== gc.instanceId) {
         send({ type: "attach", instanceId: attachSource, targetInstanceId: gc.instanceId });
@@ -670,6 +723,10 @@ export function Game(): JSX.Element {
   };
 
   const clickOppBattlefieldCard = (gc: GameCard): void => {
+    if (targetingTrigger && canAct) {
+      resolveWithTarget({ kind: "permanent", instanceId: gc.instanceId });
+      return;
+    }
     if (blockSource && gc.attacking) {
       send({ type: "setBlocking", instanceId: blockSource, blocking: gc.instanceId });
       setBlockSource(null);
@@ -797,6 +854,36 @@ export function Game(): JSX.Element {
         <SandboxToolbar meId={me.playerId} oppId={opp.playerId} oppName={nameFor(opp.playerId)} />
       )}
 
+      {/* v6: target picker for the resolving trigger */}
+      {targetingTrigger && topOfStack && (
+        <div className="fixed left-1/2 top-2 z-[60] flex -translate-x-1/2 animate-fade-in items-center gap-2 rounded-full border border-red-400/50 bg-felt-900 px-4 py-1.5 text-xs font-semibold text-red-200 shadow-card-lg">
+          <span>
+            Choose a target for {cards[topOfStack.cardId]?.name ?? "the trigger"} — click any battlefield card, or:
+          </span>
+          <button
+            type="button"
+            className="rounded-full border border-red-400/50 bg-red-500/15 px-2.5 py-0.5 text-[10px] font-bold text-red-200 hover:bg-red-500/30"
+            onClick={() => resolveWithTarget({ kind: "player", playerId: opp.playerId })}
+          >
+            {nameFor(opp.playerId)}
+          </button>
+          <button
+            type="button"
+            className="rounded-full border border-red-400/50 bg-red-500/15 px-2.5 py-0.5 text-[10px] font-bold text-red-200 hover:bg-red-500/30"
+            onClick={() => resolveWithTarget({ kind: "player", playerId: me.playerId })}
+          >
+            yourself
+          </button>
+          <button
+            type="button"
+            className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] hover:bg-white/20"
+            onClick={() => setTargetingTrigger(null)}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
       {/* Mode hints */}
       {(attachSource || blockSource) && (
         <div className="fixed left-1/2 top-2 z-[60] flex -translate-x-1/2 animate-fade-in items-center gap-2 rounded-full border border-brass-400/50 bg-felt-900 px-4 py-1.5 text-xs font-semibold text-brass-300 shadow-card-lg">
@@ -850,10 +937,24 @@ export function Game(): JSX.Element {
               cards={cards}
               nameFor={nameFor}
               viewerId={viewerIsPlayer ? me.playerId : undefined}
-              onResolve={() => send({ type: "resolveTopOfStack" })}
+              onResolve={() => {
+                if (topNeedsTarget) {
+                  if (iControlTop && topOfStack) setTargetingTrigger(topOfStack.instanceId);
+                } else {
+                  send({ type: "resolveTopOfStack" });
+                }
+              }}
               onCounter={() => send({ type: "counterTopOfStack" })}
               onDecline={(instanceId) => send({ type: "declineTrigger", instanceId })}
               disabled={!canAct || gs.stack.length === 0}
+              resolveDisabled={topNeedsTarget && !iControlTop}
+              resolveTitle={
+                topNeedsTarget
+                  ? iControlTop
+                    ? "Choose a target, then it resolves"
+                    : "The trigger's controller chooses its target"
+                  : undefined
+              }
             />
             <div className="flex min-w-0 flex-1 flex-col justify-center gap-1">
               <div className="flex items-center justify-center gap-2">
@@ -871,7 +972,7 @@ export function Game(): JSX.Element {
                         ? "border-emerald-400/60 font-black tracking-widest text-emerald-300 shadow-[0_0_10px_rgba(52,211,153,0.25)]"
                         : "border-white/15 font-semibold tracking-widest text-zinc-400 hover:text-zinc-200"
                     }`}
-                    title="Auto mode: steps advance and priority passes by themselves whenever you have no castable instant-speed play (main phases and attack/block decisions always stop)"
+                    title="Auto mode: steps advance and priority passes by themselves whenever you have no possible play — even main phases (and whole turns) pass when you have nothing castable, no land drop, and no ability to activate"
                   >
                     <span className={`h-1.5 w-1.5 rounded-full ${autoMode ? "animate-pulse bg-emerald-400" : "bg-zinc-600"}`} />
                     AUTO {autoMode ? "ON" : "OFF"}

@@ -75,15 +75,21 @@ draw restrictions + fetch-land searches; admin engine sandbox (v4.1:
 sandboxStart/sandboxAddCard/sandboxSwitchSeat, spawnCard action); v5
 casting-cost enforcement (mana.ts parser/auto-tapper, pool-first payment,
 override escape hatches), one-land-per-turn enforcement, client Auto mode
-(auto step-advance / priority-pass when nothing castable at instant speed);
-229 shared tests; Arena-style UI (draft lanes/drag-to-pick, deck builder,
-battlefield art tiles with color frames + keyword chips, mana symbols).
+(auto step-advance / priority-pass when nothing castable at instant speed;
+v6: main phases and whole turns pass too when no action exists at all); v6
+targeting v1 (damageAnyTarget trigger effect, controller picks the target at
+resolution, client target-picker banner), opponentDraws observer event
+(Bowmasters-style, draw-step first draw exempt), amass (CR 701.47a) and seq
+composite effects — Orcish Bowmasters fully automated; 240 shared tests;
+Arena-style UI (draft lanes/drag-to-pick, deck builder, battlefield art
+tiles with color frames + keyword chips, mana symbols).
 
 The MTG Comprehensive Rules live in `docs/rules/` (plain text, split by
 section) — query them via the `mtg-rules` subagent instead of guessing rules.
 
-Roadmap (rough priority): targeting (unlocks automating most of the 132
-manual triggers) → remaining trigger events (landfall, begin-of-combat,
+Roadmap (rough priority): extend targeting beyond damageAnyTarget (target
+creature/permanent effects — unlocks automating most remaining manual
+triggers) → remaining trigger events (landfall, begin-of-combat, more
 observer triggers — see UNSUPPORTED_TRIGGER_CARDS) → account management
 (password change) → spectator mode → Redis persistence for live games /
 multi-instance (see DEPLOY.md).

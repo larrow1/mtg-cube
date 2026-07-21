@@ -280,7 +280,19 @@ export type TriggerEvent =
   | "endStep" // beginning of the controller's end step
   | "attack" // this creature is declared as an attacker
   | "castSpell" // controller casts a spell (moveCard -> stack), see castFilter
-  | "combatDamageToPlayer"; // combat-damage step begins with this creature attacking and unblocked
+  | "combatDamageToPlayer" // combat-damage step begins with this creature attacking and unblocked
+  /**
+   * v6: an OPPONENT of this permanent's controller draws a card — fired once
+   * per card drawn (CR 121.2), EXCEPT the turn-based first draw of their draw
+   * step and mulligan/setup draws (Orcish Bowmasters wording; that exemption
+   * is part of the event's definition).
+   */
+  | "opponentDraws";
+
+/** v6: what a targeted effect points at, chosen when the trigger resolves. */
+export type TargetRef =
+  | { kind: "player"; playerId: string }
+  | { kind: "permanent"; instanceId: string };
 
 export type TriggerEffect =
   | { kind: "draw"; count: number }
@@ -291,6 +303,20 @@ export type TriggerEffect =
   | { kind: "addCounters"; counterType: string; count: number }
   | { kind: "createToken"; name: string; typeLine: string; power?: string; toughness?: string; count: number }
   | { kind: "scry"; count: number }
+  /**
+   * v6: "deals N damage to any target" (CR 115.4: creature, player,
+   * planeswalker, battle). Needs a TargetRef when the trigger resolves —
+   * player targets lose life, permanent targets take marked damage.
+   */
+  | { kind: "damageAnyTarget"; amount: number }
+  /**
+   * v6: amass <subtype> N (CR 701.47a): create a 0/0 black "<subtype> Army"
+   * token if the controller has no Army, then put N +1/+1 counters on an
+   * Army they control.
+   */
+  | { kind: "amass"; subtype: string; count: number }
+  /** v6: resolve sub-effects in order; a chosen TargetRef is shared by all. */
+  | { kind: "seq"; effects: TriggerEffect[] }
   /** Recognized trigger with no automated effect: resolve = log; do it by hand. */
   | { kind: "manual"; note: string };
 
@@ -524,7 +550,9 @@ export type GameAction =
   | { type: "nextStep" }
   | { type: "nextTurn" }
   | { type: "passPriority" }
-  | { type: "resolveTopOfStack" }
+  /** v6: `target` is required (controller only) when the top of the stack is
+   *  a trigger whose effect needs one (effectNeedsTarget). */
+  | { type: "resolveTopOfStack"; target?: TargetRef }
   | { type: "counterTopOfStack" }
   | { type: "revealHand" }
   | { type: "scry"; count: number }

@@ -158,16 +158,33 @@ function parseEffect(clause: string, self: string): TriggerEffect | null {
     return amount === null ? null : { kind: "eachOpponentLosesLife", amount };
   }
 
-  // "~ deals 2 damage to each opponent" / "it deals 2 damage to any target".
-  // "any target" is auto-resolved against the opponent (1v1) — cards where
-  // that shorthand is wrong (true targeted removal) belong in CARD_OVERRIDES.
+  // "~ deals 2 damage to each opponent" — mechanical in 1v1.
   if (
     (m = text.match(
-      new RegExp(`^(?:${self}|it|he|she|they) deals? (\\w+) damage to (?:each opponent|any target)$`, "i")
+      new RegExp(`^(?:${self}|it|he|she|they) deals? (\\w+) damage to each opponent$`, "i")
     ))
   ) {
     const amount = parseCount(m[1]!);
     return amount === null ? null : { kind: "damageOpponent", amount };
+  }
+
+  // "~ deals 2 damage to any target" — v6: a REAL targeted effect (CR 115.4).
+  // The trigger's controller picks the target when it resolves.
+  if (
+    (m = text.match(
+      new RegExp(`^(?:${self}|it|he|she|they) deals? (\\w+) damage to any target$`, "i")
+    ))
+  ) {
+    const amount = parseCount(m[1]!);
+    return amount === null ? null : { kind: "damageAnyTarget", amount };
+  }
+
+  // "amass Orcs 1" / "amass Zombies 2" (CR 701.47a).
+  if ((m = text.match(/^amass (\w+?)s? (\w+)$/i))) {
+    const count = parseCount(m[2]!);
+    if (count === null) return null;
+    const subtype = m[1]![0]!.toUpperCase() + m[1]!.slice(1).toLowerCase();
+    return { kind: "amass", subtype, count };
   }
 
   // "put a +1/+1 counter on ~" / "put two charge counters on this artifact".
@@ -800,17 +817,34 @@ export const CARD_OVERRIDES: Record<string, CardScript> = {
       },
     ],
   },
-  // ETB half scripted; the "whenever an opponent draws" half is not modelable.
+  // v6: fully scripted — ETB and the opponent-draw watcher both deal 1 to a
+  // chosen target then amass Orcs 1 (opponentDraws has the "except their
+  // draw-step first draw" exemption built into the event).
   "Orcish Bowmasters": {
     triggers: [
       {
         event: "etb",
         optional: false,
-        description:
-          "When this creature enters and whenever an opponent draws a card except the first one they draw in each of their draw steps, this creature deals 1 damage to any target. Then amass Orcs 1.",
+        description: "When this creature enters, it deals 1 damage to any target. Then amass Orcs 1.",
         effect: {
-          kind: "manual",
-          note: "this creature deals 1 damage to any target, then amass Orcs 1",
+          kind: "seq",
+          effects: [
+            { kind: "damageAnyTarget", amount: 1 },
+            { kind: "amass", subtype: "Orc", count: 1 },
+          ],
+        },
+      },
+      {
+        event: "opponentDraws",
+        optional: false,
+        description:
+          "Whenever an opponent draws a card except the first one they draw in each of their draw steps, this creature deals 1 damage to any target. Then amass Orcs 1.",
+        effect: {
+          kind: "seq",
+          effects: [
+            { kind: "damageAnyTarget", amount: 1 },
+            { kind: "amass", subtype: "Orc", count: 1 },
+          ],
         },
       },
     ],
@@ -1247,7 +1281,6 @@ export const UNSUPPORTED_TRIGGER_CARDS: Record<string, string> = {
   "Baloth Prime": "sacrifice-a-land trigger has no event",
   "Alpha Deathclaw": "the 'or becomes monstrous' half has no event (ETB is scripted)",
   "Smuggler's Copter": "the 'or blocks' half has no event (the attack half is scripted)",
-  "Orcish Bowmasters": "the 'whenever an opponent draws' half has no event (ETB is scripted)",
   "Stormchaser's Talent": "Class level-up trigger has no event (the ETB token is scripted)",
   // --- sagas (chapter abilities are not modeled at all) --------------------
   "Summon: Good King Mog XII": "saga (Summon) chapter abilities are not modeled",

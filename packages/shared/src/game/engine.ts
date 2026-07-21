@@ -68,6 +68,7 @@ import type {
   PlayerGameState,
   SearchFilter,
   SpawnZone,
+  TargetRef,
   TriggerEffect,
   TriggerEvent,
   TurnStep,
@@ -284,6 +285,9 @@ export function applyAction(
       }
       const drawn = drawCards(actor, count);
       logs.push(`drew ${drawn} card${drawn === 1 ? "" : "s"} (manual override)`);
+      // v6: manual-override draws are real draws — the opponent's permanents
+      // see them (opponentDraws), once per card drawn (CR 121.2).
+      emitOpponentDrawTriggers(s, actor, drawn, logs);
       break;
     }
 
@@ -650,7 +654,29 @@ export function applyAction(
       const card = s.stack.pop();
       if (!card) throw new EngineError("The stack is empty");
       if (card.isTrigger) {
-        resolveTrigger(s, card, logs);
+        // v6: targeted triggers — the CONTROLLER chooses a legal target at
+        // resolution (house rule; real Magic picks at stack time, CR 603.3d).
+        let target: TargetRef | undefined;
+        if (effectNeedsTarget(card.triggerEffect)) {
+          if (card.controllerId !== actorId) {
+            throw new EngineError("Only the trigger's controller may resolve it (they choose its target)");
+          }
+          target = action.target;
+          if (!target) {
+            throw new EngineError(
+              `The trigger from ${cardLabel(card)} needs a target — choose a creature, player, or other permanent`
+            );
+          }
+          if (target.kind === "player") {
+            const pid = target.playerId;
+            if (!s.players.some((p) => p.playerId === pid)) {
+              throw new EngineError(`Unknown target player "${pid}"`);
+            }
+          } else if (!findOnAnyBattlefield(s, target.instanceId)) {
+            throw new EngineError(`Target ${target.instanceId} is not on the battlefield`);
+          }
+        }
+        resolveTrigger(s, card, logs, target);
         break;
       }
       // v4: with card data, instants/sorceries (front-face type line) resolve
@@ -1011,12 +1037,21 @@ function pushTriggers(
   }
 }
 
+/** Does an effect (recursing seq) require a TargetRef to resolve? */
+export function effectNeedsTarget(effect: TriggerEffect | undefined): boolean {
+  if (!effect) return false;
+  if (effect.kind === "damageAnyTarget") return true;
+  if (effect.kind === "seq") return effect.effects.some((e) => effectNeedsTarget(e));
+  return false;
+}
+
 /**
  * Apply a resolving trigger's effect for its CONTROLLER (not the actor —
- * either player may click resolve). State-based checks after the action pick
- * up any resulting loss.
+ * either player may click resolve, except targeted triggers, which only the
+ * controller resolves). State-based checks after the action pick up any
+ * resulting loss.
  */
-function resolveTrigger(s: GameState, trigger: GameCard, logs: string[]): void {
+function resolveTrigger(s: GameState, trigger: GameCard, logs: string[], target?: TargetRef): void {
   const controller = s.players.find((p) => p.playerId === trigger.controllerId);
   const opponent = s.players.find((p) => p.playerId !== trigger.controllerId);
   if (!controller || !opponent) {
@@ -1027,7 +1062,7 @@ function resolveTrigger(s: GameState, trigger: GameCard, logs: string[]): void {
     kind: "manual" as const,
     note: trigger.triggerText ?? "unknown trigger",
   };
-  applyEffect(s, controller, opponent, effect, `${cardLabel(trigger)} trigger`, trigger.triggerSourceId, logs);
+  applyEffect(s, controller, opponent, effect, `${cardLabel(trigger)} trigger`, trigger.triggerSourceId, logs, target);
 }
 
 /**
@@ -1044,7 +1079,8 @@ function applyEffect(
   effect: TriggerEffect,
   label: string,
   sourceId: string | undefined,
-  logs: string[]
+  logs: string[],
+  target?: TargetRef
 ): void {
   const who = playerLabel(controller.playerId);
 
@@ -1052,6 +1088,9 @@ function applyEffect(
     case "draw": {
       const drawn = drawCards(controller, effect.count);
       logs.push(`resolved ${label}: ${who} drew ${drawn} card${drawn === 1 ? "" : "s"}`);
+      // v6: a scripted draw is a real draw — the drawer's opponent's
+      // permanents see it (once per card, CR 121.2).
+      emitOpponentDrawTriggers(s, controller, drawn, logs);
       break;
     }
     case "gainLife": {
@@ -1118,9 +1157,101 @@ function applyEffect(
       logs.push(`resolved ${label}: ${who} scries ${effect.count} (use scry to finish)`);
       break;
     }
+    case "damageAnyTarget": {
+      // Target validated by resolveTopOfStack; defensive fizzle otherwise
+      // (spirit of CR 608.2b — a gone target is simply not affected).
+      if (!target) {
+        logs.push(`${label} fizzled: no target was chosen`);
+        break;
+      }
+      if (target.kind === "player") {
+        const p = s.players.find((pl) => pl.playerId === target.playerId);
+        if (!p) {
+          logs.push(`${label} fizzled: its target player is gone`);
+          break;
+        }
+        p.life -= effect.amount;
+        logs.push(`resolved ${label}: dealt ${effect.amount} damage to ${playerLabel(p.playerId)}`);
+      } else {
+        const permanent = findOnAnyBattlefield(s, target.instanceId);
+        if (!permanent) {
+          logs.push(`${label} fizzled: its target left the battlefield`);
+          break;
+        }
+        permanent.damage += effect.amount;
+        logs.push(`resolved ${label}: dealt ${effect.amount} damage to ${cardLabel(permanent)}`);
+      }
+      break;
+    }
+    case "amass": {
+      // CR 701.47a. "Army" is matched on the (token)type line; the first Army
+      // in battlefield order gets the counters (controller's choice is not
+      // modeled). Subtype addition is logged, not tracked.
+      const typeLineOf = (c: GameCard): string =>
+        c.isToken ? c.tokenTypeLine ?? "" : ctx.cards?.[c.cardId]?.typeLine ?? "";
+      let army = [...controller.zones.battlefield]
+        .sort((a, b) => a.sortIndex - b.sortIndex)
+        .find((c) => /\bArmy\b/i.test(typeLineOf(c)));
+      if (!army) {
+        spawnTokens(
+          s,
+          controller,
+          {
+            name: `${effect.subtype} Army`,
+            typeLine: `Token Creature — ${effect.subtype} Army`,
+            power: "0",
+            toughness: "0",
+            count: 1,
+            tapped: false,
+          },
+          logs,
+          `resolved ${label}: `
+        );
+        army = controller.zones.battlefield[controller.zones.battlefield.length - 1];
+      }
+      if (army) {
+        army.counters["+1/+1"] = (army.counters["+1/+1"] ?? 0) + effect.count;
+        logs.push(
+          `amassed ${effect.subtype} ${effect.count}: put ${effect.count} +1/+1 counter${
+            effect.count === 1 ? "" : "s"
+          } on ${cardLabel(army)}`
+        );
+      }
+      break;
+    }
+    case "seq": {
+      for (const sub of effect.effects) {
+        applyEffect(s, controller, opponent, sub, label, sourceId, logs, target);
+      }
+      break;
+    }
     case "manual": {
       logs.push(`resolved ${label} — carry it out by hand: ${effect.note}`);
       break;
+    }
+  }
+}
+
+/**
+ * v6: fire `opponentDraws` triggers on the battlefield of the DRAWER's
+ * opponent, once per card actually drawn (CR 121.2). Callers are the real
+ * draw events only — the turn-based draw-step draw and mulligan/setup draws
+ * are exempt by simply never calling this (the event is defined with the
+ * Orcish Bowmasters exemption built in).
+ */
+function emitOpponentDrawTriggers(
+  s: GameState,
+  drawer: PlayerGameState,
+  count: number,
+  logs: string[]
+): void {
+  if (count <= 0) return;
+  const watcher = s.players.find((p) => p.playerId !== drawer.playerId);
+  if (!watcher) return;
+  const sorted = [...watcher.zones.battlefield].sort((a, b) => a.sortIndex - b.sortIndex);
+  for (let i = 0; i < count; i++) {
+    for (const permanent of sorted) {
+      pushTriggers(s, permanent, permanent.controllerId, "opponentDraws", logs);
     }
   }
 }

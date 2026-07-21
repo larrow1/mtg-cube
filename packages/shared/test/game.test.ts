@@ -1755,3 +1755,159 @@ describe("cost enforcement & land drops (v5)", () => {
     expect(s.log.some((e) => /not enforced when casting from the graveyard/.test(e.message))).toBe(true);
   });
 });
+
+describe("targeted triggers, opponentDraws & amass (v6)", () => {
+  /** Bowmasters-style script: on opponent draw, deal 1 to any target then amass Orc 1. */
+  const bowScript: CardScript = {
+    triggers: [
+      {
+        event: "opponentDraws",
+        optional: false,
+        description: "deal 1 to any target, then amass Orc 1",
+        effect: {
+          kind: "seq",
+          effects: [
+            { kind: "damageAnyTarget", amount: 1 },
+            { kind: "amass", subtype: "Orc", count: 1 },
+          ],
+        },
+      },
+    ],
+  };
+
+  /** p2 controls a "bow" permanent with the watcher script; ctx wired. */
+  function bowSetup() {
+    const g = newGame();
+    const bow = mkCard("p2", 950);
+    bow.cardId = "bow";
+    bow.instanceId = "bow1";
+    player(g, "p2").zones.battlefield.push(bow);
+    const ctx = {
+      cards: { bow: { ...mkCardData("bow"), typeLine: "Creature — Orc Archer" } },
+      scripts: { bow: bowScript },
+      cardNames: { bow: "Orcish Bowmasters" },
+    };
+    return { g, ctx };
+  }
+
+  it("manual-override draws fire opponentDraws once per card drawn (CR 121.2)", () => {
+    const { g, ctx } = bowSetup();
+    const s = applyAction(g, "p1", { type: "drawCard", count: 2, override: true }, 0, ctx);
+    const triggers = s.stack.filter((c) => c.isTrigger && c.cardId === "bow");
+    expect(triggers).toHaveLength(2);
+    expect(triggers[0]!.controllerId).toBe("p2");
+  });
+
+  it("scripted draw effects fire opponentDraws on the drawer's opponent", () => {
+    const { g, ctx } = bowSetup();
+    // p1 controls a permanent whose ETB draws a card -> p2's bow sees it.
+    const drawer = mkCard("p1", 951);
+    drawer.cardId = "wall";
+    player(g, "p1").zones.hand.push(drawer);
+    const ctx2 = {
+      ...ctx,
+      cards: { ...ctx.cards, wall: mkCardData("wall") },
+      scripts: { ...ctx.scripts, wall: mkScript("etb", { kind: "draw", count: 1 }) },
+    };
+    let s = applyAction(
+      g, "p1",
+      { type: "moveCard", instanceId: drawer.instanceId, from: "hand", to: "battlefield" },
+      0, ctx2
+    );
+    // Resolve the ETB draw trigger; the draw then queues the bow trigger.
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx2);
+    expect(s.stack.some((c) => c.isTrigger && c.cardId === "bow")).toBe(true);
+  });
+
+  it("the turn-based draw-step draw is exempt", () => {
+    const { g, ctx } = bowSetup();
+    let s = g;
+    // Advance the active player's turn into the draw step.
+    const active = s.activePlayerId;
+    while (s.step !== "draw") s = applyAction(s, active, { type: "nextStep" }, 0, ctx);
+    expect(s.stack.filter((c) => c.isTrigger && c.cardId === "bow")).toHaveLength(0);
+  });
+
+  it("mulligan redraws never fire opponentDraws", () => {
+    const { g, ctx } = bowSetup();
+    const s = applyAction(g, "p1", { type: "mulligan" }, 0, ctx);
+    expect(s.stack.filter((c) => c.isTrigger)).toHaveLength(0);
+  });
+
+  it("targeted trigger: needs a target, controller-only, player target loses life", () => {
+    const { g, ctx } = bowSetup();
+    let s = applyAction(g, "p1", { type: "drawCard", count: 1, override: true }, 0, ctx);
+    expect(s.stack).toHaveLength(1);
+    // p1 (non-controller) may not resolve it.
+    expect(() => applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx)).toThrow(/controller/);
+    // Controller without a target is rejected.
+    expect(() => applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx)).toThrow(/needs a target/);
+    // Controller targeting the opponent's face.
+    s = applyAction(
+      s, "p2",
+      { type: "resolveTopOfStack", target: { kind: "player", playerId: "p1" } },
+      0, ctx
+    );
+    expect(player(s, "p1").life).toBe(19);
+    // Amass ran too: p2 now has an Orc Army token with one +1/+1 counter.
+    const army = player(s, "p2").zones.battlefield.find((c) => c.isToken);
+    expect(army?.tokenName).toBe("Orc Army");
+    expect(army?.tokenTypeLine).toContain("Army");
+    expect(army?.counters["+1/+1"]).toBe(1);
+  });
+
+  it("permanent targets take marked damage; second amass grows the same Army", () => {
+    const { g, ctx } = bowSetup();
+    const bear = mkCard("p1", 960);
+    bear.cardId = "bear";
+    player(g, "p1").zones.battlefield.push(bear);
+    const ctx2 = { ...ctx, cards: { ...ctx.cards, bear: mkCardData("bear") } };
+    let s = applyAction(g, "p1", { type: "drawCard", count: 2, override: true }, 0, ctx2);
+    expect(s.stack).toHaveLength(2);
+    s = applyAction(
+      s, "p2",
+      { type: "resolveTopOfStack", target: { kind: "permanent", instanceId: bear.instanceId } },
+      0, ctx2
+    );
+    s = applyAction(
+      s, "p2",
+      { type: "resolveTopOfStack", target: { kind: "permanent", instanceId: bear.instanceId } },
+      0, ctx2
+    );
+    const hitBear = player(s, "p1").zones.battlefield.find((c) => c.instanceId === bear.instanceId);
+    expect(hitBear?.damage).toBe(2);
+    const armies = player(s, "p2").zones.battlefield.filter((c) => c.isToken);
+    expect(armies).toHaveLength(1); // amass reuses the existing Army
+    expect(armies[0]!.counters["+1/+1"]).toBe(2);
+  });
+
+  it("rejects a target that is not on any battlefield", () => {
+    const { g, ctx } = bowSetup();
+    const s = applyAction(g, "p1", { type: "drawCard", count: 1, override: true }, 0, ctx);
+    expect(() =>
+      applyAction(
+        s, "p2",
+        { type: "resolveTopOfStack", target: { kind: "permanent", instanceId: "ghost" } },
+        0, ctx
+      )
+    ).toThrow(/not on the battlefield/);
+  });
+
+  it("non-targeted triggers still resolve by either player with no target", () => {
+    const g = newGame();
+    const src = mkCard("p1", 970);
+    src.cardId = "src";
+    player(g, "p1").zones.hand.push(src);
+    const ctx = {
+      cards: { src: mkCardData("src") },
+      scripts: { src: mkScript("etb", { kind: "gainLife", amount: 2 }) },
+    };
+    let s = applyAction(
+      g, "p1",
+      { type: "moveCard", instanceId: src.instanceId, from: "hand", to: "battlefield" },
+      0, ctx
+    );
+    s = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx); // opponent clicks it
+    expect(player(s, "p1").life).toBe(22);
+  });
+});

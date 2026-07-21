@@ -215,7 +215,7 @@ describe("inferScript — oracle-text templates (real card texts)", () => {
     ]);
   });
 
-  it("dies trigger with self-damage to any target: Perilous Myr", () => {
+  it("dies trigger with damage to any target infers a REAL target (v6): Perilous Myr", () => {
     const script = inferScript(
       card("Perilous Myr", "When Perilous Myr dies, it deals 2 damage to any target.")
     );
@@ -224,7 +224,7 @@ describe("inferScript — oracle-text templates (real card texts)", () => {
         event: "dies",
         optional: false,
         description: "When Perilous Myr dies, it deals 2 damage to any target.",
-        effect: { kind: "damageOpponent", amount: 2 },
+        effect: { kind: "damageAnyTarget", amount: 2 },
       },
     ]);
   });
@@ -889,5 +889,34 @@ describe("UNSUPPORTED_TRIGGER_CARDS — documented gaps", () => {
     expect(UNSUPPORTED_TRIGGER_CARDS["Sheoldred, the Apocalypse"]).toMatch(/draw/i);
     expect(UNSUPPORTED_TRIGGER_CARDS["Lotus Cobra"]).toMatch(/landfall/i);
     expect(UNSUPPORTED_TRIGGER_CARDS["Urza's Saga"]).toMatch(/saga/i);
+  });
+});
+
+describe("v6: Orcish Bowmasters & amass", () => {
+  it("Orcish Bowmasters override is fully scripted (etb + opponentDraws, seq effects)", () => {
+    const script = CARD_OVERRIDES["Orcish Bowmasters"]!;
+    expect(script.triggers).toHaveLength(2);
+    const events = script.triggers.map((t) => t.event).sort();
+    expect(events).toEqual(["etb", "opponentDraws"]);
+    for (const t of script.triggers) {
+      expect(t.effect).toEqual({
+        kind: "seq",
+        effects: [
+          { kind: "damageAnyTarget", amount: 1 },
+          { kind: "amass", subtype: "Orc", count: 1 },
+        ],
+      });
+    }
+  });
+
+  it("Orcish Bowmasters is no longer in UNSUPPORTED_TRIGGER_CARDS", () => {
+    expect(UNSUPPORTED_TRIGGER_CARDS["Orcish Bowmasters"]).toBeUndefined();
+  });
+
+  it("amass clause parses as an effect template", () => {
+    const script = inferScript(
+      card("Amass Test", "When Amass Test enters the battlefield, amass Orcs 1.")
+    );
+    expect(script?.triggers[0]?.effect).toEqual({ kind: "amass", subtype: "Orc", count: 1 });
   });
 });

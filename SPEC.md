@@ -140,3 +140,26 @@ Grounded in the Comprehensive Rules corpus now checked into `docs/rules/` (queri
 - Any trigger/spell on the stack, a pendingSearch, mulligan not resolved, or game finished suspends auto. One auto action per seq (loop guard).
 
 **Client**: hand-card context menu gains "Cast without paying (override)" and, for lands after the first, "Play as additional land (override)"; normal click/drag just auto-pays. Rejections surface as the server's EngineError toast. Auto toggle lives next to the phase ribbon with an active glow; flipping seats in the sandbox keeps it per-viewer.
+
+## Targeted triggers, opponent-draw event & amass (v6)
+
+Grounded in docs/rules: CR 115.4 ("any target" = creatures, players, planeswalkers, battles), CR 701.47a (amass), CR 121.2 (multi-card draws are N individual draws), CR 603.3d/608.2b (target timing/legality). DELIBERATE DEVIATION: real Magic chooses trigger targets when the ability goes on the stack (603.3d); this engine chooses them when the trigger RESOLVES — triggers enter the stack mid-action where no UI prompt is possible, and resolution-time choice matches the manual-first table feel. Target legality is validated at resolution (spirit of 608.2b).
+
+**Types**: `TargetRef = { kind: "player"; playerId } | { kind: "permanent"; instanceId }`. `TriggerEvent` gains `opponentDraws`. `TriggerEffect` gains:
+- `{ kind: "damageAnyTarget"; amount }` — needs a TargetRef at resolution; player -> lose that much life, permanent -> add marked damage (creature death stays manual as ever).
+- `{ kind: "amass"; subtype; count }` — CR 701.47a mechanically: if the controller has no battlefield card whose (token)type line contains "Army", create a 0/0 black `<subtype> Army` token (`Token Creature — <subtype> Army`); then put `count` +1/+1 counters on the first Army (battlefield order). Subtype-addition to a non-matching Army is logged, not modeled.
+- `{ kind: "seq"; effects: TriggerEffect[] }` — resolve sub-effects in order, sharing one TargetRef (Bowmasters: damage then amass).
+`resolveTopOfStack` gains optional `target?: TargetRef`.
+
+**Engine**:
+- `effectNeedsTarget(effect)` exported (recurses seq). Resolving a trigger whose effect needs a target requires (a) actor === trigger controller ("the controller chooses targets"), (b) `action.target` present and legal (player exists / permanent on some battlefield) — EngineError otherwise. Non-targeted triggers resolve exactly as before, by either player.
+- `opponentDraws` emission: whenever player X actually draws, each of the OTHER player's battlefield permanents fires its `opponentDraws` triggers once PER CARD drawn (CR 121.2). Exempt: the turn-based draw-step draw (the event is defined as "an opponent draws, except the first card of their draw step" — Bowmasters wording; documented on the event) and mulligan/setup draws. Emission sites: the `drawCard` override action and scripted `draw` effects (trigger + onResolve executors).
+- Amass token ids reuse the spawnTokens machinery.
+
+**cardScripts**:
+- Inference change: "deals N damage to any target" now infers `damageAnyTarget` (was: damageOpponent shorthand). "deals N damage to each opponent" keeps damageOpponent. Existing override descriptions unaffected.
+- `Orcish Bowmasters` override becomes fully scripted: etb trigger AND opponentDraws trigger, each `seq[damageAnyTarget 1, amass Orcs 1]`; removed from UNSUPPORTED_TRIGGER_CARDS.
+
+**Client**:
+- Resolving a targeted trigger (its controller only) enters target mode instead of resolving immediately: a banner prompts "choose a target", every battlefield card is clickable as a target, and the banner offers a button per player for face damage. Esc cancels. Non-controllers see the Resolve button disabled with a "controller chooses the target" hint.
+- Auto mode (v5) extension: main1/main2 ALSO auto-advance when the player has no possible action there — no castable card in hand (any speed, auto-pay check), no land drop available (land in hand + none played), and no activatable ability on an untapped permanent. Combat decisions still stop the flow only when relevant (untapped creatures). Net effect: with truly nothing to do, auto passes entire turns.
