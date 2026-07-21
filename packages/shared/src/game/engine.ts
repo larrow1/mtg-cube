@@ -733,14 +733,7 @@ export function applyAction(
 
     case "nextStep": {
       requireActive(s, actorId, "nextStep");
-      if (s.step === "cleanup") {
-        advanceTurn(s, logs);
-      } else {
-        const idx = TURN_STEPS.indexOf(s.step);
-        const next = TURN_STEPS[idx + 1];
-        if (next === undefined) throw new EngineError(`Cannot advance past step "${s.step}"`);
-        enterStep(s, next, logs);
-      }
+      advanceToNextStep(s, logs);
       // v12: flow through transit steps until a manual step or a held trigger.
       autoAdvanceTransit(s, logs);
       break;
@@ -764,12 +757,26 @@ export function applyAction(
       // of the stack resolves automatically — no separate click needed.
       // Exception: an entry still awaiting a FRESH target choice (no
       // chosenTarget from cast time) stops here for its controller to pick.
-      if (s.stack.length > 0 && s.priorityPasses >= 2 && !topNeedsFreshTarget(s)) {
+      if (s.priorityPasses >= 2 && s.stack.length > 0 && !topNeedsFreshTarget(s)) {
         resolveStackTop(s, s.activePlayerId, { type: "resolveTopOfStack" }, logs);
         // v12 integration: if that resolution emptied the stack during a
         // held transit step, resume the auto-advance (see STACK_EMPTYING_ACTIONS
         // — passPriority is deliberately excluded from that blanket set so
         // this only fires when auto-resolve actually did something).
+        autoAdvanceTransit(s, logs);
+      } else if (
+        s.priorityPasses >= 2 &&
+        s.stack.length === 0 &&
+        !s.finished &&
+        !s.pendingSearch &&
+        !s.players.some((p) => p.hasLost)
+      ) {
+        // v14 (CR 500.4/117.5): both players passed with nothing on the
+        // stack — the current step/phase ends on its own, no explicit
+        // nextStep/nextTurn click required. Mirrors the nextStep action's
+        // own advance logic, then lets autoAdvanceTransit chain through any
+        // following transit steps exactly as nextStep already does.
+        advanceToNextStep(s, logs);
         autoAdvanceTransit(s, logs);
       }
       break;
@@ -2283,6 +2290,18 @@ function castFilterMatches(
  * the stack before the continue/hold decision (the v9 end-of-action pass
  * would otherwise decide too late). The guard bounds runaway chains.
  */
+/** Advance from the current step to the next one (cleanup ends the turn). */
+function advanceToNextStep(s: GameState, logs: string[]): void {
+  if (s.step === "cleanup") {
+    advanceTurn(s, logs);
+  } else {
+    const idx = TURN_STEPS.indexOf(s.step);
+    const next = TURN_STEPS[idx + 1];
+    if (next === undefined) throw new EngineError(`Cannot advance past step "${s.step}"`);
+    enterStep(s, next, logs);
+  }
+}
+
 function autoAdvanceTransit(s: GameState, logs: string[]): void {
   let guard = 0;
   for (;;) {

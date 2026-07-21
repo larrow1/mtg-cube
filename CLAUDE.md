@@ -112,7 +112,12 @@ resolution isn't a separate click) unless it still needs a fresh target
 choice; counterTopOfStack's priority gate was removed (manual escape hatch,
 would otherwise be unreachable, folded into v12's STACK_EMPTYING_ACTIONS/
 autoAdvanceTransit interlock) and Auto mode simplifies to "just pass";
-322 shared tests;
+v14 the second passPriority over an EMPTY stack now also auto-advances the
+step/turn itself (CR 500.4 — a manual step ends once both players decline
+to act in it, not just when the active player clicks nextStep/nextTurn);
+shared `advanceToNextStep` helper backs both the automatic and explicit
+paths;
+326 shared tests;
 Arena-style UI (draft lanes/drag-to-pick, deck builder, battlefield art
 tiles with color frames + keyword chips, mana symbols).
 

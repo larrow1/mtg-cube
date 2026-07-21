@@ -570,7 +570,10 @@ describe("priority passing (v11)", () => {
   it("casting retains priority for the caster and resets the pass counter", () => {
     const g = newGame();
     const spell = handCard(g, "p1");
-    let s = bothPass(g); // pass twice on the empty stack — harmless, just churns priority
+    // Passing twice on the empty stack auto-advances the turn structure (v14)
+    // all the way to main1 (untap/upkeep/draw are transit steps); p1 stays
+    // active throughout, so this is still harmless for what's being asserted.
+    let s = bothPass(g);
     s = applyAction(s, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "stack" });
     expect(s.priorityPlayerId).toBe("p1");
     expect(s.priorityPasses).toBe(0);
@@ -619,6 +622,53 @@ describe("priority passing (v11)", () => {
     s = applyAction(s, "p1", { type: "resolveTopOfStack", target: { kind: "player", playerId: "p2" } }, 0, ctx);
     expect(s.stack).toHaveLength(0);
     expect(player(s, "p2").life).toBe(17);
+  });
+});
+
+describe("auto-advance the step/turn on a double pass with an empty stack (v14)", () => {
+  it("one pass with an empty stack does nothing — the step is unchanged", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    atStep(g, active, "main1");
+    const s = applyAction(g, active, { type: "passPriority" });
+    expect(s.priorityPasses).toBe(1);
+    expect(s.step).toBe("main1");
+  });
+
+  it("both players passing with an empty stack in a manual step advances past it automatically", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    atStep(g, active, "main1");
+    const s = bothPass(g);
+    // main1 -> beginCombat (transit) -> declareAttackers (manual, holds).
+    expect(s.step).toBe("declareAttackers");
+    expect(s.activePlayerId).toBe(active);
+    expect(s.priorityPasses).toBe(0);
+    expect(s.log.some((e) => /moved to the declareAttackers step/.test(e.message))).toBe(true);
+  });
+
+  it("both players passing from the end step passes the turn, mirroring nextStep", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    const inactive = other(g, active);
+    atStep(g, active, "end");
+    const handBefore = player(g, inactive).zones.hand.length;
+    const s = bothPass(g);
+    expect(s.activePlayerId).toBe(inactive);
+    expect(s.priorityPlayerId).toBe(inactive);
+    expect(s.step).toBe("main1");
+    expect(player(s, inactive).zones.hand).toHaveLength(handBefore + 1); // drew in the chain
+  });
+
+  it("a stack that isn't empty is unaffected — that path still goes through auto-resolve, not step advance", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    const spell = handCard(g, active);
+    atStep(g, active, "main1");
+    let s = applyAction(g, active, { type: "moveCard", instanceId: spell, from: "hand", to: "stack" });
+    s = bothPass(s); // resolves the spell (v13); does not also advance the step
+    expect(s.stack).toHaveLength(0);
+    expect(s.step).toBe("main1");
   });
 });
 
