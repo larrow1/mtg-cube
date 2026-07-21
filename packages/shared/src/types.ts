@@ -266,7 +266,16 @@ export const BASIC_LAND_NAMES = ["Plains", "Island", "Swamp", "Mountain", "Fores
 // back to `manual` so nothing is silently missed.
 // ---------------------------------------------------------------------------
 
-export type TriggerEvent = "etb" | "dies" | "upkeep";
+export type TriggerEvent =
+  | "etb" // this card enters the battlefield
+  | "dies" // battlefield -> graveyard
+  | "leaves" // battlefield -> any other zone (fires for death too unless a dies trigger exists)
+  | "upkeep" // beginning of the controller's upkeep
+  | "eachUpkeep" // beginning of every upkeep
+  | "endStep" // beginning of the controller's end step
+  | "attack" // this creature is declared as an attacker
+  | "castSpell" // controller casts a spell (moveCard -> stack), see castFilter
+  | "combatDamageToPlayer"; // combat-damage step begins with this creature attacking and unblocked
 
 export type TriggerEffect =
   | { kind: "draw"; count: number }
@@ -287,6 +296,13 @@ export interface CardTrigger {
   /** Human-readable ability text shown on the stack. */
   description: string;
   effect: TriggerEffect;
+  /**
+   * castSpell only: which casts fire this trigger (default "any").
+   * "artifact" was added for the recurring cube pattern "Whenever you cast an
+   * artifact spell, ..." (Forensic Gadgeteer, Ravenous Robots, Pinnacle
+   * Emissary in the LSV list); it matches type lines containing "Artifact".
+   */
+  castFilter?: "any" | "instantOrSorcery" | "noncreature" | "creature" | "artifact";
 }
 
 export interface CardScript {

@@ -481,6 +481,7 @@ export function Game(): JSX.Element {
             gameCard={gc}
             data={cards[gc.cardId]}
             size="sm"
+            variant="artTile"
             attachedName={attachedNameOf(gc)}
             selected={attachSource === gc.instanceId || blockSource === gc.instanceId}
             highlight={gc.attacking ? "attack" : gc.blocking ? "block" : null}
@@ -489,7 +490,9 @@ export function Game(): JSX.Element {
             onDragStart={(e) => setDragPayload(e, { instanceId: gc.instanceId, from: "battlefield" })}
             onClick={mine ? (e) => clickMyBattlefieldCard(gc, e) : () => clickOppBattlefieldCard(gc)}
             onContextMenu={mine && canAct ? (e) => openMenu(e, battlefieldMenu(gc)) : (e) => e.preventDefault()}
-            className={gc.tapped ? "mx-3" : ""}
+            // Landscape tile rotated 90° overhangs vertically (not horizontally
+            // like the old portrait cards) — trade margin axes accordingly.
+            className={gc.tapped ? "my-4 -mx-2" : ""}
           />
         ))
       )}
@@ -807,8 +810,9 @@ export function Game(): JSX.Element {
                 {gs.log.length === 0 ? (
                   <div className="text-[10px] text-zinc-500">All quiet so far — go make some history.</div>
                 ) : (
-                  [...gs.log].reverse().map((entry) => (
-                    <div key={entry.seq} className="text-[10px] leading-snug text-zinc-400">
+                  [...gs.log].reverse().map((entry, i) => (
+                    // seq alone is not unique: one action can append several log lines.
+                    <div key={`${entry.seq}:${i}`} className="text-[10px] leading-snug text-zinc-400">
                       {entry.playerId && <span className="font-bold text-zinc-300">{nameFor(entry.playerId)} </span>}
                       {entry.message}
                     </div>

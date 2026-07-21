@@ -11,6 +11,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type Dispatch,
   type DragEvent,
   type MouseEvent as ReactMouseEvent,
@@ -30,11 +31,43 @@ import {
 
 export type CardSize = "xs" | "sm" | "md" | "lg";
 
+/** "frame" = classic full-card scan; "artTile" = Arena-style battlefield tile. */
+export type CardVariant = "frame" | "artTile";
+
 const SIZE_CLASSES: Record<CardSize, string> = {
   xs: "w-[64px]",
   sm: "w-[92px]",
   md: "w-[130px]",
   lg: "w-[244px]",
+};
+
+// Art-tile widths run wider than the frame widths because the tile is
+// landscape (4:3) — a sm tile is shorter than a sm frame card.
+const ART_TILE_SIZE_CLASSES: Record<CardSize, string> = {
+  xs: "w-[84px]",
+  sm: "w-[116px]",
+  md: "w-[150px]",
+  lg: "w-[244px]",
+};
+
+/**
+ * CSS crop of a full-card scan down to its art band. Modern frames paint the
+ * art between roughly 11% and 55.5% of card height; the band is horizontally
+ * centered. We scale the scan so the band's height fills the 4:3 tile and
+ * center it — the slight horizontal overshoot crops evenly off both edges.
+ * Tuned visually against real Scryfall scans.
+ */
+const ART_CROP_TOP = 0.115;
+const ART_CROP_BOTTOM = 0.555;
+const ART_BAND = ART_CROP_BOTTOM - ART_CROP_TOP;
+
+const ART_IMG_STYLE: CSSProperties = {
+  position: "absolute",
+  height: `${(100 / ART_BAND).toFixed(2)}%`,
+  top: `${((-ART_CROP_TOP * 100) / ART_BAND).toFixed(2)}%`,
+  left: "50%",
+  transform: "translateX(-50%)",
+  maxWidth: "none",
 };
 
 // ---------------------------------------------------------------------------
@@ -210,6 +243,72 @@ export function CardBack({ className = "" }: { className?: string }): JSX.Elemen
 }
 
 // ---------------------------------------------------------------------------
+// Art tile (Arena-style battlefield rendering)
+// ---------------------------------------------------------------------------
+
+/** Subtle tile border tint per color bucket. */
+function tileBorderClass(bucket: ReturnType<typeof colorBucket>): string {
+  switch (bucket) {
+    case "W":
+      return "border-amber-200/40";
+    case "U":
+      return "border-sky-400/40";
+    case "B":
+      return "border-purple-500/35";
+    case "R":
+      return "border-red-400/40";
+    case "G":
+      return "border-green-500/40";
+    case "M":
+      return "border-yellow-400/45";
+    case "L":
+      return "border-orange-400/35";
+    default:
+      return "border-zinc-400/30";
+  }
+}
+
+/** Slim translucent name strip across the top of an art tile. */
+function TileNameStrip({ name }: { name: string }): JSX.Element {
+  return (
+    <div className="pointer-events-none absolute inset-x-0 top-0 bg-gradient-to-b from-black/80 via-black/45 to-transparent px-1.5 pb-2.5 pt-0.5">
+      <div className="truncate text-[9px] font-semibold leading-tight text-zinc-50 text-shadow">{name}</div>
+    </div>
+  );
+}
+
+/** P/T plate bottom-right of an art tile. */
+function TilePtPlate({ pt }: { pt: string }): JSX.Element {
+  return (
+    <span className="pointer-events-none absolute bottom-0.5 right-0.5 rounded-md border border-white/25 bg-black/80 px-1 py-px text-[10px] font-black leading-tight tracking-tight text-zinc-50 shadow-[0_1px_3px_rgba(8,6,30,0.7)]">
+      {pt}
+    </span>
+  );
+}
+
+interface ArtTileFallbackProps {
+  name: string;
+  typeLine?: string;
+  pt: string | null;
+  bucket: ReturnType<typeof colorBucket>;
+}
+
+/** Art-tile-shaped fallback for cards with no image (and for tokens). */
+function ArtTileFallback({ name, typeLine, pt, bucket }: ArtTileFallbackProps): JSX.Element {
+  return (
+    <div
+      className={`relative flex h-full w-full flex-col items-center justify-center overflow-hidden rounded-lg border bg-gradient-to-br to-felt-950 px-1.5 ${frameClasses(bucket)} bg-felt-900`}
+    >
+      <span className="line-clamp-2 text-center text-[10px] font-semibold leading-tight text-zinc-100">{name}</span>
+      {typeLine && (
+        <span className="mt-0.5 max-w-full truncate text-center text-[8px] leading-tight text-zinc-400">{typeLine}</span>
+      )}
+      {pt && <TilePtPlate pt={pt} />}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Card
 // ---------------------------------------------------------------------------
 
@@ -221,6 +320,12 @@ export interface CardProps {
   /** Force a card back (e.g. opponent hand). */
   back?: boolean;
   size?: CardSize;
+  /**
+   * "frame" (default) renders the classic full-card look; "artTile" renders an
+   * Arena-style landscape tile cropped to the card art (battlefield only).
+   * The hover preview always shows the full "frame" rendering.
+   */
+  variant?: CardVariant;
   selected?: boolean;
   highlight?: "attack" | "block" | null;
   dimmed?: boolean;
@@ -243,6 +348,7 @@ export function Card(props: CardProps): JSX.Element {
     faceIndex,
     back = false,
     size = "md",
+    variant = "frame",
     selected = false,
     highlight = null,
     dimmed = false,
@@ -280,8 +386,11 @@ export function Card(props: CardProps): JSX.Element {
   const face = activeFace(data, shownFaceIndex);
   const faceImageNormal = face && "imageNormal" in face ? face.imageNormal : undefined;
   const faceImageSmall = face && "imageSmall" in face ? face.imageSmall : undefined;
+  const artTile = variant === "artTile";
+  // Art tiles zoom into the scan's art band (~2.3x), so always prefer the
+  // normal-resolution image there; small scans go blurry when cropped.
   const imgSrc =
-    size === "xs" || size === "sm"
+    (size === "xs" || size === "sm") && !artTile
       ? (faceImageSmall ?? faceImageNormal ?? data?.imageSmall ?? data?.imageNormal)
       : (faceImageNormal ?? faceImageSmall ?? data?.imageNormal ?? data?.imageSmall);
 
@@ -302,9 +411,22 @@ export function Card(props: CardProps): JSX.Element {
 
   let body: JSX.Element;
   if (showBack) {
-    body = <CardBack />;
+    body = artTile ? (
+      <div className="absolute inset-0 overflow-hidden rounded-lg">
+        <CardBack className="!rounded-lg" />
+      </div>
+    ) : (
+      <CardBack />
+    );
   } else if (isToken && gameCard) {
-    body = (
+    body = artTile ? (
+      <ArtTileFallback
+        name={gameCard.tokenName ?? "Token"}
+        typeLine={gameCard.tokenTypeLine}
+        pt={powerToughnessOf(gameCard, undefined)}
+        bucket="C"
+      />
+    ) : (
       <TextFrame
         name={gameCard.tokenName ?? "Token"}
         typeLine={gameCard.tokenTypeLine}
@@ -314,7 +436,20 @@ export function Card(props: CardProps): JSX.Element {
       />
     );
   } else if (imgSrc && !imageFailed) {
-    body = (
+    body = artTile ? (
+      <div className={`absolute inset-0 overflow-hidden rounded-lg border bg-felt-950 ${tileBorderClass(colorBucket(data))}`}>
+        <img
+          src={imgSrc}
+          alt={name}
+          loading="lazy"
+          draggable={false}
+          onError={() => setImageFailed(true)}
+          style={ART_IMG_STYLE}
+        />
+        <TileNameStrip name={name} />
+        {pt && <TilePtPlate pt={pt} />}
+      </div>
+    ) : (
       <img
         src={imgSrc}
         alt={name}
@@ -322,6 +457,15 @@ export function Card(props: CardProps): JSX.Element {
         draggable={false}
         onError={() => setImageFailed(true)}
         className="h-full w-full rounded-[6%] object-cover"
+      />
+    );
+  } else if (artTile) {
+    body = (
+      <ArtTileFallback
+        name={name}
+        typeLine={face?.typeLine ?? data?.typeLine}
+        pt={pt}
+        bucket={colorBucket(data)}
       />
     );
   } else {
@@ -369,10 +513,10 @@ export function Card(props: CardProps): JSX.Element {
           setPreview(null);
         }
       }}
-      className={`relative shrink-0 select-none ${SIZE_CLASSES[size]} ${className} ${onClick || onDoubleClick || onContextMenu ? "cursor-pointer" : ""}`}
+      className={`relative shrink-0 select-none ${artTile ? ART_TILE_SIZE_CLASSES[size] : SIZE_CLASSES[size]} ${className} ${onClick || onDoubleClick || onContextMenu ? "cursor-pointer" : ""}`}
     >
       <div
-        className={`relative aspect-[5/7] w-full rounded-[6%] transition-all duration-150 ${ring} ${tapped ? "rotate-90" : ""} ${dimmed ? "opacity-50" : ""} ${onClick || onDoubleClick ? "hover:-translate-y-1 hover:scale-[1.03]" : ""}`}
+        className={`relative w-full transition-all duration-150 ${artTile ? "aspect-[4/3] rounded-lg" : "aspect-[5/7] rounded-[6%]"} ${ring} ${tapped ? "rotate-90" : ""} ${dimmed ? "opacity-50" : ""} ${onClick || onDoubleClick ? "hover:-translate-y-1 hover:scale-[1.03]" : ""}`}
       >
         {body}
         {isFaceDown && !isHidden && (
@@ -396,7 +540,7 @@ export function Card(props: CardProps): JSX.Element {
           </span>
         )}
         {counters.length > 0 && (
-          <div className="absolute bottom-1 left-1 right-1 flex flex-wrap gap-0.5">
+          <div className={`absolute bottom-1 left-1 flex flex-wrap gap-0.5 ${artTile ? "right-8" : "right-1"}`}>
             {counters.map(([type, n]) => (
               <span key={type} className="rounded bg-amber-400 px-1 py-0.5 text-[9px] font-bold leading-none text-amber-950 shadow" title={`${n} ${type} counter${n === 1 ? "" : "s"}`}>
                 {n} {type}

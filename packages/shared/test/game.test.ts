@@ -802,6 +802,251 @@ describe("triggered abilities", () => {
     ).toThrow(/resolve, counter, or decline/);
   });
 
+  it("leaves triggers fire on battlefield -> exile / hand / library", () => {
+    const g = newGame();
+    const id = handCard(g, "p1");
+    const cardId = player(g, "p1").zones.hand[0]!.cardId;
+    const ctx = { scripts: { [cardId]: mkScript("leaves", { kind: "draw", count: 1 }) } };
+
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
+    expect(s.stack).toHaveLength(0); // leaves-only script: nothing on ETB
+    s = applyAction(s, "p1", { type: "moveCard", instanceId: id, from: "battlefield", to: "exile" }, 0, ctx);
+    expect(s.stack).toHaveLength(1);
+    expect(s.stack[0]!.isTrigger).toBe(true);
+
+    // Returning to the battlefield and bouncing to hand fires it again.
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    s = applyAction(s, "p1", { type: "moveCard", instanceId: id, from: "exile", to: "battlefield" }, 0, ctx);
+    s = applyAction(s, "p1", { type: "moveCard", instanceId: id, from: "battlefield", to: "hand" }, 0, ctx);
+    expect(s.stack).toHaveLength(1);
+  });
+
+  it("leaves fires on death when the script has NO dies trigger", () => {
+    const g = newGame();
+    const id = handCard(g, "p1");
+    const cardId = player(g, "p1").zones.hand[0]!.cardId;
+    const ctx = { scripts: { [cardId]: mkScript("leaves", { kind: "gainLife", amount: 5 }) } };
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
+    s = applyAction(s, "p1", { type: "moveCard", instanceId: id, from: "battlefield", to: "graveyard" }, 0, ctx);
+    expect(s.stack).toHaveLength(1);
+    s = applyAction(s, "p1", { type: "resolveTopOfStack" }, 0, ctx);
+    expect(player(s, "p1").life).toBe(25);
+  });
+
+  it("dies/leaves precedence: a script with BOTH fires only dies on death, only leaves elsewhere", () => {
+    const g = newGame();
+    const id = handCard(g, "p1");
+    const cardId = player(g, "p1").zones.hand[0]!.cardId;
+    const script: CardScript = {
+      triggers: [
+        { event: "dies", optional: false, description: "dies trigger", effect: { kind: "loseLife", amount: 1 } },
+        { event: "leaves", optional: false, description: "leaves trigger", effect: { kind: "draw", count: 1 } },
+      ],
+    };
+    const ctx = { scripts: { [cardId]: script } };
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
+
+    // Death: only the dies trigger, no double-fire.
+    const dead = applyAction(s, "p1", { type: "moveCard", instanceId: id, from: "battlefield", to: "graveyard" }, 0, ctx);
+    expect(dead.stack).toHaveLength(1);
+    expect(dead.stack[0]!.triggerText).toBe("dies trigger");
+
+    // Exile: only the leaves trigger.
+    const exiled = applyAction(s, "p1", { type: "moveCard", instanceId: id, from: "battlefield", to: "exile" }, 0, ctx);
+    expect(exiled.stack).toHaveLength(1);
+    expect(exiled.stack[0]!.triggerText).toBe("leaves trigger");
+  });
+
+  it("eachUpkeep fires for BOTH players' permanents; upkeep stays active-only", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    const inactive = other(g, active);
+    const mine = handCard(g, active);
+    const mineCardId = player(g, active).zones.hand[0]!.cardId;
+    let s = applyAction(g, active, { type: "moveCard", instanceId: mine, from: "hand", to: "battlefield" });
+    const theirs = handCard(s, inactive);
+    const theirsCardId = player(s, inactive).zones.hand[0]!.cardId;
+    s = applyAction(s, inactive, { type: "moveCard", instanceId: theirs, from: "hand", to: "battlefield" });
+
+    const ctx = {
+      scripts: {
+        [mineCardId]: mkScript("eachUpkeep", { kind: "gainLife", amount: 1 }),
+        [theirsCardId]: mkScript("eachUpkeep", { kind: "draw", count: 1 }),
+      },
+    };
+    s = applyAction(s, active, { type: "nextStep" }, 0, ctx); // untap -> upkeep
+    expect(s.step).toBe("upkeep");
+    expect(s.stack).toHaveLength(2);
+    // Active player's permanents first, then the opponent's; each trigger is
+    // controlled by its permanent's controller.
+    expect(s.stack.map((c) => c.triggerSourceId)).toEqual([mine, theirs]);
+    expect(s.stack.map((c) => c.controllerId)).toEqual([active, inactive]);
+
+    // Resolving the opponent's trigger draws for the OPPONENT.
+    const theirHand = player(s, inactive).zones.hand.length;
+    s = applyAction(s, active, { type: "resolveTopOfStack" }, 0, ctx);
+    expect(player(s, inactive).zones.hand).toHaveLength(theirHand + 1);
+  });
+
+  it("endStep triggers fire for the active player's permanents on entering the end step", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    const inactive = other(g, active);
+    const mine = handCard(g, active);
+    const mineCardId = player(g, active).zones.hand[0]!.cardId;
+    let s = applyAction(g, active, { type: "moveCard", instanceId: mine, from: "hand", to: "battlefield" });
+    const theirs = handCard(s, inactive);
+    const theirsCardId = player(s, inactive).zones.hand[0]!.cardId;
+    s = applyAction(s, inactive, { type: "moveCard", instanceId: theirs, from: "hand", to: "battlefield" });
+
+    const ctx = {
+      scripts: {
+        [mineCardId]: mkScript("endStep", { kind: "gainLife", amount: 2 }),
+        [theirsCardId]: mkScript("endStep", { kind: "gainLife", amount: 2 }),
+      },
+    };
+    while (s.step !== "end") s = applyAction(s, active, { type: "nextStep" }, 0, ctx);
+    // Only the active player's permanent triggered.
+    expect(s.stack).toHaveLength(1);
+    expect(s.stack[0]!.triggerSourceId).toBe(mine);
+    expect(s.stack[0]!.controllerId).toBe(active);
+  });
+
+  it("attack triggers fire on declaring only — not on un-declaring or redundant re-declares", () => {
+    const g = newGame();
+    const id = handCard(g, "p1");
+    const cardId = player(g, "p1").zones.hand[0]!.cardId;
+    const ctx = { scripts: { [cardId]: mkScript("attack", { kind: "gainLife", amount: 1 }) } };
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
+
+    s = applyAction(s, "p1", { type: "setAttacking", instanceId: id, attacking: true }, 0, ctx);
+    expect(s.stack).toHaveLength(1);
+    // Redundant re-declare: no second trigger.
+    s = applyAction(s, "p1", { type: "setAttacking", instanceId: id, attacking: true }, 0, ctx);
+    expect(s.stack).toHaveLength(1);
+    // Un-declaring never fires.
+    s = applyAction(s, "p1", { type: "setAttacking", instanceId: id, attacking: false }, 0, ctx);
+    expect(s.stack).toHaveLength(1);
+    // Declaring again after un-declaring fires again.
+    s = applyAction(s, "p1", { type: "setAttacking", instanceId: id, attacking: true }, 0, ctx);
+    expect(s.stack).toHaveLength(2);
+  });
+
+  it("castSpell triggers fire on the caster's own permanents, above the cast spell", () => {
+    const g = newGame();
+    const source = handCard(g, "p1");
+    const sourceCardId = player(g, "p1").zones.hand[0]!.cardId;
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: source, from: "hand", to: "battlefield" });
+    // Opponent has a castSpell permanent too — it must NOT fire on p1's cast.
+    const theirs = handCard(s, "p2");
+    const theirsCardId = player(s, "p2").zones.hand[0]!.cardId;
+    s = applyAction(s, "p2", { type: "moveCard", instanceId: theirs, from: "hand", to: "battlefield" });
+
+    const ctx = {
+      scripts: {
+        [sourceCardId]: mkScript("castSpell", { kind: "createToken", name: "Monk", typeLine: "Token Creature — Monk", power: "1", toughness: "1", count: 1 }),
+        [theirsCardId]: mkScript("castSpell", { kind: "draw", count: 1 }),
+      },
+    };
+    const spell = handCard(s, "p1");
+    s = applyAction(s, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "stack" }, 0, ctx);
+    expect(s.stack).toHaveLength(2);
+    expect(s.stack[0]!.instanceId).toBe(spell); // spell below
+    expect(s.stack[1]!.isTrigger).toBe(true); // trigger above (resolves first)
+    expect(s.stack[1]!.triggerSourceId).toBe(source);
+    expect(s.stack[1]!.controllerId).toBe("p1");
+  });
+
+  it("castSpell fires from graveyard/exile casts but not battlefield moves; the spell itself does not trigger", () => {
+    const g = newGame();
+    const source = handCard(g, "p1");
+    const sourceCardId = player(g, "p1").zones.hand[0]!.cardId;
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: source, from: "hand", to: "battlefield" });
+    const ctx = { scripts: { [sourceCardId]: mkScript("castSpell", { kind: "draw", count: 1 }) } };
+
+    // Cast from graveyard (flashback-style): fires.
+    const spell = handCard(s, "p1");
+    s = applyAction(s, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "graveyard" }, 0, ctx);
+    expect(s.stack).toHaveLength(0);
+    s = applyAction(s, "p1", { type: "moveCard", instanceId: spell, from: "graveyard", to: "stack" }, 0, ctx);
+    expect(s.stack.filter((c) => c.isTrigger)).toHaveLength(1);
+
+    // Moving the SOURCE from battlefield to the stack is not a cast: no
+    // castSpell trigger (and with a castSpell-only script, no leaves either).
+    const s2 = applyAction(s, "p1", { type: "moveCard", instanceId: source, from: "battlefield", to: "stack" }, 0, ctx);
+    expect(s2.stack.filter((c) => c.isTrigger)).toHaveLength(1); // unchanged
+  });
+
+  it("castSpell honors castFilter against the cast card's typeLine", () => {
+    const g = newGame();
+    const source = handCard(g, "p1");
+    const sourceCardId = player(g, "p1").zones.hand[0]!.cardId;
+    let s = applyAction(g, "p1", { type: "moveCard", instanceId: source, from: "hand", to: "battlefield" });
+
+    const script: CardScript = {
+      triggers: [
+        { event: "castSpell", optional: false, description: "any", effect: { kind: "gainLife", amount: 1 } },
+        { event: "castSpell", optional: false, description: "ios", effect: { kind: "draw", count: 1 }, castFilter: "instantOrSorcery" },
+        { event: "castSpell", optional: false, description: "noncreature", effect: { kind: "scry", count: 1 }, castFilter: "noncreature" },
+        { event: "castSpell", optional: false, description: "creature", effect: { kind: "loseLife", amount: 1 }, castFilter: "creature" },
+        { event: "castSpell", optional: false, description: "artifact", effect: { kind: "gainLife", amount: 2 }, castFilter: "artifact" },
+      ],
+    };
+
+    const castAndCollect = (typeLine: string | undefined) => {
+      const spell = handCard(s, "p1");
+      const spellCardId = player(s, "p1").zones.hand[0]!.cardId;
+      const ctx = {
+        scripts: { [sourceCardId]: script },
+        ...(typeLine !== undefined ? { cards: { [spellCardId]: { ...mkCardData(spellCardId), typeLine } } } : {}),
+      };
+      const next = applyAction(s, "p1", { type: "moveCard", instanceId: spell, from: "hand", to: "stack" }, 0, ctx);
+      return next.stack.filter((c) => c.isTrigger).map((c) => c.triggerText);
+    };
+
+    expect(castAndCollect("Instant")).toEqual(["any", "ios", "noncreature"]);
+    expect(castAndCollect("Creature — Bear")).toEqual(["any", "creature"]);
+    expect(castAndCollect("Artifact — Equipment")).toEqual(["any", "noncreature", "artifact"]);
+    expect(castAndCollect("Artifact Creature — Golem")).toEqual(["any", "creature", "artifact"]);
+    // No card data for the spell: only unfiltered triggers fire.
+    expect(castAndCollect(undefined)).toEqual(["any"]);
+  });
+
+  it("combatDamageToPlayer fires for unblocked attackers when the combatDamage step begins", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    const inactive = other(g, active);
+    const attacker1 = handCard(g, active);
+    const attacker1CardId = player(g, active).zones.hand[0]!.cardId;
+    let s = applyAction(g, active, { type: "moveCard", instanceId: attacker1, from: "hand", to: "battlefield" });
+    const attacker2 = handCard(s, active);
+    const attacker2CardId = player(s, active).zones.hand[0]!.cardId;
+    s = applyAction(s, active, { type: "moveCard", instanceId: attacker2, from: "hand", to: "battlefield" });
+    const bystander = handCard(s, active);
+    const bystanderCardId = player(s, active).zones.hand[0]!.cardId;
+    s = applyAction(s, active, { type: "moveCard", instanceId: bystander, from: "hand", to: "battlefield" });
+    const blocker = handCard(s, inactive);
+    s = applyAction(s, inactive, { type: "moveCard", instanceId: blocker, from: "hand", to: "battlefield" });
+
+    const ctx = {
+      scripts: {
+        [attacker1CardId]: mkScript("combatDamageToPlayer", { kind: "draw", count: 1 }),
+        [attacker2CardId]: mkScript("combatDamageToPlayer", { kind: "gainLife", amount: 1 }),
+        [bystanderCardId]: mkScript("combatDamageToPlayer", { kind: "scry", count: 1 }),
+      },
+    };
+    s = applyAction(s, active, { type: "setAttacking", instanceId: attacker1, attacking: true }, 0, ctx);
+    s = applyAction(s, active, { type: "setAttacking", instanceId: attacker2, attacking: true }, 0, ctx);
+    // attacker2 gets blocked; attacker1 is unblocked; bystander stays home.
+    s = applyAction(s, inactive, { type: "setBlocking", instanceId: blocker, blocking: attacker2 }, 0, ctx);
+
+    while (s.step !== "combatDamage") s = applyAction(s, active, { type: "nextStep" }, 0, ctx);
+    const triggers = s.stack.filter((c) => c.isTrigger);
+    expect(triggers).toHaveLength(1);
+    expect(triggers[0]!.triggerSourceId).toBe(attacker1);
+    expect(triggers[0]!.controllerId).toBe(active);
+  });
+
   it("restartGame drops pending triggers and recollects only real cards", () => {
     const g = newGame();
     const id = handCard(g, "p1");

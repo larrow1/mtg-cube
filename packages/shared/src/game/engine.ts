@@ -20,13 +20,28 @@
  *    fully supported.
  *
  * Triggered abilities (v3): when the server passes `scripts` in the
- * ActionContext, cards entering the battlefield (moveCard or
- * resolveTopOfStack), dying (battlefield -> graveyard), or sitting on the
- * active player's battlefield as the upkeep step begins push trigger
- * pseudo-cards onto the stack (`isTrigger`, instanceId `tr{seq}-{n}`). They
- * only ever live on the stack: resolve applies the effect, counter removes
- * them, declineTrigger (controller + optional only) removes them from any
- * position, restartGame drops them, and moveCard refuses to touch them.
+ * ActionContext, the engine pushes trigger pseudo-cards onto the stack
+ * (`isTrigger`, instanceId `tr{seq}-{n}`) at these emission points:
+ *  - etb: a card enters the battlefield (moveCard or resolveTopOfStack);
+ *  - dies: battlefield -> graveyard;
+ *  - leaves: battlefield -> any non-battlefield zone. If the destination is
+ *    the graveyard AND the card's script has a "dies" trigger, only "dies"
+ *    fires (no double-fire); otherwise "leaves" covers death too;
+ *  - upkeep: entering the upkeep step, active player's permanents;
+ *  - eachUpkeep: entering the upkeep step, BOTH players' permanents
+ *    (controller = the permanent's controller);
+ *  - endStep: entering the end step, active player's permanents;
+ *  - attack: setAttacking {attacking:true} (never on un-declaring);
+ *  - castSpell: moveCard from hand/graveyard/exile/library to the stack fires
+ *    castSpell triggers on the caster's own battlefield permanents, honoring
+ *    each trigger's castFilter against the cast card's typeLine. Triggers land
+ *    ABOVE the cast spell (fire after it, resolve before it);
+ *  - combatDamageToPlayer: entering the combatDamage step, each attacking
+ *    creature of the active player with no opposing creature blocking it.
+ * Trigger pseudo-cards only ever live on the stack: resolve applies the
+ * effect, counter removes them, declineTrigger (controller + optional only)
+ * removes them from any position, restartGame drops them, and moveCard
+ * refuses to touch them.
  */
 import type {
   CardData,
@@ -390,8 +405,14 @@ export function applyAction(
 
     case "setAttacking": {
       const card = findControlled(actor, action.instanceId, ["battlefield"]);
+      const wasAttacking = card.attacking;
       card.attacking = action.attacking;
       logs.push(`${action.attacking ? "declared" : "removed"} ${cardLabel(card)} as an attacker`);
+      // Attack triggers fire on declaring only (never on un-declaring, and
+      // not again when a redundant setAttacking(true) repeats the state).
+      if (action.attacking && !wasAttacking) {
+        pushTriggers(s, card, card.controllerId, "attack", logs);
+      }
       break;
     }
 
@@ -721,23 +742,32 @@ function spawnTokens(
   logs.push(`${logPrefix}created ${opts.count} ${opts.name} token${opts.count === 1 ? "" : "s"}`);
 }
 
+/** Does `card`'s script contain at least one trigger of `event`? */
+function hasTriggerFor(card: GameCard, event: TriggerEvent): boolean {
+  if (card.isToken || card.isTrigger) return false;
+  return ctx.scripts?.[card.cardId]?.triggers.some((t) => t.event === event) ?? false;
+}
+
 /**
  * Push every scripted trigger of `event` on `source` onto the stack as a
  * pseudo-card controlled by `controllerId`. No-op without a scripts context,
  * for tokens (no CardData), and for cards whose script lacks the event.
+ * `accept` (optional) further filters individual triggers (castSpell filters).
  */
 function pushTriggers(
   s: GameState,
   source: GameCard,
   controllerId: string,
   event: TriggerEvent,
-  logs: string[]
+  logs: string[],
+  accept?: (t: CardScript["triggers"][number]) => boolean
 ): void {
   if (source.isToken || source.isTrigger) return;
   const script = ctx.scripts?.[source.cardId];
   if (!script) return;
   for (const t of script.triggers) {
     if (t.event !== event) continue;
+    if (accept && !accept(t)) continue;
     const trigger: GameCard = {
       instanceId: `tr${s.seq + 1}-${triggerCounter++}`,
       // cardId points at the SOURCE card so clients can render its image.
@@ -952,13 +982,59 @@ function applyMoveCard(
   const dest = to === "library" ? (action.toBottom ? "the bottom of their library" : "their library") : to;
   logs.push(`moved ${moveLabel(card, from, to)} from ${from} to ${dest}`);
 
-  // Triggered abilities: entering the battlefield fires ETB triggers;
-  // battlefield -> graveyard fires dies triggers. (Tokens that ceased to
-  // exist returned above and have no scripts anyway.)
+  // Triggered abilities. (Tokens that ceased to exist returned above and
+  // have no scripts anyway.)
   if (to === "battlefield") {
     pushTriggers(s, card, card.controllerId, "etb", logs);
-  } else if (wasOnBattlefield && to === "graveyard") {
-    pushTriggers(s, card, actor.playerId, "dies", logs);
+  } else if (wasOnBattlefield) {
+    // Leaving the battlefield: death fires "dies" when the script has one;
+    // otherwise "leaves" covers every departure, the graveyard included.
+    // A script with BOTH events fires only "dies" on death (no double-fire).
+    if (to === "graveyard" && hasTriggerFor(card, "dies")) {
+      pushTriggers(s, card, actor.playerId, "dies", logs);
+    } else {
+      pushTriggers(s, card, actor.playerId, "leaves", logs);
+    }
+  } else if (to === "stack" && (from === "hand" || from === "graveyard" || from === "exile" || from === "library")) {
+    // Casting a spell: castSpell triggers fire on the caster's OWN battlefield
+    // permanents (never on the spell itself), filtered by each trigger's
+    // castFilter against the cast card's typeLine. They are pushed after the
+    // spell, so they sit ABOVE it on the stack and resolve first.
+    const typeLine = castTypeLine(card);
+    const permanents = [...actor.zones.battlefield].sort((a, b) => a.sortIndex - b.sortIndex);
+    for (const permanent of permanents) {
+      pushTriggers(s, permanent, permanent.controllerId, "castSpell", logs, (t) =>
+        castFilterMatches(t.castFilter, typeLine)
+      );
+    }
+  }
+}
+
+/** Type line of a card being cast (front face for DFCs); undefined without card data. */
+function castTypeLine(card: GameCard): string | undefined {
+  const data = ctx.cards?.[card.cardId];
+  if (!data) return undefined;
+  return data.faces?.[0]?.typeLine ?? data.typeLine;
+}
+
+/** Does a castSpell trigger's filter accept a spell with this type line? */
+function castFilterMatches(
+  filter: "any" | "instantOrSorcery" | "noncreature" | "creature" | "artifact" | undefined,
+  typeLine: string | undefined
+): boolean {
+  if (filter === undefined || filter === "any") return true;
+  // Without card data the spell's type is unknowable — filtered triggers
+  // stay silent rather than guess.
+  if (typeLine === undefined) return false;
+  switch (filter) {
+    case "instantOrSorcery":
+      return /\b(?:Instant|Sorcery)\b/i.test(typeLine);
+    case "noncreature":
+      return !/\bCreature\b/i.test(typeLine);
+    case "creature":
+      return /\bCreature\b/i.test(typeLine);
+    case "artifact":
+      return /\bArtifact\b/i.test(typeLine);
   }
 }
 
@@ -985,11 +1061,35 @@ function enterStep(s: GameState, step: TurnStep, logs: string[]): void {
     }
   }
   logs.push(`moved to the ${step} step`);
+  emitStepTriggers(s, step, logs);
+}
 
-  // Upkeep triggers for the active player's permanents, in sortIndex order.
+/** Step-entry trigger emission (upkeep/eachUpkeep/endStep/combatDamageToPlayer). */
+function emitStepTriggers(s: GameState, step: TurnStep, logs: string[]): void {
+  const active = s.players.find((p) => p.playerId === s.activePlayerId)!;
+  const inactive = s.players.find((p) => p.playerId !== s.activePlayerId)!;
+  const sorted = (p: PlayerGameState) =>
+    [...p.zones.battlefield].sort((a, b) => a.sortIndex - b.sortIndex);
+
   if (step === "upkeep") {
-    const permanents = [...active.zones.battlefield].sort((a, b) => a.sortIndex - b.sortIndex);
-    for (const c of permanents) pushTriggers(s, c, c.controllerId, "upkeep", logs);
+    // "upkeep" is controller-only (the active player); "eachUpkeep" fires for
+    // BOTH players' permanents, each controlled by its own controller.
+    for (const c of sorted(active)) {
+      pushTriggers(s, c, c.controllerId, "upkeep", logs);
+      pushTriggers(s, c, c.controllerId, "eachUpkeep", logs);
+    }
+    for (const c of sorted(inactive)) pushTriggers(s, c, c.controllerId, "eachUpkeep", logs);
+  } else if (step === "end") {
+    for (const c of sorted(active)) pushTriggers(s, c, c.controllerId, "endStep", logs);
+  } else if (step === "combatDamage") {
+    // Each attacking creature of the active player with no opposing creature
+    // blocking it. These are ordinary stack triggers, so they can be
+    // countered/declined when the damage was actually prevented.
+    for (const c of sorted(active)) {
+      if (!c.attacking) continue;
+      const blocked = inactive.zones.battlefield.some((b) => b.blocking === c.instanceId);
+      if (!blocked) pushTriggers(s, c, c.controllerId, "combatDamageToPlayer", logs);
+    }
   }
 }
 

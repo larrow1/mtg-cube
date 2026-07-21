@@ -131,15 +131,21 @@ function normalizeName(s: string): string {
   return s.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-/** Every name a returned card can be matched by: full name, split halves, face names. */
-function nameKeys(c: ScryfallCard): string[] {
+/**
+ * Secondary names a returned card can be matched by: split halves and face
+ * names. The exact full name is handled separately (and with priority) so a
+ * card whose FACE happens to share another card's full name cannot shadow it
+ * (e.g. "Emeritus of Conflict // Lightning Bolt" must not claim requests for
+ * the real "Lightning Bolt").
+ */
+function secondaryNameKeys(c: ScryfallCard): string[] {
   const keys = new Set<string>();
-  keys.add(normalizeName(c.name));
   for (const part of c.name.split("//")) {
     const key = normalizeName(part);
     if (key) keys.add(key);
   }
   for (const face of c.card_faces ?? []) keys.add(normalizeName(face.name));
+  keys.delete(normalizeName(c.name));
   return [...keys];
 }
 
@@ -194,6 +200,32 @@ async function fuzzyLookup(name: string): Promise<ScryfallCard | null> {
   return (await res.json()) as ScryfallCard;
 }
 
+async function exactLookup(name: string): Promise<ScryfallCard | null> {
+  const res = await fetch(`${API}/cards/named?exact=${encodeURIComponent(name)}`, {
+    headers: HEADERS,
+  });
+  if (!res.ok) return null;
+  return (await res.json()) as ScryfallCard;
+}
+
+/**
+ * A requested name that matched a card only via a BACK face is suspect: the
+ * collection endpoint sometimes assigns an identifier to a DFC whose back
+ * face shares the name with a real standalone card (observed live: a batch
+ * containing "Emeritus of Ideation" before "Ancestral Recall" returns the
+ * ATLA DFC "Emeritus of Ideation // Ancestral Recall" for BOTH identifiers
+ * and omits the real Ancestral Recall). Full-name and front-face matches are
+ * always trustworthy.
+ */
+function isBackFaceOnlyMatch(card: CardData, requestedKey: string): boolean {
+  if (normalizeName(card.name) === requestedKey) return false;
+  const front = card.faces?.[0]?.name;
+  if (front && normalizeName(front) === requestedKey) return false;
+  const firstHalf = card.name.split("//")[0]!.trim();
+  if (normalizeName(firstHalf) === requestedKey) return false;
+  return true;
+}
+
 /**
  * Resolve a list of card names: POST /cards/collection in batches of 75 with a
  * 100ms pause between batches, then a fuzzy-fallback pass for any leftovers
@@ -227,10 +259,16 @@ export async function resolveCardNames(names: string[]): Promise<ResolvedCards> 
     foundRaw.push(...(body.data ?? []));
   }
 
+  // Two-pass keying: exact full names first (authoritative), then split
+  // halves / face names as fallbacks that never shadow a full name.
   const byKey = new Map<string, CardData>();
-  for (const raw of foundRaw) {
-    const card = toCardData(raw);
-    for (const key of nameKeys(raw)) {
+  const dataByRaw = foundRaw.map((raw) => ({ raw, card: toCardData(raw) }));
+  for (const { raw, card } of dataByRaw) {
+    const key = normalizeName(raw.name);
+    if (!byKey.has(key)) byKey.set(key, card);
+  }
+  for (const { raw, card } of dataByRaw) {
+    for (const key of secondaryNameKeys(raw)) {
       if (!byKey.has(key)) byKey.set(key, card);
     }
   }
@@ -238,7 +276,22 @@ export async function resolveCardNames(names: string[]): Promise<ResolvedCards> 
   const missing: string[] = [];
   for (const name of toFetch) {
     const key = normalizeName(name);
-    const card = byKey.get(key);
+    let card = byKey.get(key);
+    if (card && isBackFaceOnlyMatch(card, key)) {
+      // Double-check with an exact lookup: a standalone card with this exact
+      // name wins over a DFC that merely has it as a back face.
+      await delay(BATCH_DELAY_MS);
+      const raw = await exactLookup(name);
+      if (raw) {
+        const verified = toCardData(raw);
+        if (verified.id !== card.id) {
+          console.log(
+            `[scryfall] exact-verified ${JSON.stringify(name)} -> "${verified.name}" (batch matched "${card.name}")`
+          );
+        }
+        card = verified;
+      }
+    }
     if (card) {
       byName.set(name, card);
       cachePut(key, card);

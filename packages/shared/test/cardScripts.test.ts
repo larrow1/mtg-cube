@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CardData } from "../src/types.js";
-import { CARD_OVERRIDES, inferScript, scriptFor } from "../src/cardScripts.js";
+import { CARD_OVERRIDES, UNSUPPORTED_TRIGGER_CARDS, inferScript, scriptFor } from "../src/cardScripts.js";
 
 /** Minimal CardData with a real name + oracle text; the rest is boilerplate. */
 function card(name: string, oracleText: string | undefined, extra: Partial<CardData> = {}): CardData {
@@ -301,9 +301,254 @@ describe("inferScript — oracle-text templates (real card texts)", () => {
     // Trigger conditions we do not model are ignored, not guessed at.
     expect(
       inferScript(
-        card("Guttersnipe", "Whenever you cast an instant or sorcery spell, Guttersnipe deals 2 damage to each opponent.")
+        card("Lotus Cobra", "Landfall — Whenever a land you control enters, add one mana of any color.")
       )
     ).toBeNull();
+    // "each opponent's upkeep" is NOT eachUpkeep (it would misfire on yours).
+    expect(
+      inferScript(card("Abhorrent Oculus", "At the beginning of each opponent's upkeep, manifest dread."))
+    ).toBeNull();
+  });
+
+  it("castSpell (instant/sorcery filter) with self-damage: Guttersnipe", () => {
+    const script = inferScript(
+      card(
+        "Guttersnipe",
+        "Whenever you cast an instant or sorcery spell, Guttersnipe deals 2 damage to each opponent."
+      )
+    );
+    expect(script?.triggers).toEqual([
+      {
+        event: "castSpell",
+        optional: false,
+        castFilter: "instantOrSorcery",
+        description:
+          "Whenever you cast an instant or sorcery spell, Guttersnipe deals 2 damage to each opponent.",
+        effect: { kind: "damageOpponent", amount: 2 },
+      },
+    ]);
+  });
+
+  it("castSpell noncreature filter + token: Monastery Mentor", () => {
+    const script = inferScript(
+      card(
+        "Monastery Mentor",
+        "Prowess\nWhenever you cast a noncreature spell, create a 1/1 white Monk creature token with prowess."
+      )
+    );
+    expect(script?.triggers).toEqual([
+      {
+        event: "castSpell",
+        optional: false,
+        castFilter: "noncreature",
+        description: "Whenever you cast a noncreature spell, create a 1/1 white Monk creature token with prowess.",
+        effect: {
+          kind: "createToken",
+          name: "Monk",
+          typeLine: "Token Creature — Monk",
+          power: "1",
+          toughness: "1",
+          count: 1,
+        },
+      },
+    ]);
+  });
+
+  it("castSpell artifact filter: Ravenous Robots", () => {
+    const script = inferScript(
+      card(
+        "Ravenous Robots",
+        "Whenever you cast an artifact spell, create a 1/1 colorless Robot artifact creature token."
+      )
+    );
+    expect(script?.triggers[0]).toMatchObject({
+      event: "castSpell",
+      castFilter: "artifact",
+      effect: { kind: "createToken", name: "Robot" },
+    });
+  });
+
+  it("magecraft ability-word prefix is stripped for matching (kept in description): Sedgemoor Witch", () => {
+    const script = inferScript(
+      card(
+        "Sedgemoor Witch",
+        'Menace\nMagecraft — Whenever you cast or copy an instant or sorcery spell, create a 1/1 black and green Pest creature token with "When this token dies, you gain 1 life."'
+      )
+    );
+    expect(script?.triggers).toHaveLength(1);
+    const t = script!.triggers[0]!;
+    expect(t.event).toBe("castSpell");
+    expect(t.castFilter).toBe("instantOrSorcery");
+    expect(t.description).toMatch(/^Magecraft — /);
+    // Quoted token rules text defeats the token template -> manual fallback.
+    expect(t.effect.kind).toBe("manual");
+  });
+
+  it("leaves trigger: Skyclave Apparition's exile clean-up", () => {
+    const script = inferScript(
+      card(
+        "Skyclave Apparition",
+        "When this creature enters, exile up to one target nonland, nontoken permanent you don't control with mana value 4 or less.\nWhen this creature leaves the battlefield, the exiled card's owner creates an X/X blue Illusion creature token, where X is the exiled card's mana value."
+      )
+    );
+    expect(script?.triggers.map((t) => t.event)).toEqual(["etb", "leaves"]);
+    expect(script?.triggers[1]!.effect.kind).toBe("manual");
+  });
+
+  it('"enters or leaves the battlefield" yields one trigger per event: Cryogen Relic', () => {
+    const script = inferScript(
+      card("Cryogen Relic", "When this artifact enters or leaves the battlefield, draw a card.", {
+        typeLine: "Artifact",
+      })
+    );
+    expect(script?.triggers.map((t) => [t.event, t.effect])).toEqual([
+      ["etb", { kind: "draw", count: 1 }],
+      ["leaves", { kind: "draw", count: 1 }],
+    ]);
+  });
+
+  it('"enters or dies" yields one trigger per event: Sanguine Evangelist', () => {
+    const script = inferScript(
+      card(
+        "Sanguine Evangelist",
+        "Battle cry\nWhen this creature enters or dies, create a 1/1 black Bat creature token with flying."
+      )
+    );
+    expect(script?.triggers.map((t) => t.event)).toEqual(["etb", "dies"]);
+    expect(script?.triggers.every((t) => t.effect.kind === "createToken")).toBe(true);
+  });
+
+  it('"enters or attacks" + named artifact token: Sentinel of the Nameless City', () => {
+    const script = inferScript(
+      card(
+        "Sentinel of the Nameless City",
+        "Vigilance\nWhenever this creature enters or attacks, create a Map token."
+      )
+    );
+    expect(script?.triggers.map((t) => [t.event, t.effect])).toEqual([
+      ["etb", { kind: "createToken", name: "Map", typeLine: "Token Artifact — Map", count: 1 }],
+      ["attack", { kind: "createToken", name: "Map", typeLine: "Token Artifact — Map", count: 1 }],
+    ]);
+  });
+
+  it('"enters and whenever it deals combat damage to a player": Ivora', () => {
+    const script = inferScript(
+      card(
+        "Ivora, Insatiable Heir",
+        "Trample\nWhen Ivora enters and whenever it deals combat damage to a player, create a Blood token."
+      )
+    );
+    expect(script?.triggers.map((t) => [t.event, t.effect])).toEqual([
+      ["etb", { kind: "createToken", name: "Blood", typeLine: "Token Artifact — Blood", count: 1 }],
+      ["combatDamageToPlayer", { kind: "createToken", name: "Blood", typeLine: "Token Artifact — Blood", count: 1 }],
+    ]);
+  });
+
+  it("attack trigger falls back to manual for unparseable effects: Goblin Rabblemaster", () => {
+    const script = inferScript(
+      card(
+        "Goblin Rabblemaster",
+        "Whenever this creature attacks, it gets +1/+0 until end of turn for each other attacking Goblin."
+      )
+    );
+    expect(script?.triggers).toEqual([
+      {
+        event: "attack",
+        optional: false,
+        description:
+          "Whenever this creature attacks, it gets +1/+0 until end of turn for each other attacking Goblin.",
+        effect: { kind: "manual", note: "it gets +1/+0 until end of turn for each other attacking Goblin" },
+      },
+    ]);
+  });
+
+  it('combat damage "to a player or planeswalker": Psychic Frog', () => {
+    const script = inferScript(
+      card(
+        "Psychic Frog",
+        "Whenever this creature deals combat damage to a player or planeswalker, draw a card.\nDiscard a card: Put a +1/+1 counter on this creature."
+      )
+    );
+    expect(script?.triggers).toEqual([
+      {
+        event: "combatDamageToPlayer",
+        optional: false,
+        description: "Whenever this creature deals combat damage to a player or planeswalker, draw a card.",
+        effect: { kind: "draw", count: 1 },
+      },
+    ]);
+  });
+
+  it("eachUpkeep: Oath of Druids fires on every player's upkeep (manual)", () => {
+    const script = inferScript(
+      card(
+        "Oath of Druids",
+        "At the beginning of each player's upkeep, that player chooses target player who controls more creatures than they do and is their opponent. The first player may reveal cards from the top of their library until they reveal a creature card. If they do, that player puts that card onto the battlefield and all other cards revealed this way into their graveyard.",
+        { typeLine: "Enchantment" }
+      )
+    );
+    expect(script?.triggers[0]).toMatchObject({ event: "eachUpkeep", effect: { kind: "manual" } });
+  });
+
+  it("endStep + investigate template: end-step draw split and Clue tokens", () => {
+    const doom = inferScript(
+      card("Doombringer", "At the beginning of your end step, you draw a card and lose 1 life.")
+    );
+    expect(doom?.triggers[0]).toMatchObject({ event: "endStep", effect: { kind: "manual" } });
+
+    const inspector = inferScript(
+      card("Thraben Inspector", "When this creature enters, investigate.")
+    );
+    expect(inspector?.triggers).toEqual([
+      {
+        event: "etb",
+        optional: false,
+        description: "When this creature enters, investigate.",
+        effect: { kind: "createToken", name: "Clue", typeLine: "Token Artifact — Clue", count: 1 },
+      },
+    ]);
+  });
+
+  it("comma-less legends match their short names: Loran, Batroc", () => {
+    const loran = inferScript(
+      card("Loran of the Third Path", "When Loran enters, destroy up to one target artifact or enchantment.")
+    );
+    expect(loran?.triggers[0]).toMatchObject({
+      event: "etb",
+      effect: { kind: "manual", note: "destroy up to one target artifact or enchantment" },
+    });
+
+    const batroc = inferScript(
+      card(
+        "Batroc the Leaper",
+        "When Batroc enters, he deals damage equal to his power to each of up to X targets, where X is the number of times he was kicked."
+      )
+    );
+    expect(batroc?.triggers[0]!.event).toBe("etb");
+  });
+
+  it('"this Class"/"this Equipment" self-references and plural "enter"', () => {
+    const talent = inferScript(
+      card("Stormchaser's Talent", "When this Class enters, create a 1/1 blue and red Otter creature token with prowess.", {
+        typeLine: "Enchantment — Class",
+      })
+    );
+    expect(talent?.triggers[0]!.effect).toMatchObject({ kind: "createToken", name: "Otter" });
+
+    const armor = inferScript(
+      card("Iron Man Armor", "When this Equipment enters, attach it to target creature you control.", {
+        typeLine: "Artifact — Equipment",
+      })
+    );
+    expect(armor?.triggers[0]).toMatchObject({ event: "etb", effect: { kind: "manual" } });
+
+    const cloak = inferScript(
+      card(
+        "Cloak and Dagger, Entwined",
+        "When Cloak and Dagger enter, choose target opponent and up to one target creature they control."
+      )
+    );
+    expect(cloak?.triggers[0]!.event).toBe("etb");
   });
 
   it("DFC: only the front face is parsed: Skyclave Cleric // Skyclave Basilica", () => {
@@ -365,5 +610,47 @@ describe("scriptFor — override registry", () => {
     );
     expect(wall?.triggers[0]!.effect).toEqual({ kind: "draw", count: 1 });
     expect(scriptFor(card("Island", undefined))).toBeNull();
+  });
+
+  it("two-event overrides carry the effect on both events (Grave Titan, Sun Titan, Minsc & Boo)", () => {
+    expect(CARD_OVERRIDES["Grave Titan"]!.triggers.map((t) => t.event)).toEqual(["etb", "attack"]);
+    expect(CARD_OVERRIDES["Sun Titan"]!.triggers.map((t) => t.event)).toEqual(["etb", "attack"]);
+    const minsc = CARD_OVERRIDES["Minsc & Boo, Timeless Heroes"]!;
+    expect(minsc.triggers.map((t) => t.event)).toEqual(["etb", "upkeep"]);
+    expect(minsc.triggers.every((t) => t.optional && t.effect.kind === "createToken")).toBe(true);
+  });
+
+  it("Thragtusk's token trigger is a leaves trigger (fires on any departure)", () => {
+    expect(CARD_OVERRIDES["Thragtusk"]!.triggers.map((t) => t.event)).toEqual(["etb", "leaves"]);
+  });
+
+  it("compound cast triggers are curated as multiple single-effect triggers", () => {
+    const vivi = CARD_OVERRIDES["Vivi Ornitier"]!;
+    expect(vivi.triggers.map((t) => t.effect.kind)).toEqual(["addCounters", "damageOpponent"]);
+    expect(vivi.triggers.every((t) => t.event === "castSpell" && t.castFilter === "noncreature")).toBe(true);
+
+    const apprentice = CARD_OVERRIDES["Witherbloom Apprentice"]!;
+    expect(apprentice.triggers.map((t) => t.effect.kind)).toEqual(["eachOpponentLosesLife", "gainLife"]);
+  });
+
+  it("dies/leaves precedence data: Worldspine Wurm keeps both dies triggers", () => {
+    const wurm = CARD_OVERRIDES["Worldspine Wurm"]!;
+    expect(wurm.triggers.map((t) => [t.event, t.effect.kind])).toEqual([
+      ["dies", "createToken"],
+      ["dies", "manual"],
+    ]);
+  });
+});
+
+describe("UNSUPPORTED_TRIGGER_CARDS — documented gaps", () => {
+  it("every entry names a reason and no entry duplicates a fully-scripted card's only line", () => {
+    for (const [name, reason] of Object.entries(UNSUPPORTED_TRIGGER_CARDS)) {
+      expect(name.length).toBeGreaterThan(0);
+      expect(reason.length).toBeGreaterThan(10);
+    }
+    // A few sentinel entries that must stay documented.
+    expect(UNSUPPORTED_TRIGGER_CARDS["Sheoldred, the Apocalypse"]).toMatch(/draw/i);
+    expect(UNSUPPORTED_TRIGGER_CARDS["Lotus Cobra"]).toMatch(/landfall/i);
+    expect(UNSUPPORTED_TRIGGER_CARDS["Urza's Saga"]).toMatch(/saga/i);
   });
 });

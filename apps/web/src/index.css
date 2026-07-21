@@ -67,8 +67,9 @@
       radial-gradient(560px 180px at 16% 108%, rgba(242, 182, 75, 0.1), transparent 62%),
       radial-gradient(420px 160px at 86% 112%, rgba(242, 182, 75, 0.06), transparent 60%);
   }
+  /* Battlefield rows hold landscape art tiles (shorter than full cards). */
   .zone-row {
-    @apply flex min-h-[7.5rem] flex-wrap content-start items-start gap-2 rounded-xl border border-amber-100/[0.06] bg-felt-950/40 p-2 transition-colors duration-150;
+    @apply flex min-h-[6.5rem] flex-wrap content-center items-center gap-2 rounded-xl border border-amber-100/[0.06] bg-felt-950/40 p-2 transition-colors duration-150;
   }
   .chip {
     @apply inline-flex items-center gap-1 rounded-full border border-amber-100/15 bg-felt-950/80 px-2 py-0.5 text-[10px] font-semibold leading-none text-zinc-300;
