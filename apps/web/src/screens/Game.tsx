@@ -428,8 +428,12 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
       }
     } else if (gs.activePlayerId === me.playerId) {
       if (!canActNow) {
-        const AUTO_STEPS = ["untap", "upkeep", "draw", "beginCombat", "endCombat", "end", "cleanup"];
-        if (AUTO_STEPS.includes(gs.step)) action = { type: "nextStep" };
+        // v12: transit steps (upkeep/draw/beginCombat/endCombat/cleanup)
+        // auto-advance server-side, lingering only while a trigger holds the
+        // stack — handled by the stack branch above. Only MANUAL steps are
+        // auto-advance candidates here, plus untap for the game-start hold
+        // (createGame sits at untap until the first nextStep).
+        if (gs.step === "untap" || gs.step === "end") action = { type: "nextStep" };
         else if (gs.step === "declareAttackers" && !me.zones.battlefield.some(isUntappedCreature)) {
           action = { type: "nextStep" };
         } else if (gs.step === "declareBlockers" && !opp.zones.battlefield.some(isUntappedCreature)) {
@@ -489,8 +493,9 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
   const isMyTurn = gs.activePlayerId === me.playerId && viewerIsPlayer;
   const haveIPriority = gs.priorityPlayerId === me.playerId && viewerIsPlayer;
   const canAct = viewerIsPlayer && !gs.finished;
-  const canAttackToggle = canAct && isMyTurn && (gs.step === "declareAttackers" || gs.step === "beginCombat");
-  const canBlockToggle = canAct && !isMyTurn && (gs.step === "declareBlockers" || gs.step === "combatDamage");
+  // v11: toggles render only in their legal steps (server re-validates).
+  const canAttackToggle = canAct && isMyTurn && gs.step === "declareAttackers";
+  const canBlockToggle = canAct && !isMyTurn && gs.step === "declareBlockers";
 
   // v4 pendingSearch: mine opens the blocking search modal; anyone else's
   // (opponent, or either player for spectators) shows the searching chip.
@@ -756,7 +761,13 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
       // v7: nonland "plays" are casts — the server routes them through the
       // stack regardless, so only lands offer the direct battlefield item.
       ...(isLand
-        ? [{ label: "Play to battlefield", onClick: () => send({ type: "moveCard" as const, instanceId: gc.instanceId, from: "hand" as const, to: "battlefield" as const }) }]
+        ? [{
+            label: "Play to battlefield",
+            // v11: lands are own-main-phase, empty-stack only (CR 305.1) —
+            // greyed out when the server would reject; the override below stays live.
+            disabled: !isMyTurn || (gs.step !== "main1" && gs.step !== "main2") || gs.stack.length > 0,
+            onClick: () => send({ type: "moveCard" as const, instanceId: gc.instanceId, from: "hand" as const, to: "battlefield" as const }),
+          }]
         : []),
       { label: "Play face down", onClick: () => send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "battlefield", faceDown: true }) },
       { label: "Cast (put on stack)", onClick: () => { if (!beginCast(gc)) send({ type: "moveCard", instanceId: gc.instanceId, from: "hand", to: "stack" }); } },

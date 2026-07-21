@@ -15,6 +15,7 @@ import type {
   GameState,
   TriggerCondition,
   TriggerEffect,
+  TurnStep,
   ZoneName,
 } from "../src/types.js";
 import { applyAction, createGame } from "../src/game/engine.js";
@@ -73,6 +74,18 @@ function other(s: GameState, id: string): string {
 function bothPass(s: GameState): GameState {
   const s1 = applyAction(s, s.priorityPlayerId, { type: "passPriority" });
   return applyAction(s1, s1.priorityPlayerId, { type: "passPriority" });
+}
+
+/**
+ * v12 setup surgery: place the game in `playerId`'s `step` (default main1)
+ * so timing-gated actions (land plays, sorcery-speed casts, attack/block
+ * declarations) are legal without walking the whole turn structure.
+ */
+function atStep(s: GameState, playerId: string, step: TurnStep = "main1"): GameState {
+  s.activePlayerId = playerId;
+  s.priorityPlayerId = playerId;
+  s.step = step;
+  return s;
 }
 
 /** Put a bespoke card (cardId/instanceId) into a player's zone. */
@@ -152,6 +165,7 @@ describe("v9 zoneChange other/entersBattlefield observers", () => {
 
   it("fires when ANOTHER creature I control enters via stack resolution", () => {
     const { g, ctx } = setup();
+    atStep(g, "p1"); // v12: a creature cast needs p1's main phase, empty stack
     put(g, "p1", "hand", "bear", "bear1");
     // Cast (hand -> stack), then resolve — arrival happens at resolution.
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: "bear1", from: "hand", to: "stack" }, 0, ctx);
@@ -171,6 +185,7 @@ describe("v9 zoneChange other/entersBattlefield observers", () => {
 
   it("does NOT fire when the OPPONENT's creature enters (controller: you)", () => {
     const { g, ctx } = setup();
+    atStep(g, "p2"); // v12: p2's creature cast needs p2's own main phase
     put(g, "p2", "hand", "bear", "bear2");
     let s = applyAction(g, "p2", { type: "moveCard", instanceId: "bear2", from: "hand", to: "stack" }, 0, ctx);
     s = bothPass(s);
@@ -187,6 +202,7 @@ describe("v9 zoneChange other/entersBattlefield observers", () => {
         watch: whenScript(observerWhen, { kind: "gainLife", amount: 1 }, "another creature enters"),
       },
     };
+    atStep(g, "p1"); // v12: a creature cast needs p1's main phase, empty stack
     put(g, "p1", "hand", "watch", "w2");
     // Creature typeLine: hand -> battlefield redirects through the stack (v7).
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: "w2", from: "hand", to: "battlefield" }, 0, ctx);
@@ -231,6 +247,7 @@ describe("v9 zoneChange other/entersBattlefield observers", () => {
 describe("v9 landfall (zoneChange other/entersBattlefield Land)", () => {
   it("fires on a land play (direct hand -> battlefield path)", () => {
     const g = newGame();
+    atStep(g, "p1"); // v12: a land play needs p1's main phase, empty stack
     put(g, "p1", "battlefield", "cobra", "cobra1");
     put(g, "p1", "hand", "forest", "forest1");
     const ctx = {
@@ -363,7 +380,10 @@ describe("v9 attackDeclared team vs self", () => {
         atk2: { triggers: [{ event: "attack" as const, optional: false, description: "self attack 2", effect: { kind: "scry", count: 1 } as TriggerEffect }] },
       },
     };
-    let s = applyAction(g, A, { type: "setAttacking", instanceId: a1.instanceId, attacking: true }, 0, ctx);
+    // v12: walk to declare-attackers (untap auto-runs to main1 first).
+    let s = applyAction(g, A, { type: "nextStep" }, 0, ctx); // -> main1
+    s = applyAction(s, A, { type: "nextStep" }, 0, ctx); // -> declareAttackers
+    s = applyAction(s, A, { type: "setAttacking", instanceId: a1.instanceId, attacking: true }, 0, ctx);
     expect(triggersFrom(s, "adl1")).toHaveLength(1); // team fired on the FIRST declaration
     expect(triggersFrom(s, a1.instanceId)).toHaveLength(1); // legacy self attack still fires
 
@@ -371,8 +391,14 @@ describe("v9 attackDeclared team vs self", () => {
     expect(triggersFrom(s, "adl1")).toHaveLength(1); // second attacker same combat: no refire
     expect(triggersFrom(s, a2.instanceId)).toHaveLength(1); // but its own self trigger fires
 
-    // New turn (attackers cleared, team flag re-armed) -> new declaration fires again.
-    s = applyAction(s, A, { type: "nextTurn" }, 0, ctx);
+    // New turn (attackers cleared, team flag re-armed) -> new declaration
+    // fires again. The unresolved triggers HOLD every transit step (v12), so
+    // both turn passes stop at untap and the walk advances one step at a time.
+    const B = other(s, A);
+    s = applyAction(s, A, { type: "nextTurn" }, 0, ctx); // B active, held at untap
+    expect(s.step).toBe("untap");
+    s = applyAction(s, B, { type: "nextTurn" }, 0, ctx); // A active again, held at untap
+    while (s.step !== "declareAttackers") s = applyAction(s, A, { type: "nextStep" }, 0, ctx);
     s = applyAction(s, A, { type: "setAttacking", instanceId: a1.instanceId, attacking: true }, 0, ctx);
     expect(triggersFrom(s, "adl1")).toHaveLength(2);
     expect(triggersFrom(s, a1.instanceId)).toHaveLength(2);
@@ -424,14 +450,16 @@ describe("v9 draw conditions (you/opponent, exceptDrawStepFirst)", () => {
 
   it("draw-step draws fire you/opponent conditions; the legacy exemption skips the first draw-step draw", () => {
     const { g, A, ctx } = setup();
-    // Turn 1 active player skips the draw; go around to A's turn 2 draw step.
+    // Turn 1 active player skips the draw; go around to A's turn-2 draw.
+    // v12: the draw happens INSIDE the turn-pass auto-run — B's draw fires
+    // nothing (own draws aren't "an opponent's"), so B lands in main1; A's
+    // draw fires the watchers, so the chain HOLDS in A's draw step.
     let s = applyAction(g, A, { type: "nextTurn" }, 0, ctx);
+    expect(s.step).toBe("main1"); // B's chain completed untouched
     s = applyAction(s, s.activePlayerId, { type: "nextTurn" }, 0, ctx);
     expect(s.activePlayerId).toBe(A);
     expect(s.turnNumber).toBe(2);
-    s = applyAction(s, A, { type: "nextStep" }, 0, ctx); // upkeep
-    s = applyAction(s, A, { type: "nextStep" }, 0, ctx); // draw (A draws 1)
-    expect(s.step).toBe("draw");
+    expect(s.step).toBe("draw"); // held mid-chain by the watcher triggers
     expect(triggersFrom(s, "md1")).toHaveLength(1); // who:"you", drawer = controller
     expect(triggersFrom(s, "od1")).toHaveLength(1); // who:"opponent" WITHOUT the exemption
     expect(triggersFrom(s, "bow1")).toHaveLength(0); // legacy opponentDraws exempts the draw-step first draw
@@ -506,6 +534,7 @@ describe("v9 chained events within one action", () => {
 describe("v10 entersTapped replacement", () => {
   it("a Land with entersTapped arrives tapped from hand -> battlefield, with the log line", () => {
     const g = newGame();
+    atStep(g, "p1"); // v12: land plays need p1's main phase
     put(g, "p1", "hand", "gate", "gate1");
     const ctx = {
       cards: { gate: data("gate", "Land — Gate") },
@@ -519,6 +548,7 @@ describe("v10 entersTapped replacement", () => {
 
   it("a creature cast through the stack arrives tapped at resolution", () => {
     const g = newGame();
+    atStep(g, "p1"); // v12: sorcery-speed casts need p1's main phase
     put(g, "p1", "hand", "sleeper", "slp1");
     const ctx = {
       cards: { sleeper: data("sleeper", "Creature — Beast") },
@@ -619,6 +649,7 @@ describe("v10 existing effect behavior unchanged (spot checks)", () => {
 
   it("counterTarget counters a spell on the stack in one resolution (v11)", () => {
     const g = newGame();
+    atStep(g, "p1"); // v12: the bear needs p1's main phase; the csp response is an Instant
     put(g, "p1", "hand", "bear", "bear1");
     put(g, "p2", "hand", "csp", "csp1");
     const ctx = {
@@ -647,6 +678,7 @@ describe("v10 existing effect behavior unchanged (spot checks)", () => {
 describe("trigger pseudo-card shape (new-style `when` triggers)", () => {
   it("keeps the v3 stack-entry shape: tr id, source cardId, triggerSourceId, controller", () => {
     const g = newGame();
+    atStep(g, "p1"); // v12: the bear cast needs p1's main phase
     put(g, "p1", "battlefield", "watch", "w1");
     put(g, "p1", "hand", "bear", "bear1");
     const ctx = {

@@ -101,7 +101,14 @@ succession, CR 117.4-117.5; casting grants the caster priority) and direct
 spell-effect resolution (an instant/sorcery's onResolve effect applies in
 the SAME resolveTopOfStack action, CR 608 — no more synthetic effect entry;
 Auto mode reads priorityPasses instead of guessing from the log);
-310 shared tests;
+v12 timing guardrails & transit automation (lands/sorcery-speed casts only
+in your own main phases with an empty stack, CR 305.1/117.1a, override
+escape hatch; setAttacking/setBlocking locked to their steps with untapped
+checks, attackers auto-tap unless Vigilance, CR 508/509; transit steps
+untap/upkeep/draw/beginCombat/endCombat/cleanup auto-advance while the
+stack is empty — manual play lives in main1/combat/main2/end, turn-pass
+lands the opponent in main1 with upkeep+draw automated);
+310+ shared tests;
 Arena-style UI (draft lanes/drag-to-pick, deck builder, battlefield art
 tiles with color frames + keyword chips, mana symbols).
 
