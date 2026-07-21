@@ -73,7 +73,7 @@ function sortRow(cards: GameCard[]): GameCard[] {
 }
 
 /**
- * v9: the effective TriggerEffect for a stack entry. Real triggers carry one
+ * v11: the effective TriggerEffect for a stack entry. Real triggers carry one
  * directly; a plain spell card resolves straight from its onResolve script
  * (no more synthetic effect entry), so it can also need a resolution-time
  * target when cast without a pre-chosen one.
@@ -411,7 +411,7 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
 
     let action: GameAction | null = null;
     if (gs.stack.length > 0) {
-      // v9: the stack is priority-driven and engine-enforced (CR 117.4) —
+      // v11: the stack is priority-driven and engine-enforced (CR 117.4) —
       // resolveTopOfStack/counterTopOfStack are rejected until both players
       // have passed in succession (gs.priorityPasses reaches 2). Holding
       // priority with no response: pass; once both have passed, resolve the
@@ -523,7 +523,7 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
   // v6/v7: targeted resolution — the controller picks a target (battlefield
   // card, a player button, or a highlighted stack spell) then resolves.
   // v8: entries carrying a cast-time target resolve without a new pick.
-  // v9: a plain spell card can also need one (resolution applies its effect
+  // v11: a plain spell card can also need one (resolution applies its effect
   // directly — no more synthetic effect entry), not just trigger entries.
   const topOfStack = gs.stack[gs.stack.length - 1];
   const topEffect = topOfStack ? stackEffectOf(topOfStack, cards) : undefined;

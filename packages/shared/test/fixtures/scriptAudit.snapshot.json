@@ -1,0 +1,1876 @@
+{
+  "Abhorrent Oculus": {
+    "triggers": [
+      {
+        "description": "At the beginning of each opponent's upkeep, manifest dread.",
+        "effect": {
+          "kind": "manual",
+          "note": "manifest dread"
+        },
+        "event": "upkeep",
+        "optional": false,
+        "when": {
+          "on": "stepEntered",
+          "step": "upkeep",
+          "whose": "opponents"
+        }
+      }
+    ]
+  },
+  "Adeline, Resplendent Cathar": {
+    "triggers": [
+      {
+        "description": "Whenever you attack, for each opponent, create a 1/1 white Human creature token that's tapped and attacking that player or a planeswalker they control. (Fires when your first attacker is declared each combat.)",
+        "effect": {
+          "kind": "manual",
+          "note": "for each opponent, create a 1/1 white Human creature token that's tapped and attacking that player or a planeswalker they control"
+        },
+        "event": "attack",
+        "optional": false,
+        "when": {
+          "on": "attackDeclared",
+          "which": "team"
+        }
+      }
+    ]
+  },
+  "Agent Bishop, Man in Black": {
+    "triggers": [
+      {
+        "description": "At the beginning of combat on your turn, put a +1/+1 counter on each of up to two target creatures.",
+        "effect": {
+          "kind": "manual",
+          "note": "put a +1/+1 counter on each of up to two target creatures"
+        },
+        "event": "upkeep",
+        "optional": false,
+        "when": {
+          "on": "stepEntered",
+          "step": "beginCombat",
+          "whose": "yours"
+        }
+      }
+    ]
+  },
+  "As Foretold": {
+    "triggers": [
+      {
+        "description": "At the beginning of your upkeep, put a time counter on As Foretold.",
+        "effect": {
+          "count": 1,
+          "counterType": "time",
+          "kind": "addCounters"
+        },
+        "event": "upkeep",
+        "optional": false
+      }
+    ]
+  },
+  "Aviary Mechanic": {
+    "triggers": [
+      {
+        "description": "When Aviary Mechanic enters the battlefield, you may return a permanent you control to its owner's hand.",
+        "effect": {
+          "kind": "manual",
+          "note": "return a permanent you control to its owner's hand"
+        },
+        "event": "etb",
+        "optional": true
+      }
+    ]
+  },
+  "Barrier of Bones": {
+    "triggers": [
+      {
+        "description": "When Barrier of Bones enters the battlefield, scry 1.",
+        "effect": {
+          "count": 1,
+          "kind": "scry"
+        },
+        "event": "etb",
+        "optional": false
+      }
+    ]
+  },
+  "Bitterblossom": {
+    "triggers": [
+      {
+        "description": "At the beginning of your upkeep, you lose 1 life and create a 1/1 black Faerie Rogue creature token with flying.",
+        "effect": {
+          "amount": 1,
+          "kind": "loseLife"
+        },
+        "event": "upkeep",
+        "optional": false
+      },
+      {
+        "description": "At the beginning of your upkeep, you lose 1 life and create a 1/1 black Faerie Rogue creature token with flying.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Faerie Rogue",
+          "power": "1",
+          "toughness": "1",
+          "typeLine": "Token Creature — Faerie Rogue"
+        },
+        "event": "upkeep",
+        "optional": false
+      }
+    ]
+  },
+  "Bloodfell Caves": {
+    "replacements": [
+      {
+        "kind": "entersTapped"
+      }
+    ],
+    "triggers": [
+      {
+        "description": "When this land enters, you gain 1 life.",
+        "effect": {
+          "amount": 1,
+          "kind": "gainLife"
+        },
+        "event": "etb",
+        "optional": false
+      }
+    ]
+  },
+  "Bloodstained Mire": {
+    "activated": [
+      {
+        "costLife": 1,
+        "costSacrifice": true,
+        "costTap": true,
+        "description": "{T}, Pay 1 life, Sacrifice this land: Search your library for a Swamp or Mountain card, put it onto the battlefield, then shuffle.",
+        "destination": "battlefield",
+        "entersTapped": false,
+        "filter": {
+          "kind": "landSubtype",
+          "subtypes": [
+            "Swamp",
+            "Mountain"
+          ]
+        },
+        "shuffle": true
+      }
+    ],
+    "triggers": []
+  },
+  "Bojuka Bog": {
+    "replacements": [
+      {
+        "kind": "entersTapped"
+      }
+    ],
+    "triggers": [
+      {
+        "description": "When Bojuka Bog enters the battlefield, exile target player's graveyard.",
+        "effect": {
+          "kind": "manual",
+          "note": "exile target player's graveyard"
+        },
+        "event": "etb",
+        "optional": false
+      }
+    ]
+  },
+  "Brainstorm": null,
+  "Bristly Bill, Spine Sower": {
+    "triggers": [
+      {
+        "description": "Landfall — Whenever a land you control enters, put a +1/+1 counter on target creature.",
+        "effect": {
+          "kind": "manual",
+          "note": "put a +1/+1 counter on target creature"
+        },
+        "event": "etb",
+        "optional": false,
+        "when": {
+          "card": {
+            "types": [
+              "Land"
+            ]
+          },
+          "controller": "you",
+          "move": "entersBattlefield",
+          "on": "zoneChange",
+          "which": "other"
+        }
+      }
+    ]
+  },
+  "Chalice of the Void": null,
+  "City of Traitors": {
+    "triggers": [
+      {
+        "description": "When you play another land, sacrifice this land.",
+        "effect": {
+          "kind": "manual",
+          "note": "sacrifice this land (fires for ANY other land arrival — decline it for lands that weren't played)"
+        },
+        "event": "etb",
+        "optional": false,
+        "when": {
+          "card": {
+            "types": [
+              "Land"
+            ]
+          },
+          "controller": "you",
+          "move": "entersBattlefield",
+          "on": "zoneChange",
+          "which": "other"
+        }
+      }
+    ]
+  },
+  "Clue Payoff": null,
+  "Coalition Relic": {
+    "triggers": [
+      {
+        "description": "At the beginning of your first main phase, remove all charge counters from this artifact. Add one mana of any color for each charge counter removed this way.",
+        "effect": {
+          "kind": "manual",
+          "note": "remove all charge counters from this artifact. Add one mana of any color for each charge counter removed this way"
+        },
+        "event": "upkeep",
+        "optional": false,
+        "when": {
+          "on": "stepEntered",
+          "step": "main1",
+          "whose": "yours"
+        }
+      }
+    ]
+  },
+  "Command Tower": null,
+  "Counterspell": {
+    "onResolve": {
+      "effects": [
+        {
+          "kind": "counterTarget"
+        }
+      ]
+    },
+    "triggers": []
+  },
+  "Cryogen Relic": {
+    "triggers": [
+      {
+        "description": "When this artifact enters or leaves the battlefield, draw a card.",
+        "effect": {
+          "count": 1,
+          "kind": "draw"
+        },
+        "event": "etb",
+        "optional": false
+      },
+      {
+        "description": "When this artifact enters or leaves the battlefield, draw a card.",
+        "effect": {
+          "count": 1,
+          "kind": "draw"
+        },
+        "event": "leaves",
+        "optional": false
+      }
+    ]
+  },
+  "Currency Converter": {
+    "triggers": [
+      {
+        "description": "Whenever you discard a card, you may exile that card from your graveyard.",
+        "effect": {
+          "kind": "manual",
+          "note": "exile that card from your graveyard"
+        },
+        "event": "upkeep",
+        "optional": true,
+        "when": {
+          "on": "discard",
+          "who": "you"
+        }
+      }
+    ]
+  },
+  "Divination": {
+    "onResolve": {
+      "effects": [
+        {
+          "count": 2,
+          "kind": "draw"
+        }
+      ]
+    },
+    "triggers": []
+  },
+  "Doombringer": {
+    "triggers": [
+      {
+        "description": "At the beginning of your end step, you draw a card and lose 1 life.",
+        "effect": {
+          "kind": "manual",
+          "note": "you draw a card and lose 1 life"
+        },
+        "event": "endStep",
+        "optional": false
+      }
+    ]
+  },
+  "Evolving Wilds": {
+    "activated": [
+      {
+        "costLife": 0,
+        "costSacrifice": true,
+        "costTap": true,
+        "description": "{T}, Sacrifice this land: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
+        "destination": "battlefield",
+        "entersTapped": true,
+        "filter": {
+          "kind": "basicLand"
+        },
+        "shuffle": true
+      }
+    ],
+    "triggers": []
+  },
+  "Fabled Passage": {
+    "activated": [
+      {
+        "costLife": 0,
+        "costSacrifice": true,
+        "costTap": true,
+        "description": "{T}, Sacrifice this land: Search your library for a basic land card, put it onto the battlefield tapped, then shuffle. Then if you control four or more lands, untap that land.",
+        "destination": "battlefield",
+        "entersTapped": true,
+        "filter": {
+          "kind": "basicLand"
+        },
+        "shuffle": true
+      }
+    ],
+    "triggers": []
+  },
+  "Fastbond": {
+    "triggers": [
+      {
+        "description": "Whenever you play a land, if it wasn't the first land you played this turn, this enchantment deals 1 damage to you.",
+        "effect": {
+          "kind": "manual",
+          "note": "if it wasn't the first land you played this turn, this enchantment deals 1 damage to you (fires for ANY land arrival — decline it for lands that weren't played)"
+        },
+        "event": "etb",
+        "optional": false,
+        "when": {
+          "card": {
+            "types": [
+              "Land"
+            ]
+          },
+          "controller": "you",
+          "move": "entersBattlefield",
+          "on": "zoneChange",
+          "which": "other"
+        }
+      }
+    ]
+  },
+  "Filigree Familiar": {
+    "triggers": [
+      {
+        "description": "When Filigree Familiar enters the battlefield, you gain 2 life.",
+        "effect": {
+          "amount": 2,
+          "kind": "gainLife"
+        },
+        "event": "etb",
+        "optional": false
+      },
+      {
+        "description": "When Filigree Familiar dies, draw a card.",
+        "effect": {
+          "count": 1,
+          "kind": "draw"
+        },
+        "event": "dies",
+        "optional": false
+      }
+    ]
+  },
+  "Flametongue Kavu": {
+    "triggers": [
+      {
+        "description": "When this creature enters, it deals 4 damage to target creature.",
+        "effect": {
+          "kind": "manual",
+          "note": "it deals 4 damage to target creature"
+        },
+        "event": "etb",
+        "optional": false
+      }
+    ]
+  },
+  "Flooded Strand": {
+    "activated": [
+      {
+        "costLife": 1,
+        "costSacrifice": true,
+        "costTap": true,
+        "description": "{T}, Pay 1 life, Sacrifice this land: Search your library for a Plains or Island card, put it onto the battlefield, then shuffle.",
+        "destination": "battlefield",
+        "entersTapped": false,
+        "filter": {
+          "kind": "landSubtype",
+          "subtypes": [
+            "Plains",
+            "Island"
+          ]
+        },
+        "shuffle": true
+      }
+    ],
+    "triggers": []
+  },
+  "Ghalta, Stampede Tyrant": {
+    "triggers": [
+      {
+        "description": "When Ghalta enters the battlefield, put any number of creature cards from your hand onto the battlefield.",
+        "effect": {
+          "kind": "manual",
+          "note": "put any number of creature cards from your hand onto the battlefield"
+        },
+        "event": "etb",
+        "optional": false
+      }
+    ]
+  },
+  "Glacial Fortress": null,
+  "Goblin Rabblemaster": {
+    "triggers": [
+      {
+        "description": "At the beginning of combat on your turn, create a 1/1 red Goblin creature token with haste.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Goblin",
+          "power": "1",
+          "toughness": "1",
+          "typeLine": "Token Creature — Goblin"
+        },
+        "event": "upkeep",
+        "optional": false,
+        "when": {
+          "on": "stepEntered",
+          "step": "beginCombat",
+          "whose": "yours"
+        }
+      },
+      {
+        "description": "Whenever this creature attacks, it gets +1/+0 until end of turn for each other attacking Goblin.",
+        "effect": {
+          "kind": "manual",
+          "note": "it gets +1/+0 until end of turn for each other attacking Goblin"
+        },
+        "event": "attack",
+        "optional": false
+      }
+    ]
+  },
+  "Grave Titan": {
+    "triggers": [
+      {
+        "description": "Whenever Grave Titan enters the battlefield or attacks, create two 2/2 black Zombie creature tokens.",
+        "effect": {
+          "count": 2,
+          "kind": "createToken",
+          "name": "Zombie",
+          "power": "2",
+          "toughness": "2",
+          "typeLine": "Token Creature — Zombie"
+        },
+        "event": "etb",
+        "optional": false
+      },
+      {
+        "description": "Whenever Grave Titan enters the battlefield or attacks, create two 2/2 black Zombie creature tokens.",
+        "effect": {
+          "count": 2,
+          "kind": "createToken",
+          "name": "Zombie",
+          "power": "2",
+          "toughness": "2",
+          "typeLine": "Token Creature — Zombie"
+        },
+        "event": "attack",
+        "optional": false
+      }
+    ]
+  },
+  "Grim Haruspex": {
+    "triggers": [
+      {
+        "description": "Whenever another nontoken creature you control dies, draw a card.",
+        "effect": {
+          "count": 1,
+          "kind": "draw"
+        },
+        "event": "dies",
+        "optional": false,
+        "when": {
+          "card": {
+            "nontoken": true,
+            "types": [
+              "Creature"
+            ]
+          },
+          "controller": "you",
+          "move": "dies",
+          "on": "zoneChange",
+          "which": "other"
+        }
+      }
+    ]
+  },
+  "Grizzly Bears": null,
+  "Guide of Souls": {
+    "triggers": [
+      {
+        "description": "Whenever another creature you control enters, you gain 1 life and get {E}.",
+        "effect": {
+          "kind": "manual",
+          "note": "you gain 1 life and get {E}"
+        },
+        "event": "etb",
+        "optional": false,
+        "when": {
+          "card": {
+            "types": [
+              "Creature"
+            ]
+          },
+          "controller": "you",
+          "move": "entersBattlefield",
+          "on": "zoneChange",
+          "which": "other"
+        }
+      },
+      {
+        "description": "Whenever you attack, you may pay {E}{E}{E}. When you do, put two +1/+1 counters and a flying counter on target attacking creature. It becomes an Angel in addition to its other types. (Fires when your first attacker is declared each combat.)",
+        "effect": {
+          "kind": "manual",
+          "note": "pay {E}{E}{E}. When you do, put two +1/+1 counters and a flying counter on target attacking creature. It becomes an Angel in addition to its other types"
+        },
+        "event": "attack",
+        "optional": true,
+        "when": {
+          "on": "attackDeclared",
+          "which": "team"
+        }
+      }
+    ]
+  },
+  "Guildless Commons": {
+    "replacements": [
+      {
+        "kind": "entersTapped"
+      }
+    ],
+    "triggers": []
+  },
+  "Gut, True Soul Zealot": {
+    "triggers": [
+      {
+        "description": "Whenever you attack, you may sacrifice another creature or an artifact. If you do, create a 4/1 black Skeleton creature token with menace that's tapped and attacking. (Fires when your first attacker is declared each combat.)",
+        "effect": {
+          "kind": "manual",
+          "note": "sacrifice another creature or an artifact. If you do, create a 4/1 black Skeleton creature token with menace that's tapped and attacking"
+        },
+        "event": "attack",
+        "optional": true,
+        "when": {
+          "on": "attackDeclared",
+          "which": "team"
+        }
+      }
+    ]
+  },
+  "Guttersnipe": {
+    "triggers": [
+      {
+        "castFilter": "instantOrSorcery",
+        "description": "Whenever you cast an instant or sorcery spell, Guttersnipe deals 2 damage to each opponent.",
+        "effect": {
+          "amount": 2,
+          "kind": "damageOpponent"
+        },
+        "event": "castSpell",
+        "optional": false
+      }
+    ]
+  },
+  "Hawkeye, Master Marksman": {
+    "triggers": [
+      {
+        "description": "Trick Arrows — Whenever Hawkeye becomes tapped, you may pay {1} up to three times. When you do, choose up to that many.",
+        "effect": {
+          "kind": "manual",
+          "note": "pay {1} up to three times. When you do, choose up to that many"
+        },
+        "event": "upkeep",
+        "optional": true,
+        "when": {
+          "on": "becameTapped",
+          "which": "self"
+        }
+      }
+    ]
+  },
+  "Icetill Explorer": {
+    "triggers": [
+      {
+        "description": "Landfall — Whenever a land you control enters, mill a card.",
+        "effect": {
+          "kind": "manual",
+          "note": "mill a card"
+        },
+        "event": "etb",
+        "optional": false,
+        "when": {
+          "card": {
+            "types": [
+              "Land"
+            ]
+          },
+          "controller": "you",
+          "move": "entersBattlefield",
+          "on": "zoneChange",
+          "which": "other"
+        }
+      }
+    ]
+  },
+  "Island": null,
+  "Ivora, Insatiable Heir": {
+    "triggers": [
+      {
+        "description": "When Ivora enters and whenever it deals combat damage to a player, create a Blood token.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Blood",
+          "typeLine": "Token Artifact — Blood"
+        },
+        "event": "etb",
+        "optional": false
+      },
+      {
+        "description": "When Ivora enters and whenever it deals combat damage to a player, create a Blood token.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Blood",
+          "typeLine": "Token Artifact — Blood"
+        },
+        "event": "combatDamageToPlayer",
+        "optional": false
+      },
+      {
+        "description": "Whenever you discard a card, put a +1/+1 counter on Ivora.",
+        "effect": {
+          "count": 1,
+          "counterType": "+1/+1",
+          "kind": "addCounters"
+        },
+        "event": "upkeep",
+        "optional": false,
+        "when": {
+          "on": "discard",
+          "who": "you"
+        }
+      }
+    ]
+  },
+  "Kappa Cannoneer": {
+    "triggers": [
+      {
+        "description": "Whenever this creature or another artifact you control enters, put a +1/+1 counter on this creature. It can't be blocked this turn.",
+        "effect": {
+          "kind": "manual",
+          "note": "put a +1/+1 counter on this creature; it can't be blocked this turn"
+        },
+        "event": "etb",
+        "optional": false,
+        "when": {
+          "card": {
+            "types": [
+              "Artifact"
+            ]
+          },
+          "controller": "you",
+          "move": "entersBattlefield",
+          "on": "zoneChange",
+          "which": "selfOrOther"
+        }
+      }
+    ]
+  },
+  "Kitchen Finks": {
+    "triggers": [
+      {
+        "description": "When Kitchen Finks enters the battlefield, you gain 2 life.",
+        "effect": {
+          "amount": 2,
+          "kind": "gainLife"
+        },
+        "event": "etb",
+        "optional": false
+      }
+    ]
+  },
+  "Kokusho, the Evening Star": {
+    "triggers": [
+      {
+        "description": "When Kokusho, the Evening Star dies, each opponent loses 5 life and you gain life equal to the life lost this way.",
+        "effect": {
+          "kind": "manual",
+          "note": "each opponent loses 5 life and you gain life equal to the life lost this way"
+        },
+        "event": "dies",
+        "optional": false
+      }
+    ]
+  },
+  "Lightning Bolt": {
+    "onResolve": {
+      "effects": [
+        {
+          "amount": 3,
+          "kind": "damageAnyTarget"
+        }
+      ]
+    },
+    "triggers": []
+  },
+  "Loran of the Third Path": {
+    "triggers": [
+      {
+        "description": "When Loran enters, destroy up to one target artifact or enchantment.",
+        "effect": {
+          "kind": "manual",
+          "note": "destroy up to one target artifact or enchantment"
+        },
+        "event": "etb",
+        "optional": false
+      }
+    ]
+  },
+  "Lotus Cobra": {
+    "triggers": [
+      {
+        "description": "Landfall — Whenever a land you control enters, add one mana of any color.",
+        "effect": {
+          "kind": "manual",
+          "note": "add one mana of any color"
+        },
+        "event": "etb",
+        "optional": false,
+        "when": {
+          "card": {
+            "types": [
+              "Land"
+            ]
+          },
+          "controller": "you",
+          "move": "entersBattlefield",
+          "on": "zoneChange",
+          "which": "other"
+        }
+      }
+    ]
+  },
+  "Luminarch Aspirant": {
+    "triggers": [
+      {
+        "description": "At the beginning of combat on your turn, put a +1/+1 counter on target creature you control.",
+        "effect": {
+          "kind": "manual",
+          "note": "put a +1/+1 counter on target creature you control"
+        },
+        "event": "upkeep",
+        "optional": false,
+        "when": {
+          "on": "stepEntered",
+          "step": "beginCombat",
+          "whose": "yours"
+        }
+      }
+    ]
+  },
+  "Mana Vault": {
+    "triggers": [
+      {
+        "description": "At the beginning of your upkeep, you may pay {4}. If you do, untap this artifact.",
+        "effect": {
+          "kind": "manual",
+          "note": "pay {4}. If you do, untap this artifact"
+        },
+        "event": "upkeep",
+        "optional": true
+      },
+      {
+        "description": "At the beginning of your draw step, if this artifact is tapped, it deals 1 damage to you.",
+        "effect": {
+          "kind": "manual",
+          "note": "if this artifact is tapped, it deals 1 damage to you"
+        },
+        "event": "upkeep",
+        "optional": false,
+        "when": {
+          "on": "stepEntered",
+          "step": "draw",
+          "whose": "yours"
+        }
+      }
+    ]
+  },
+  "Minsc & Boo, Timeless Heroes": {
+    "triggers": [
+      {
+        "description": "When Minsc & Boo enters and at the beginning of your upkeep, you may create Boo, a legendary 1/1 red Hamster creature token with trample and haste.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Boo",
+          "power": "1",
+          "toughness": "1",
+          "typeLine": "Token Legendary Creature — Hamster"
+        },
+        "event": "etb",
+        "optional": true
+      },
+      {
+        "description": "When Minsc & Boo enters and at the beginning of your upkeep, you may create Boo, a legendary 1/1 red Hamster creature token with trample and haste.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Boo",
+          "power": "1",
+          "toughness": "1",
+          "typeLine": "Token Legendary Creature — Hamster"
+        },
+        "event": "upkeep",
+        "optional": true
+      }
+    ]
+  },
+  "Monastery Mentor": {
+    "triggers": [
+      {
+        "castFilter": "noncreature",
+        "description": "Whenever you cast a noncreature spell, create a 1/1 white Monk creature token with prowess.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Monk",
+          "power": "1",
+          "toughness": "1",
+          "typeLine": "Token Creature — Monk"
+        },
+        "event": "castSpell",
+        "optional": false
+      }
+    ]
+  },
+  "Mulldrifter": {
+    "triggers": [
+      {
+        "description": "When Mulldrifter enters the battlefield, draw two cards.",
+        "effect": {
+          "count": 2,
+          "kind": "draw"
+        },
+        "event": "etb",
+        "optional": false
+      }
+    ]
+  },
+  "Night's Whisper": {
+    "onResolve": {
+      "effects": [
+        {
+          "count": 2,
+          "kind": "draw"
+        },
+        {
+          "amount": 2,
+          "kind": "loseLife"
+        }
+      ]
+    },
+    "triggers": []
+  },
+  "Oath of Druids": {
+    "triggers": [
+      {
+        "description": "At the beginning of each player's upkeep, that player chooses target player who controls more creatures than they do and is their opponent. The first player may reveal cards from the top of their library until they reveal a creature card. If they do, that player puts that card onto the battlefield and all other cards revealed this way into their graveyard.",
+        "effect": {
+          "kind": "manual",
+          "note": "that player chooses target player who controls more creatures than they do and is their opponent. The first player may reveal cards from the top of their library until they reveal a creature card. If they do, that player puts that card onto the battlefield and all other cards revealed this way into their graveyard"
+        },
+        "event": "eachUpkeep",
+        "optional": false
+      }
+    ]
+  },
+  "Orcish Bowmasters": {
+    "triggers": [
+      {
+        "description": "When this creature enters, it deals 1 damage to any target. Then amass Orcs 1.",
+        "effect": {
+          "effects": [
+            {
+              "amount": 1,
+              "kind": "damageAnyTarget"
+            },
+            {
+              "count": 1,
+              "kind": "amass",
+              "subtype": "Orc"
+            }
+          ],
+          "kind": "seq"
+        },
+        "event": "etb",
+        "optional": false
+      },
+      {
+        "description": "Whenever an opponent draws a card except the first one they draw in each of their draw steps, this creature deals 1 damage to any target. Then amass Orcs 1.",
+        "effect": {
+          "effects": [
+            {
+              "amount": 1,
+              "kind": "damageAnyTarget"
+            },
+            {
+              "count": 1,
+              "kind": "amass",
+              "subtype": "Orc"
+            }
+          ],
+          "kind": "seq"
+        },
+        "event": "opponentDraws",
+        "optional": false
+      }
+    ]
+  },
+  "Ouroboroid": {
+    "triggers": [
+      {
+        "description": "At the beginning of combat on your turn, put X +1/+1 counters on each creature you control, where X is this creature's power.",
+        "effect": {
+          "kind": "manual",
+          "note": "put X +1/+1 counters on each creature you control, where X is this creature's power"
+        },
+        "event": "upkeep",
+        "optional": false,
+        "when": {
+          "on": "stepEntered",
+          "step": "beginCombat",
+          "whose": "yours"
+        }
+      }
+    ]
+  },
+  "Perilous Myr": {
+    "triggers": [
+      {
+        "description": "When Perilous Myr dies, it deals 2 damage to any target.",
+        "effect": {
+          "amount": 2,
+          "kind": "damageAnyTarget"
+        },
+        "event": "dies",
+        "optional": false
+      }
+    ]
+  },
+  "Phyrexian Arena": {
+    "triggers": [
+      {
+        "description": "At the beginning of your upkeep, you draw a card and you lose 1 life.",
+        "effect": {
+          "count": 1,
+          "kind": "draw"
+        },
+        "event": "upkeep",
+        "optional": false
+      },
+      {
+        "description": "At the beginning of your upkeep, you draw a card and you lose 1 life.",
+        "effect": {
+          "amount": 1,
+          "kind": "loseLife"
+        },
+        "event": "upkeep",
+        "optional": false
+      }
+    ]
+  },
+  "Prideful Parent": {
+    "triggers": [
+      {
+        "description": "When this creature enters, create a 1/1 white Cat creature token.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Cat",
+          "power": "1",
+          "toughness": "1",
+          "typeLine": "Token Creature — Cat"
+        },
+        "event": "etb",
+        "optional": false
+      }
+    ]
+  },
+  "Priest of the Blood Rite": {
+    "triggers": [
+      {
+        "description": "When Priest of the Blood Rite enters the battlefield, create a 5/5 black Demon creature token with flying.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Demon",
+          "power": "5",
+          "toughness": "5",
+          "typeLine": "Token Creature — Demon"
+        },
+        "event": "etb",
+        "optional": false
+      },
+      {
+        "description": "At the beginning of your upkeep, you lose 2 life.",
+        "effect": {
+          "amount": 2,
+          "kind": "loseLife"
+        },
+        "event": "upkeep",
+        "optional": false
+      }
+    ]
+  },
+  "Prismatic Vista": {
+    "activated": [
+      {
+        "costLife": 1,
+        "costSacrifice": true,
+        "costTap": true,
+        "description": "{T}, Pay 1 life, Sacrifice this land: Search your library for a basic land card, put it onto the battlefield, then shuffle.",
+        "destination": "battlefield",
+        "entersTapped": false,
+        "filter": {
+          "kind": "basicLand"
+        },
+        "shuffle": true
+      }
+    ],
+    "triggers": []
+  },
+  "Psychic Frog": {
+    "triggers": [
+      {
+        "description": "Whenever this creature deals combat damage to a player or planeswalker, draw a card.",
+        "effect": {
+          "count": 1,
+          "kind": "draw"
+        },
+        "event": "combatDamageToPlayer",
+        "optional": false
+      }
+    ]
+  },
+  "Pyrogoyf": {
+    "triggers": [
+      {
+        "description": "Whenever this creature or another Lhurgoyf creature you control enters, that creature deals damage equal to its power to any target.",
+        "effect": {
+          "kind": "manual",
+          "note": "the entering creature deals damage equal to its power to any target"
+        },
+        "event": "etb",
+        "optional": false,
+        "when": {
+          "card": {
+            "subtype": "Lhurgoyf",
+            "types": [
+              "Creature"
+            ]
+          },
+          "controller": "you",
+          "move": "entersBattlefield",
+          "on": "zoneChange",
+          "which": "selfOrOther"
+        }
+      }
+    ]
+  },
+  "Questing Beast": {
+    "triggers": [
+      {
+        "description": "Whenever Questing Beast deals combat damage to an opponent, it deals that much damage to target planeswalker that player controls.",
+        "effect": {
+          "kind": "manual",
+          "note": "it deals that much damage to target planeswalker that player controls"
+        },
+        "event": "combatDamageToPlayer",
+        "optional": false
+      }
+    ]
+  },
+  "Radiant Fountain": {
+    "triggers": [
+      {
+        "description": "When Radiant Fountain enters the battlefield, you gain 2 life.",
+        "effect": {
+          "amount": 2,
+          "kind": "gainLife"
+        },
+        "event": "etb",
+        "optional": false
+      }
+    ]
+  },
+  "Raffine, Scheming Seer": {
+    "triggers": [
+      {
+        "description": "Whenever you attack, target attacking creature connives X, where X is the number of attacking creatures. (Fires when your first attacker is declared each combat.)",
+        "effect": {
+          "kind": "manual",
+          "note": "target attacking creature connives X, where X is the number of attacking creatures"
+        },
+        "event": "attack",
+        "optional": false,
+        "when": {
+          "on": "attackDeclared",
+          "which": "team"
+        }
+      }
+    ]
+  },
+  "Ravenous Chupacabra": {
+    "triggers": [
+      {
+        "description": "When Ravenous Chupacabra enters the battlefield, destroy target creature an opponent controls.",
+        "effect": {
+          "kind": "manual",
+          "note": "destroy target creature an opponent controls"
+        },
+        "event": "etb",
+        "optional": false
+      }
+    ]
+  },
+  "Ravenous Robots": {
+    "triggers": [
+      {
+        "castFilter": "artifact",
+        "description": "Whenever you cast an artifact spell, create a 1/1 colorless Robot artifact creature token.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Robot",
+          "power": "1",
+          "toughness": "1",
+          "typeLine": "Token Artifact Creature — Robot"
+        },
+        "event": "castSpell",
+        "optional": false
+      }
+    ]
+  },
+  "Reaper of the Wilds": {
+    "triggers": [
+      {
+        "description": "Whenever another creature dies, scry 1.",
+        "effect": {
+          "count": 1,
+          "kind": "scry"
+        },
+        "event": "dies",
+        "optional": false,
+        "when": {
+          "card": {
+            "types": [
+              "Creature"
+            ]
+          },
+          "controller": "any",
+          "move": "dies",
+          "on": "zoneChange",
+          "which": "other"
+        }
+      }
+    ]
+  },
+  "Reckless Stormseeker // Storm-Charged Slasher": {
+    "triggers": [
+      {
+        "description": "At the beginning of combat on your turn, target creature you control gets +1/+0 and gains haste until end of turn.",
+        "effect": {
+          "kind": "manual",
+          "note": "target creature you control gets +1/+0 and gains haste until end of turn"
+        },
+        "event": "upkeep",
+        "optional": false,
+        "when": {
+          "on": "stepEntered",
+          "step": "beginCombat",
+          "whose": "yours"
+        }
+      }
+    ]
+  },
+  "Revitalize": {
+    "onResolve": {
+      "effects": [
+        {
+          "amount": 3,
+          "kind": "gainLife"
+        },
+        {
+          "count": 1,
+          "kind": "draw"
+        }
+      ]
+    },
+    "triggers": []
+  },
+  "Rider Test": null,
+  "Sanguine Evangelist": {
+    "triggers": [
+      {
+        "description": "When this creature enters or dies, create a 1/1 black Bat creature token with flying.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Bat",
+          "power": "1",
+          "toughness": "1",
+          "typeLine": "Token Creature — Bat"
+        },
+        "event": "etb",
+        "optional": false
+      },
+      {
+        "description": "When this creature enters or dies, create a 1/1 black Bat creature token with flying.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Bat",
+          "power": "1",
+          "toughness": "1",
+          "typeLine": "Token Creature — Bat"
+        },
+        "event": "dies",
+        "optional": false
+      }
+    ]
+  },
+  "Scale Keeper": {
+    "triggers": [
+      {
+        "description": "When Scale Keeper enters the battlefield, put two +1/+1 counters on it.",
+        "effect": {
+          "count": 2,
+          "counterType": "+1/+1",
+          "kind": "addCounters"
+        },
+        "event": "etb",
+        "optional": false
+      }
+    ]
+  },
+  "Scythecat Cub": {
+    "triggers": [
+      {
+        "description": "Landfall — Whenever a land you control enters, put a +1/+1 counter on target creature you control. If this is the second time this ability has resolved this turn, double the number of +1/+1 counters on that creature instead.",
+        "effect": {
+          "kind": "manual",
+          "note": "put a +1/+1 counter on target creature you control. If this is the second time this ability has resolved this turn, double the number of +1/+1 counters on that creature instead"
+        },
+        "event": "etb",
+        "optional": false,
+        "when": {
+          "card": {
+            "types": [
+              "Land"
+            ]
+          },
+          "controller": "you",
+          "move": "entersBattlefield",
+          "on": "zoneChange",
+          "which": "other"
+        }
+      }
+    ]
+  },
+  "Sedgemoor Witch": {
+    "triggers": [
+      {
+        "castFilter": "instantOrSorcery",
+        "description": "Magecraft — Whenever you cast or copy an instant or sorcery spell, create a 1/1 black and green Pest creature token with \"When this token dies, you gain 1 life.\"",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Pest",
+          "power": "1",
+          "toughness": "1",
+          "typeLine": "Token Creature — Pest"
+        },
+        "event": "castSpell",
+        "optional": false
+      }
+    ]
+  },
+  "Sentinel of the Nameless City": {
+    "triggers": [
+      {
+        "description": "Whenever this creature enters or attacks, create a Map token.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Map",
+          "typeLine": "Token Artifact — Map"
+        },
+        "event": "etb",
+        "optional": false
+      },
+      {
+        "description": "Whenever this creature enters or attacks, create a Map token.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Map",
+          "typeLine": "Token Artifact — Map"
+        },
+        "event": "attack",
+        "optional": false
+      }
+    ]
+  },
+  "Serrated Arrows": {
+    "replacements": [
+      {
+        "count": 3,
+        "counterType": "arrowhead",
+        "kind": "entersWithCounters"
+      }
+    ],
+    "triggers": [
+      {
+        "description": "At the beginning of your upkeep, if there are no arrowhead counters on Serrated Arrows, sacrifice it.",
+        "effect": {
+          "kind": "manual",
+          "note": "if there are no arrowhead counters on Serrated Arrows, sacrifice it"
+        },
+        "event": "upkeep",
+        "optional": false
+      }
+    ]
+  },
+  "Sheoldred, the Apocalypse": {
+    "triggers": [
+      {
+        "description": "Whenever you draw a card, you gain 2 life.",
+        "effect": {
+          "amount": 2,
+          "kind": "gainLife"
+        },
+        "event": "upkeep",
+        "optional": false,
+        "when": {
+          "on": "draw",
+          "who": "you"
+        }
+      },
+      {
+        "description": "Whenever an opponent draws a card, they lose 2 life.",
+        "effect": {
+          "amount": 2,
+          "kind": "eachOpponentLosesLife"
+        },
+        "event": "opponentDraws",
+        "optional": false,
+        "when": {
+          "on": "draw",
+          "who": "opponent"
+        }
+      }
+    ]
+  },
+  "Shriekmaw": {
+    "triggers": [
+      {
+        "description": "When Shriekmaw enters the battlefield, destroy target nonartifact, nonblack creature.",
+        "effect": {
+          "kind": "manual",
+          "note": "destroy target nonartifact, nonblack creature"
+        },
+        "event": "etb",
+        "optional": false
+      }
+    ]
+  },
+  "Siege-Gang Commander": {
+    "triggers": [
+      {
+        "description": "When Siege-Gang Commander enters the battlefield, create three 1/1 red Goblin creature tokens.",
+        "effect": {
+          "count": 3,
+          "kind": "createToken",
+          "name": "Goblin",
+          "power": "1",
+          "toughness": "1",
+          "typeLine": "Token Creature — Goblin"
+        },
+        "event": "etb",
+        "optional": false
+      }
+    ]
+  },
+  "Sign in Blood": null,
+  "Skyclave Apparition": {
+    "triggers": [
+      {
+        "description": "When this creature enters, exile up to one target nonland, nontoken permanent you don't control with mana value 4 or less.",
+        "effect": {
+          "kind": "manual",
+          "note": "exile up to one target nonland, nontoken permanent you don't control with mana value 4 or less"
+        },
+        "event": "etb",
+        "optional": false
+      },
+      {
+        "description": "When this creature leaves the battlefield, the exiled card's owner creates an X/X blue Illusion creature token, where X is the exiled card's mana value.",
+        "effect": {
+          "kind": "manual",
+          "note": "the exiled card's owner creates an X/X blue Illusion creature token, where X is the exiled card's mana value"
+        },
+        "event": "leaves",
+        "optional": false
+      }
+    ]
+  },
+  "Skyclave Cleric // Skyclave Basilica": {
+    "triggers": [
+      {
+        "description": "When Skyclave Cleric enters the battlefield, you gain 2 life.",
+        "effect": {
+          "amount": 2,
+          "kind": "gainLife"
+        },
+        "event": "etb",
+        "optional": false
+      }
+    ]
+  },
+  "Smuggler's Copter": {
+    "triggers": [
+      {
+        "description": "Whenever this Vehicle attacks or blocks, you may draw a card. If you do, discard a card.",
+        "effect": {
+          "kind": "manual",
+          "note": "draw a card. If you do, discard a card"
+        },
+        "event": "attack",
+        "optional": true
+      }
+    ]
+  },
+  "Solemn Simulacrum": {
+    "triggers": [
+      {
+        "description": "When Solemn Simulacrum enters the battlefield, you may search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
+        "effect": {
+          "kind": "manual",
+          "note": "search your library for a basic land card, put it onto the battlefield tapped, then shuffle"
+        },
+        "event": "etb",
+        "optional": true
+      },
+      {
+        "description": "When Solemn Simulacrum dies, you may draw a card.",
+        "effect": {
+          "count": 1,
+          "kind": "draw"
+        },
+        "event": "dies",
+        "optional": true
+      }
+    ]
+  },
+  "Spike Feeder": {
+    "replacements": [
+      {
+        "count": 2,
+        "counterType": "+1/+1",
+        "kind": "entersWithCounters"
+      }
+    ],
+    "triggers": []
+  },
+  "Stormchaser's Talent": {
+    "triggers": [
+      {
+        "description": "When this Class enters, create a 1/1 blue and red Otter creature token with prowess.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Otter",
+          "power": "1",
+          "toughness": "1",
+          "typeLine": "Token Creature — Otter"
+        },
+        "event": "etb",
+        "optional": false
+      },
+      {
+        "castFilter": "instantOrSorcery",
+        "description": "Whenever you cast an instant or sorcery spell, create a 1/1 blue and red Otter creature token with prowess.",
+        "effect": {
+          "kind": "manual",
+          "note": "ONLY if this Class is level 3: create a 1/1 blue and red Otter creature token with prowess"
+        },
+        "event": "castSpell",
+        "optional": false
+      }
+    ]
+  },
+  "Sun Titan": {
+    "triggers": [
+      {
+        "description": "Whenever Sun Titan enters the battlefield or attacks, you may return target permanent card with mana value 3 or less from your graveyard to the battlefield.",
+        "effect": {
+          "kind": "manual",
+          "note": "return target permanent card with mana value 3 or less from your graveyard to the battlefield"
+        },
+        "event": "etb",
+        "optional": true
+      },
+      {
+        "description": "Whenever Sun Titan enters the battlefield or attacks, you may return target permanent card with mana value 3 or less from your graveyard to the battlefield.",
+        "effect": {
+          "kind": "manual",
+          "note": "return target permanent card with mana value 3 or less from your graveyard to the battlefield"
+        },
+        "event": "attack",
+        "optional": true
+      }
+    ]
+  },
+  "Sword of the Meek": null,
+  "Tezzeret, Cruel Captain": {
+    "triggers": [
+      {
+        "description": "Whenever an artifact you control enters, put a loyalty counter on Tezzeret.",
+        "effect": {
+          "count": 1,
+          "counterType": "loyalty",
+          "kind": "addCounters"
+        },
+        "event": "etb",
+        "optional": false,
+        "when": {
+          "card": {
+            "types": [
+              "Artifact"
+            ]
+          },
+          "controller": "you",
+          "move": "entersBattlefield",
+          "on": "zoneChange",
+          "which": "selfOrOther"
+        }
+      }
+    ]
+  },
+  "Thraben Inspector": {
+    "triggers": [
+      {
+        "description": "When this creature enters, investigate.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Clue",
+          "typeLine": "Token Artifact — Clue"
+        },
+        "event": "etb",
+        "optional": false
+      }
+    ]
+  },
+  "Thragtusk": {
+    "triggers": [
+      {
+        "description": "When Thragtusk enters the battlefield, you gain 5 life.",
+        "effect": {
+          "amount": 5,
+          "kind": "gainLife"
+        },
+        "event": "etb",
+        "optional": false
+      },
+      {
+        "description": "When Thragtusk leaves the battlefield, create a 3/3 green Beast creature token.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Beast",
+          "power": "3",
+          "toughness": "3",
+          "typeLine": "Token Creature — Beast"
+        },
+        "event": "leaves",
+        "optional": false
+      }
+    ]
+  },
+  "Tireless Tracker": {
+    "triggers": [
+      {
+        "description": "Landfall — Whenever a land you control enters, investigate.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Clue",
+          "typeLine": "Token Artifact — Clue"
+        },
+        "event": "etb",
+        "optional": false,
+        "when": {
+          "card": {
+            "types": [
+              "Land"
+            ]
+          },
+          "controller": "you",
+          "move": "entersBattlefield",
+          "on": "zoneChange",
+          "which": "other"
+        }
+      }
+    ]
+  },
+  "Titania, Protector of Argoth": {
+    "triggers": [
+      {
+        "description": "When Titania enters, return target land card from your graveyard to the battlefield.",
+        "effect": {
+          "kind": "manual",
+          "note": "return target land card from your graveyard to the battlefield"
+        },
+        "event": "etb",
+        "optional": false
+      },
+      {
+        "description": "Whenever a land you control is put into a graveyard from the battlefield, create a 5/3 green Elemental creature token.",
+        "effect": {
+          "count": 1,
+          "kind": "createToken",
+          "name": "Elemental",
+          "power": "5",
+          "toughness": "3",
+          "typeLine": "Token Creature — Elemental"
+        },
+        "event": "dies",
+        "optional": false,
+        "when": {
+          "card": {
+            "types": [
+              "Land"
+            ]
+          },
+          "controller": "you",
+          "move": "dies",
+          "on": "zoneChange",
+          "which": "other"
+        }
+      }
+    ]
+  },
+  "Treasure Cruise": null,
+  "Ultron, Artificial Malevolence": {
+    "triggers": [
+      {
+        "description": "Whenever another nontoken artifact you control enters, you may pay {2}. If you do, create a token that's a copy of it. If the token isn't a creature, it becomes a 2/2 Robot Villain creature in addition to its other types.",
+        "effect": {
+          "kind": "manual",
+          "note": "pay {2}. If you do, create a token that's a copy of it. If the token isn't a creature, it becomes a 2/2 Robot Villain creature in addition to its other types"
+        },
+        "event": "etb",
+        "optional": true,
+        "when": {
+          "card": {
+            "nontoken": true,
+            "types": [
+              "Artifact"
+            ]
+          },
+          "controller": "you",
+          "move": "entersBattlefield",
+          "on": "zoneChange",
+          "which": "other"
+        }
+      }
+    ]
+  },
+  "Underworld Breach": {
+    "triggers": [
+      {
+        "description": "At the beginning of the end step, sacrifice this enchantment.",
+        "effect": {
+          "kind": "manual",
+          "note": "sacrifice this enchantment"
+        },
+        "event": "endStep",
+        "optional": false
+      }
+    ]
+  },
+  "Vault Emissary": {
+    "triggers": [
+      {
+        "description": "When Vault Emissary enters the battlefield, each opponent loses 2 life.",
+        "effect": {
+          "amount": 2,
+          "kind": "eachOpponentLosesLife"
+        },
+        "event": "etb",
+        "optional": false
+      }
+    ]
+  },
+  "Vaultborn Tyrant": {
+    "triggers": [
+      {
+        "description": "Whenever this creature or another creature you control with power 4 or greater enters, you gain 3 life and draw a card.",
+        "effect": {
+          "amount": 3,
+          "kind": "gainLife"
+        },
+        "event": "etb",
+        "optional": false
+      },
+      {
+        "description": "Whenever this creature or another creature you control with power 4 or greater enters, you gain 3 life and draw a card.",
+        "effect": {
+          "count": 1,
+          "kind": "draw"
+        },
+        "event": "etb",
+        "optional": false
+      },
+      {
+        "description": "When this creature dies, if it's not a token, create a token that's a copy of it, except it's an artifact in addition to its other types.",
+        "effect": {
+          "kind": "manual",
+          "note": "if it's not a token, create a token copy of it (an artifact in addition to its other types)"
+        },
+        "event": "dies",
+        "optional": false
+      }
+    ]
+  },
+  "Vivi Ornitier": {
+    "triggers": [
+      {
+        "castFilter": "noncreature",
+        "description": "Whenever you cast a noncreature spell, put a +1/+1 counter on Vivi Ornitier and it deals 1 damage to each opponent.",
+        "effect": {
+          "count": 1,
+          "counterType": "+1/+1",
+          "kind": "addCounters"
+        },
+        "event": "castSpell",
+        "optional": false
+      },
+      {
+        "castFilter": "noncreature",
+        "description": "Whenever you cast a noncreature spell, put a +1/+1 counter on Vivi Ornitier and it deals 1 damage to each opponent.",
+        "effect": {
+          "amount": 1,
+          "kind": "damageOpponent"
+        },
+        "event": "castSpell",
+        "optional": false
+      }
+    ]
+  },
+  "Wall of Omens": {
+    "triggers": [
+      {
+        "description": "When Wall of Omens enters the battlefield, draw a card.",
+        "effect": {
+          "count": 1,
+          "kind": "draw"
+        },
+        "event": "etb",
+        "optional": false
+      }
+    ]
+  },
+  "Wheel of Fortune": null,
+  "Wind Drake": null,
+  "Witherbloom Apprentice": {
+    "triggers": [
+      {
+        "castFilter": "instantOrSorcery",
+        "description": "Magecraft — Whenever you cast or copy an instant or sorcery spell, each opponent loses 1 life and you gain 1 life.",
+        "effect": {
+          "amount": 1,
+          "kind": "eachOpponentLosesLife"
+        },
+        "event": "castSpell",
+        "optional": false
+      },
+      {
+        "castFilter": "instantOrSorcery",
+        "description": "Magecraft — Whenever you cast or copy an instant or sorcery spell, each opponent loses 1 life and you gain 1 life.",
+        "effect": {
+          "amount": 1,
+          "kind": "gainLife"
+        },
+        "event": "castSpell",
+        "optional": false
+      }
+    ]
+  },
+  "Worldspine Wurm": {
+    "triggers": [
+      {
+        "description": "When this creature dies, create three 5/5 green Wurm creature tokens with trample.",
+        "effect": {
+          "count": 3,
+          "kind": "createToken",
+          "name": "Wurm",
+          "power": "5",
+          "toughness": "5",
+          "typeLine": "Token Creature — Wurm"
+        },
+        "event": "dies",
+        "optional": false
+      },
+      {
+        "description": "When Worldspine Wurm is put into a graveyard from anywhere, shuffle it into its owner's library.",
+        "effect": {
+          "kind": "manual",
+          "note": "shuffle it into its owner's library"
+        },
+        "event": "dies",
+        "optional": false
+      }
+    ]
+  }
+}

@@ -193,7 +193,7 @@ export function StackPanel({ stack, cards, nameFor, viewerId, onResolve, onDecli
             ) : (
               // v8: no Counter button — countering is done by casting a
               // counterspell (or ability) in response, like the tabletop.
-              // v9: a plain spell can also need resolveDisabled/resolveTitle
+              // v11: a plain spell can also need resolveDisabled/resolveTitle
               // (a resolution-time target, or a pending priority-pass gate).
               <button
                 type="button"

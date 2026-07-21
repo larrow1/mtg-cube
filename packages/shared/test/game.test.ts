@@ -81,7 +81,7 @@ function lastLog(s: GameState): string {
 }
 
 /**
- * v9: resolveTopOfStack/counterTopOfStack now require both players to have
+ * v11: resolveTopOfStack/counterTopOfStack now require both players to have
  * passed priority in succession (CR 117.4). Keyed off `s.priorityPlayerId`
  * (not a fixed player) since who passes first depends on who last touched
  * the stack.
@@ -515,7 +515,7 @@ describe("stack", () => {
   });
 });
 
-describe("priority passing (v9)", () => {
+describe("priority passing (v11)", () => {
   it("resolveTopOfStack/counterTopOfStack are rejected until both players pass in succession", () => {
     const g = newGame();
     const spell = handCard(g, "p1");
@@ -1270,7 +1270,7 @@ describe("spell resolution scripts (v4)", () => {
     return { s, ctx, spell };
   }
 
-  it("a sorcery with onResolve: card to graveyard AND its effect apply in one resolution (v9)", () => {
+  it("a sorcery with onResolve: card to graveyard AND its effect apply in one resolution (v11)", () => {
     // Night's Whisper-style script: draw 2, lose 2.
     const { s, ctx, spell } = castSpell("Sorcery", {
       triggers: [],
@@ -2091,7 +2091,7 @@ describe("stack-first casting & counterspells (v7)", () => {
     // p2 responds with Counterspell — it sits ABOVE the bear.
     s = applyAction(s, "p2", { type: "moveCard", instanceId: "csp1", from: "hand", to: "stack", override: true }, 0, ctx);
     expect(s.stack.map((c) => c.instanceId)).toEqual(["bear1", "csp1"]);
-    // Counterspell resolves in ONE action (v9): card to p2's graveyard AND
+    // Counterspell resolves in ONE action (v11): card to p2's graveyard AND
     // the bear is countered immediately — no intermediate stack entry.
     s = bothPass(s);
     s = applyAction(
@@ -2135,7 +2135,7 @@ describe("stack-first casting & counterspells (v7)", () => {
     ).toThrow(/not on the stack/);
   });
 
-  it("Lightning Bolt resolves in one action: card to graveyard AND targeted damage dealt (v9)", () => {
+  it("Lightning Bolt resolves in one action: card to graveyard AND targeted damage dealt (v11)", () => {
     const { g, ctx } = duel();
     const boltCard = mkCard("p1", 982);
     boltCard.cardId = "bolt";
@@ -2210,7 +2210,7 @@ describe("cast-time targets (v8)", () => {
     expect(s.log.some((e) => /chose .* as the target of Lightning Bolt/.test(e.message))).toBe(true);
     // Either player may resolve — the chosen target already rides the stack
     // entry, so no re-picking is needed; card to graveyard AND damage apply
-    // together in one resolution (v9).
+    // together in one resolution (v11).
     s = bothPass(s);
     s = applyAction(s, "p2", { type: "resolveTopOfStack" }, 0, ctx);
     expect(s.stack).toHaveLength(0);

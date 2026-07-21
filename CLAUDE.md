@@ -86,13 +86,22 @@ response window), counterTarget + stack TargetRef (Counterspell and
 Lightning Bolt fully scripted via inference); v8 cast-time targets
 (chosenTarget rides the stack entry, stale targets fizzle per CR 608.2b),
 Counter/Untap-all/Create-token/Reveal-hand buttons removed (card-driven
-play); v9 real engine-enforced stack priority (`GameState.priorityPasses`;
+play); v9 Arena-GRE architecture (engine emits GameEvents, ONE matching pass
+turns declarative TriggerConditions into stack triggers — landfall,
+other-enters/dies, begin-of-combat, team attacks, becameTapped,
+draw/discard watchers now expressible; UNSUPPORTED_TRIGGER_CARDS 79→46) +
+scriptFor golden-snapshot blast-radius audit (test/scriptAudit.test.ts,
+regenerate with UPDATE_SCRIPT_AUDIT=1 and review the diff card-by-card);
+v10 whiteboard effect pipeline (effects compile to EffectTask lists →
+interceptTasks hook → executor; single arriveOnBattlefield choke point;
+entersTapped/entersWithCounters replacement rules — tap-lands just work);
+v11 real engine-enforced stack priority (`GameState.priorityPasses`;
 resolveTopOfStack/counterTopOfStack throw until both players pass in
 succession, CR 117.4-117.5; casting grants the caster priority) and direct
 spell-effect resolution (an instant/sorcery's onResolve effect applies in
 the SAME resolveTopOfStack action, CR 608 — no more synthetic effect entry;
 Auto mode reads priorityPasses instead of guessing from the log);
-254 shared tests;
+310 shared tests;
 Arena-style UI (draft lanes/drag-to-pick, deck builder, battlefield art
 tiles with color frames + keyword chips, mana symbols).
 
@@ -101,10 +110,12 @@ section) — query them via the `mtg-rules` subagent instead of guessing rules.
 
 Roadmap (rough priority): extend targeting beyond damageAnyTarget (target
 creature/permanent effects — unlocks automating most remaining manual
-triggers) → remaining trigger events (landfall, begin-of-combat, more
-observer triggers — see UNSUPPORTED_TRIGGER_CARDS) → account management
-(password change) → spectator mode → Redis persistence for live games /
-multi-instance (see DEPLOY.md).
+triggers) → task-level interception rules (draw substitution, damage
+prevention, trigger doubling — the interceptTasks hook is ready) → richer
+EventCardFilter (power/toughness predicates: Vaultborn Tyrant, Sword of the
+Meek) → per-turn counters (Nth-spell/Nth-draw conditions) → account
+management (password change) → spectator mode → Redis persistence for live
+games / multi-instance (see DEPLOY.md).
 
 Known nits: pre-existing setState-in-render warning from `apps/web/src/store.tsx`;
 mana sources always produce exactly 1 (Sol Ring pays 1 toward auto-payment).
