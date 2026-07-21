@@ -19,6 +19,7 @@ import {
   primaryType,
   type ColorBucket,
 } from "../lib/cards";
+import { ManaSymbol } from "./ManaSymbol";
 import { SIDEBOARD_LANE_ID, isUnnamedDefaultLane, type DraftLanes, type Lane } from "../lib/draftLanes";
 
 const DRAG_MIME = "text/plain";
@@ -115,7 +116,7 @@ function TypeCounts({ main, cards }: { main: DraftCard[]; cards: Record<string, 
 export function ColorSplit({
   main,
   cards,
-  label = "Colors (main)",
+  label = "Mana colors (main)",
 }: {
   main: DraftCard[];
   cards: Record<string, CardData>;
@@ -123,19 +124,37 @@ export function ColorSplit({
 }): JSX.Element | null {
   const counts = useMemo(() => {
     const map = new Map<ColorBucket, number>();
+    const manaColors: ColorBucket[] = ["W", "U", "B", "R", "G"];
     for (const pick of main) {
-      const b = colorBucket(cards[pick.cardId]);
-      map.set(b, (map.get(b) ?? 0) + 1);
+      const data = cards[pick.cardId];
+      if (data?.typeLine.toLowerCase().includes("land")) {
+        map.set("L", (map.get("L") ?? 0) + 1);
+        continue;
+      }
+
+      // Count every distinct color that appears in the mana cost. A card with
+      // {5}{G}{W}, repeated colored pips, or hybrid pips contributes once to
+      // each represented color rather than being collapsed into Multicolor.
+      const represented = new Set<ColorBucket>();
+      for (const symbol of parseManaCost(data?.manaCost)) {
+        for (const color of manaColors) {
+          if (symbol.includes(color)) represented.add(color);
+        }
+      }
+
+      if (represented.size === 0) represented.add("C");
+      for (const color of represented) {
+        map.set(color, (map.get(color) ?? 0) + 1);
+      }
     }
     return map;
   }, [main, cards]);
 
-  const order: ColorBucket[] = ["W", "U", "B", "R", "G", "M", "C", "L"];
+  const order: ColorBucket[] = ["W", "U", "B", "R", "G", "C", "L"];
   const shown = order.filter((b) => (counts.get(b) ?? 0) > 0);
   if (shown.length === 0) return null;
 
   const pipClass = (b: ColorBucket): string => {
-    if (b === "M") return "bg-gradient-to-br from-yellow-200 to-amber-500 text-amber-950";
     if (b === "L") return "bg-orange-900 text-orange-200 border border-orange-500/40";
     return manaPipClasses(b);
   };
@@ -146,9 +165,13 @@ export function ColorSplit({
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
         {shown.map((b) => (
           <span key={b} className="flex items-center gap-1">
-            <span className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-black shadow-card ${pipClass(b)}`}>
-              {b}
-            </span>
+            {b === "W" || b === "U" || b === "B" || b === "R" || b === "G" || b === "C" ? (
+              <ManaSymbol symbol={b} className="h-5 w-5" />
+            ) : (
+              <span className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-black shadow-card ${pipClass(b)}`}>
+                {b}
+              </span>
+            )}
             <span className="text-xs font-bold tabular-nums text-zinc-200">{counts.get(b) ?? 0}</span>
           </span>
         ))}
@@ -181,20 +204,15 @@ function ListRow({
         showPreview(data, { left: r.left, right: r.right, top: r.top, bottom: r.bottom });
       }}
       onMouseLeave={clearPreview}
-      className="flex cursor-grab items-center gap-1.5 rounded-md px-1.5 py-[3px] transition-colors duration-100 hover:bg-white/[0.07] active:cursor-grabbing"
+      className="flex min-h-8 cursor-grab items-center gap-2 rounded-md px-2.5 py-1.5 transition-colors duration-100 hover:bg-white/[0.07] active:cursor-grabbing"
       title={data?.name ?? pick.cardId}
     >
       <span className="flex shrink-0 items-center gap-[1px]">
         {pips.slice(0, 6).map((s, i) => (
-          <span
-            key={`${s}-${i}`}
-            className={`flex h-3.5 w-3.5 items-center justify-center rounded-full text-[8px] font-bold leading-none ${manaPipClasses(s)}`}
-          >
-            {s}
-          </span>
+          <ManaSymbol key={`${s}-${i}`} symbol={s} className="h-4 w-4" />
         ))}
       </span>
-      <span className={`truncate text-xs font-medium ${NAME_COLOR[bucket]}`}>{data?.name ?? "…"}</span>
+      <span className={`truncate text-sm font-medium ${NAME_COLOR[bucket]}`}>{data?.name ?? "…"}</span>
     </div>
   );
 }
@@ -218,7 +236,7 @@ function PicksList({
   const total = [...lanesApi.grouped.values()].reduce((a, arr) => a + arr.length, 0);
 
   return (
-    <div className="panel flex min-h-0 flex-1 flex-col">
+    <div className="panel draft-list-zone flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center gap-2 px-3 pb-1 pt-2.5">
         <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Your picks</span>
         <span className="chip">{total}</span>
@@ -242,7 +260,7 @@ function PicksList({
               key={lane.id}
               className={`rounded-lg p-1 transition-colors duration-100 ${
                 isSide
-                  ? `border border-dashed ${dragOver === lane.id ? "border-amber-300/80 bg-amber-400/10" : "border-amber-400/35 bg-amber-400/[0.04]"}`
+                  ? `border border-dashed ${dragOver === lane.id ? "border-amber-300/80 bg-amber-400/10" : "border-amber-400/35"}`
                   : dragOver === lane.id
                     ? "bg-brass-400/10 ring-1 ring-brass-400/50"
                     : ""
@@ -323,7 +341,7 @@ export function PicksRail(props: PicksRailProps): JSX.Element {
 
   if (!open) {
     return (
-      <aside className="flex w-8 shrink-0 flex-col items-center">
+      <aside className="draft-sidebar flex w-8 shrink-0 flex-col items-center">
         <button
           type="button"
           className="panel flex flex-col items-center gap-2 px-1.5 py-3 text-zinc-400 transition-colors duration-150 hover:text-brass-300"
@@ -338,9 +356,9 @@ export function PicksRail(props: PicksRailProps): JSX.Element {
   }
 
   return (
-    <aside className="flex w-60 shrink-0 flex-col gap-2 min-[1400px]:w-72">
+    <aside className="draft-sidebar flex w-60 shrink-0 flex-col gap-2 pl-2.5 min-[1400px]:w-72">
       <div
-        className={`panel scrollbar-slim min-h-0 space-y-2 overflow-y-auto p-2 ${view === "list" ? "max-h-[45%] shrink-0" : "flex-1"}`}
+        className={`panel draft-stats-zone scrollbar-slim min-h-0 space-y-2 overflow-y-auto p-2 ${view === "list" ? "max-h-[45%] shrink-0" : "flex-1"}`}
       >
         <div className="flex items-center gap-2 px-1 pt-0.5">
           <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Draft stats</span>

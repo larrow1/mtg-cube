@@ -32,6 +32,12 @@ function useCountdown(deadline: number | null): number | null {
   return remaining;
 }
 
+const BOT_AVATAR_COLORS = ["white", "red", "green", "blue", "purple", "gold", "charcoal"] as const;
+
+function botAvatarColor(seatIndex: number): string {
+  return BOT_AVATAR_COLORS[seatIndex % BOT_AVATAR_COLORS.length]!;
+}
+
 function SeatStrip({ draft }: { draft: DraftView }): JSX.Element {
   return (
     <div className="scrollbar-slim flex gap-1.5 overflow-x-auto pb-1">
@@ -47,7 +53,14 @@ function SeatStrip({ draft }: { draft: DraftView }): JSX.Element {
             <span className={`font-semibold ${isMe ? "text-brass-300" : "text-zinc-300"}`}>
               {seat.playerName ?? `Bot ${seat.seatIndex + 1}`}
             </span>
-            {seat.isBot && <span className="chip border-purple-400/30 text-purple-300">bot</span>}
+            {seat.isBot && (
+              <img
+                src={`/avatars/draft-bot-${botAvatarColor(seat.seatIndex)}.webp`}
+                alt="Bot"
+                title="Bot-controlled seat"
+                className="h-6 w-6 shrink-0 rounded-full border border-brass-300/60 object-cover shadow-[0_0_8px_rgba(242,182,75,0.22)]"
+              />
+            )}
             <span className="text-[10px] tabular-nums text-zinc-500" title="Cards picked">
               {seat.pickCount}
             </span>
@@ -175,13 +188,23 @@ export function Draft(): JSX.Element {
     else if (laneId !== AUTO_LANE) lanesApi.moveCard(instanceId, laneId);
   };
 
-  const timerDanger = remaining !== null && remaining < 10_000;
+  const timerDanger = remaining !== null && remaining > 0 && remaining < 10_000;
+  const timerTotalMs = (state.room?.draftConfig.pickTimerSeconds ?? 0) * 1000;
+  const timerPercent = remaining === null || timerTotalMs <= 0
+    ? 0
+    : Math.max(0, Math.min(100, (remaining / timerTotalMs) * 100));
+  // The server's timeout handler picks the first card in the waiting pack.
+  // Mirror that ordering so this warning always identifies the exact card.
+  const autoPickId = timerDanger && !selected && !picking
+    ? (draft.currentPack?.cards[0]?.instanceId ?? null)
+    : null;
 
   return (
-    <div className="mx-auto flex h-full max-w-[110rem] flex-col gap-2.5 p-3">
+    <div className="draft-scene h-full overflow-hidden">
+    <div className="relative z-10 mx-auto flex h-full max-w-[110rem] flex-col gap-2.5 p-3">
       {/* Header */}
-      <header className="panel flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2.5">
-        <div className="flex items-baseline gap-3">
+      <header className="panel draft-header flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5">
+        <div className="flex shrink-0 items-baseline gap-3">
           <span className="text-lg font-black text-zinc-50">
             Pack <span className="text-brass-300">{draft.packNumber}</span>
             <span className="text-zinc-500">/{draft.packsPerPlayer}</span>
@@ -191,24 +214,53 @@ export function Draft(): JSX.Element {
           </span>
         </div>
         {ranked && <span className="chip border-brass-400/60 font-black tracking-widest text-brass-300">RANKED</span>}
-        {remaining !== null && draft.currentPack && (
-          <span
-            className={`rounded-md px-2.5 py-1 font-mono text-sm font-bold tabular-nums ${
-              timerDanger ? "animate-pulse bg-red-500/20 text-red-300" : "bg-white/[0.05] text-zinc-200"
-            }`}
-            title="Time left to pick"
-          >
-            {formatSeconds(remaining)}
-          </span>
-        )}
         <div className="min-w-0 flex-1">
           <SeatStrip draft={draft} />
+        </div>
+        <div className="draft-pick-controls flex shrink-0 items-center gap-2.5">
+          {remaining !== null && draft.currentPack && (
+            <div className={`draft-timer-shell ${timerDanger ? "is-danger" : ""}`} title="Time left to pick">
+              <span className={`draft-timer-clock ${timerDanger ? "animate-pulse" : ""}`}>
+                {formatSeconds(remaining)}
+              </span>
+              <div
+                className="draft-timer-track"
+                role="progressbar"
+                aria-label="Time left to pick"
+                aria-valuemin={0}
+                aria-valuemax={timerTotalMs}
+                aria-valuenow={Math.max(0, remaining)}
+              >
+              <div
+                className="draft-timer-fill"
+                style={{ width: `${timerPercent}%` }}
+              />
+                <div className="draft-timer-particles" style={{ left: `${timerPercent}%` }} aria-hidden="true" />
+              </div>
+            </div>
+          )}
+          <button
+            type="button"
+            className="draft-confirm-button min-w-[142px] px-6 py-2.5"
+            disabled={!selected || picking || !draft.currentPack}
+            onClick={() => {
+              if (selected) void makePick(selected);
+            }}
+          >
+            {picking
+              ? "Picking…"
+              : selected
+                ? "Confirm pick"
+                : draft.currentPack
+                  ? "Select a card"
+                  : "Waiting…"}
+          </button>
         </div>
       </header>
 
       {/* Pack + stats rail */}
       <div className="flex min-h-0 flex-1 gap-2.5">
-        <main className="panel scrollbar-slim min-h-0 flex-1 overflow-y-auto p-4">
+        <main className="panel draft-pack-zone scrollbar-slim min-h-0 flex-1 overflow-y-auto p-4">
           {draft.complete ? (
             <div className="flex h-full flex-col items-center justify-center gap-2 py-16 text-center">
               <svg viewBox="0 0 24 24" className="h-10 w-10 fill-brass-300 drop-shadow-[0_0_8px_rgba(251,191,36,0.45)]"><path d="M9 16.2 4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2Z" /></svg>
@@ -216,16 +268,16 @@ export function Draft(): JSX.Element {
               <div className="text-sm text-zinc-500">Moving to deck building…</div>
             </div>
           ) : draft.currentPack ? (
-            <>
-              <CardGrid min={150}>
+            <CardGrid min={prefs.view === "list" ? 172 : 150}>
                 {draft.currentPack.cards.map((dc) => (
                   <Card
                     key={dc.instanceId}
                     data={cards[dc.cardId]}
                     size="md"
                     selected={selected === dc.instanceId}
+                    highlight={autoPickId === dc.instanceId ? "autopick" : null}
                     dimmed={picking}
-                    className="!w-full max-w-[160px]"
+                    className={`!w-full ${prefs.view === "list" ? "max-w-[180px]" : "max-w-[160px]"}`}
                     draggable={!picking}
                     onDragStart={(e) => {
                       setSelected(dc.instanceId);
@@ -236,19 +288,6 @@ export function Draft(): JSX.Element {
                   />
                 ))}
               </CardGrid>
-              <div className="sticky bottom-2 mt-4 flex justify-center">
-                <button
-                  type="button"
-                  className="btn-gold !px-8 !py-2.5 shadow-card-lg"
-                  disabled={!selected || picking}
-                  onClick={() => {
-                    if (selected) void makePick(selected);
-                  }}
-                >
-                  {picking ? "Picking…" : selected ? "Confirm pick" : "Select a card"}
-                </button>
-              </div>
-            </>
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-3 py-16 text-center">
               <div className="flex gap-1">
@@ -289,6 +328,7 @@ export function Draft(): JSX.Element {
           onPackPick={(id, laneId) => void pickToLane(id, laneId)}
         />
       )}
+    </div>
     </div>
   );
 }

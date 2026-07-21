@@ -475,7 +475,7 @@ export interface CardProps {
    */
   variant?: CardVariant;
   selected?: boolean;
-  highlight?: "attack" | "block" | null;
+  highlight?: "attack" | "block" | "autopick" | null;
   dimmed?: boolean;
   /** Name of the permanent this card is attached to (renders a chip). */
   attachedName?: string;
@@ -559,7 +559,9 @@ export function Card(props: CardProps): JSX.Element {
       ? "shadow-glow-red"
       : highlight === "block"
         ? "shadow-glow-blue"
-        : "shadow-card hover:shadow-glow-soft";
+        : highlight === "autopick"
+          ? "autopick-highlight"
+          : "shadow-card hover:shadow-glow-soft";
 
   const counters = gameCard ? Object.entries(gameCard.counters).filter(([, n]) => n !== 0) : [];
   const damage = gameCard?.damage ?? 0;
@@ -680,6 +682,11 @@ export function Card(props: CardProps): JSX.Element {
         className={`relative w-full transition-all duration-150 ${artTile ? "aspect-[4/3] rounded-lg" : "aspect-[5/7] rounded-[6%]"} ${ring} ${tapped ? "rotate-90" : ""} ${dimmed ? "opacity-50" : ""} ${onClick || onDoubleClick ? "hover:-translate-y-1 hover:scale-[1.03]" : ""}`}
       >
         {body}
+        {highlight === "autopick" && (
+          <span className="absolute -right-1.5 -top-2 z-20 rounded-full border border-red-200/70 bg-gradient-to-b from-red-500 to-red-800 px-2 py-0.5 text-[8px] font-black uppercase tracking-wider text-white shadow-[0_0_12px_rgba(248,113,113,0.65)]">
+            Auto pick
+          </span>
+        )}
         {isFaceDown && !isHidden && (
           <span className="absolute left-1 top-1 rounded bg-black/70 px-1 py-0.5 text-[8px] font-bold uppercase tracking-wide text-zinc-300">
             Face down
