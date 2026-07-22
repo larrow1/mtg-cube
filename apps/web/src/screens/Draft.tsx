@@ -4,7 +4,7 @@
  * lanes + pinned sideboard, and a right stats rail (type counts, live curve,
  * color split) with an alternate compact list view of picks.
  */
-import { useEffect, useLayoutEffect, useMemo, useState, type CSSProperties } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import type { DraftView, Pack } from "@mtg-cube/shared";
 import { call } from "../socket";
@@ -33,7 +33,8 @@ function useCountdown(deadline: number | null): number | null {
   return remaining;
 }
 
-const BOT_AVATAR_COLORS = ["white", "red", "green", "blue", "purple", "gold", "charcoal"] as const;
+const BOT_AVATAR_COLORS = ["white", "red", "green", "blue", "purple", "gold", "charcoal", "pink"] as const;
+const DRAFT_TABLE_RUNES = ["ᚠ", "ᚢ", "ᚦ", "ᚨ", "ᚱ", "ᚲ", "ᚷ", "ᚹ", "ᚺ", "ᚾ", "ᛁ", "ᛃ", "ᛇ", "ᛈ", "ᛉ", "ᛋ"] as const;
 
 function botAvatarColor(seatIndex: number): string {
   return BOT_AVATAR_COLORS[seatIndex % BOT_AVATAR_COLORS.length]!;
@@ -65,13 +66,11 @@ function DraftSeatChip({ seat, isMe, position }: { seat: DraftSeatSummary; isMe:
           {isMe && <span className="text-zinc-500"> (you)</span>}
         </span>
         <span className="mt-0.5 flex h-2.5 items-center gap-1 text-[9px] leading-none tabular-nums text-zinc-500">
-          <span title="Cards picked">{seat.pickCount} picked</span>
           {seat.queuedPacks > 0 && (
             <span className="flex items-center gap-0.5" title={`${seat.queuedPacks} pack${seat.queuedPacks === 1 ? "" : "s"} waiting`}>
-              {Array.from({ length: Math.min(seat.queuedPacks, 3) }).map((_, i) => (
+              {Array.from({ length: Math.min(seat.queuedPacks, 8) }).map((_, i) => (
                 <span key={i} className="h-1.5 w-1.5 rounded-full bg-brass-400" />
               ))}
-              {seat.queuedPacks > 3 && <span className="text-brass-300">+{seat.queuedPacks - 3}</span>}
             </span>
           )}
         </span>
@@ -136,9 +135,22 @@ function SeatStrip({ draft }: { draft: DraftView }): JSX.Element {
 
 function DraftTableOverview({ draft, onClose }: { draft: DraftView; onClose: () => void }): JSX.Element {
   const seatCount = draft.seats.length;
+  const faceUpCardIds = useMemo(
+    () => draft.seats.flatMap((seat) => seat.faceUpPicks.map((pick) => pick.cardId)),
+    [draft.seats]
+  );
+  const faceUpCards = useCardData(faceUpCardIds);
   const passLeft = draft.packNumber % 2 === 1;
-  const direction = passLeft ? "left" : "right";
   const step = 360 / Math.max(1, seatCount);
+  const playerStartAngle = 90;
+  // The table content lives in a centered square canvas inside the full-width
+  // backdrop, so equal radii keep every seat precisely on the circular rim.
+  const seatRadiusX = 36;
+  const seatRadiusY = 36;
+  // The dark outer rim sits just beyond the felt edge; center the arrowheads
+  // within that band rather than on the inner border line.
+  const arrowRadiusX = seatRadiusX * 1.03;
+  const arrowRadiusY = seatRadiusY * 1.03;
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -159,7 +171,7 @@ function DraftTableOverview({ draft, onClose }: { draft: DraftView; onClose: () 
 
   return (
     <div
-      className="fixed inset-0 z-[90] flex items-center justify-center bg-black/75 p-4 backdrop-blur-[3px]"
+      className="fixed inset-0 z-[90] flex items-center justify-center bg-black/75 backdrop-blur-[3px]"
       role="dialog"
       aria-modal="true"
       aria-label="Draft table overview"
@@ -167,88 +179,125 @@ function DraftTableOverview({ draft, onClose }: { draft: DraftView; onClose: () 
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="draft-table-overview flex max-h-[92vh] w-full max-w-4xl animate-pop-in flex-col overflow-hidden rounded-2xl border">
-        <header className="flex shrink-0 items-center justify-between border-b border-white/10 px-4 py-3 sm:px-5">
-          <div>
-            <h2 className="text-sm font-black uppercase tracking-[0.16em] text-zinc-100">Draft table</h2>
-            <p className="mt-0.5 text-[11px] text-zinc-400">
-              Pack {draft.packNumber} · Passing {direction}
-            </p>
-          </div>
-          <button type="button" className="btn-ghost !rounded-full !p-2" onClick={onClose} aria-label="Close table overview">
-            <svg viewBox="0 0 24 24" className="h-4 w-4 fill-current"><path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7l1.4-1.4 6.3 6.3 6.3-6.3 1.4 1.4Z" /></svg>
-          </button>
-        </header>
-
-        <div className="scrollbar-slim overflow-auto p-3 sm:p-5">
-          <div className="draft-table-stage relative mx-auto aspect-[16/10] min-w-[34rem] overflow-hidden rounded-2xl border border-white/[0.08]">
-            <div className="draft-table-felt absolute left-1/2 top-1/2 h-[54%] w-[62%] -translate-x-1/2 -translate-y-1/2 rounded-[50%] border">
-              <div className="absolute inset-[7%] rounded-[50%] border border-emerald-200/10" />
-              <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
-                <span className="text-[10px] font-bold uppercase tracking-[0.25em] text-emerald-100/45">Current round</span>
-                <span className="mt-1 text-xl font-black text-amber-200">Pack {draft.packNumber}</span>
-                <span className="mt-1 text-xs font-bold uppercase tracking-wider text-orange-300">Passing {direction}</span>
-              </div>
+      <div className="draft-table-stage relative h-[min(72vh,36rem)] min-h-[24rem] w-full animate-pop-in overflow-hidden border-y border-white/[0.06]">
+        <div className="draft-table-canvas relative mx-auto aspect-square h-full">
+            <div className="draft-table-felt absolute left-1/2 top-1/2 aspect-square h-[72%] -translate-x-1/2 -translate-y-1/2 rounded-full border">
+              <svg className="draft-table-rune-wheel absolute inset-0 h-full w-full" viewBox="0 0 400 400" aria-hidden="true">
+                <circle cx="200" cy="200" r="184" />
+                <circle cx="200" cy="200" r="158" />
+                {DRAFT_TABLE_RUNES.map((rune, runeIndex) => (
+                  <g key={rune} transform={`rotate(${runeIndex * 22.5} 200 200)`}>
+                    <path d="M200 17v19" />
+                    <path d="M191 43h18" />
+                    <text x="200" y="61" textAnchor="middle">{rune}</text>
+                  </g>
+                ))}
+                {Array.from({ length: 8 }).map((_, spokeIndex) => (
+                  <path
+                    key={spokeIndex}
+                    d="M200 74v35l-9 13 18 18-9 13"
+                    transform={`rotate(${spokeIndex * 45} 200 200)`}
+                  />
+                ))}
+                <path className="draft-table-knot" d="M200 126l24 32-24 24-24-24 24-32Zm0 56 30 30-30 62-30-62 30-30Zm-42 18 42 12 42-12-12 42-30 32-30-32-12-42Z" />
+              </svg>
+              <div className="draft-table-ring absolute inset-[7%] rounded-full border" />
+              <div className="draft-table-ring absolute inset-[21%] rounded-full border" />
+              <div className="draft-table-ring absolute inset-[35%] rounded-full border" />
+              <div className="draft-table-center-mark absolute left-1/2 top-1/2 h-[14%] w-[14%] -translate-x-1/2 -translate-y-1/2 rotate-45 rounded-[18%] border" />
             </div>
 
             {draft.seats.map((seat) => {
-              const angle = 90 + relativeIndex(seat.seatIndex) * step;
-              const position = pointOnTable(angle, 42, 39);
+              const angle = playerStartAngle + relativeIndex(seat.seatIndex) * step;
+              const position = pointOnTable(angle, seatRadiusX, seatRadiusY);
+              // Keep face-up draft cards on the exact radial path from their
+              // owner to the table center, about two-thirds of the way out.
+              const faceUpPickPosition = pointOnTable(angle, seatRadiusX * 0.67, seatRadiusY * 0.67);
               const isMe = seat.seatIndex === draft.seatIndex;
-              return (
+              const faceUpPick = seat.faceUpPicks.length > 0 ? (
                 <div
-                  key={seat.seatIndex}
-                  className={`draft-table-seat absolute flex w-24 -translate-x-1/2 -translate-y-1/2 flex-col items-center rounded-xl border px-2 py-1.5 text-center sm:w-28 ${isMe ? "is-me" : ""}`}
-                  style={position}
+                  className="draft-table-face-up-pick"
+                  style={faceUpPickPosition}
+                  title={`${seat.faceUpPicks.length} face-up Cogwork Librarian${seat.faceUpPicks.length === 1 ? "" : "s"}`}
                 >
-                  {seat.isBot ? (
-                    <img
-                      src={`/avatars/draft-bot-${botAvatarColor(seat.seatIndex)}.webp`}
-                      alt="Bot"
-                      className="h-8 w-8 rounded-full border border-brass-300/60 object-cover shadow-[0_0_10px_rgba(242,182,75,0.28)]"
+                  {seat.faceUpPicks.map((pick) => (
+                    <Card
+                      key={pick.instanceId}
+                      data={faceUpCards[pick.cardId]}
+                      size="xs"
+                      className="!w-8"
+                      previewPlacement="above"
+                      title="Cogwork Librarian — drafted face up"
                     />
-                  ) : (
-                    <span className="flex h-8 w-8 items-center justify-center rounded-full border border-sky-200/30 bg-sky-400/15 text-xs font-black text-sky-100">
-                      {(seat.playerName ?? "P").slice(0, 2).toUpperCase()}
-                    </span>
-                  )}
-                  <span className={`mt-1 w-full truncate text-[11px] font-bold ${isMe ? "text-amber-200" : "text-zinc-200"}`}>
-                    {seat.playerName ?? `Bot ${seat.seatIndex + 1}`}{isMe ? " (you)" : ""}
-                  </span>
-                  <span className="text-[9px] tabular-nums text-zinc-500">{seat.pickCount} picked</span>
-                  {seat.queuedPacks > 0 && (
-                    <span className="mt-1 flex items-center" title={`${seat.queuedPacks} pack${seat.queuedPacks === 1 ? "" : "s"} at this seat`}>
-                      {Array.from({ length: Math.min(3, seat.queuedPacks) }).map((_, index) => (
-                        <span
-                          key={index}
-                          className={`h-4 w-3 rounded-[2px] border border-amber-200/55 bg-gradient-to-br from-amber-700 via-orange-900 to-zinc-950 shadow-sm ${index > 0 ? "-ml-1" : ""}`}
-                        />
-                      ))}
-                      <span className="ml-1 text-[9px] font-black text-amber-200">×{seat.queuedPacks}</span>
-                    </span>
-                  )}
+                  ))}
                 </div>
+              ) : null;
+              return (
+                <Fragment key={seat.seatIndex}>
+                  <div
+                    className={`draft-table-seat absolute -translate-x-1/2 -translate-y-1/2 text-center ${isMe ? "is-me h-14 w-14 sm:h-16 sm:w-16" : "h-10 w-10 sm:h-12 sm:w-12"}`}
+                    style={position}
+                  >
+                    <span
+                      className="draft-table-player-icon relative z-10 flex h-full w-full rounded-full"
+                      tabIndex={0}
+                      aria-label={`${seat.playerName ?? `Bot ${seat.seatIndex + 1}`}${isMe ? " (you)" : ""}`}
+                    >
+                      {seat.isBot ? (
+                        <img
+                          src={`/avatars/draft-bot-${botAvatarColor(seat.seatIndex)}.webp`}
+                          alt=""
+                          className="h-full w-full rounded-full border border-brass-300/60 object-cover shadow-[0_0_12px_rgba(242,182,75,0.32)]"
+                        />
+                      ) : (
+                        <span className="flex h-full w-full items-center justify-center rounded-full border border-sky-200/55 bg-gradient-to-br from-sky-600 via-sky-800 to-slate-950 text-xs font-black text-white shadow-[0_0_12px_rgba(56,189,248,0.32)]">
+                          {(seat.playerName ?? "P").slice(0, 2).toUpperCase()}
+                        </span>
+                      )}
+                      <span className={`draft-table-player-name ${isMe ? "text-amber-200" : "text-zinc-100"}`}>
+                        {seat.playerName ?? `Bot ${seat.seatIndex + 1}`}{isMe ? " (you)" : ""}
+                      </span>
+                    </span>
+                    {seat.queuedPacks > 0 && (
+                      <span
+                        className="draft-table-pack-stack flex items-end justify-center gap-[2px]"
+                        title={`${seat.queuedPacks} pack${seat.queuedPacks === 1 ? "" : "s"} at this seat`}
+                      >
+                        {Array.from({ length: Math.min(8, seat.queuedPacks) }).map((_, packIndex) => (
+                          <span
+                            key={packIndex}
+                            className="draft-table-pack-card"
+                            style={{ zIndex: packIndex + 1 }}
+                          />
+                        ))}
+                      </span>
+                    )}
+                  </div>
+                  {faceUpPick}
+                </Fragment>
               );
             })}
 
-            {draft.seats.map((seat) => {
+            {seatCount > 1 && ([-0.5, 0.5] as const).map((relativeOffset) => {
               const travel = passLeft ? 1 : -1;
-              const middleAngle = 90 + (relativeIndex(seat.seatIndex) + travel * 0.5) * step;
-              const position = pointOnTable(middleAngle, 31, 28);
+              const middleAngle = playerStartAngle + relativeOffset * step;
+              // Only mark the two gaps immediately beside the current player.
+              const position = pointOnTable(middleAngle, arrowRadiusX, arrowRadiusY);
               const rotation = middleAngle + travel * 90;
               return (
                 <span
-                  key={`arrow-${seat.seatIndex}`}
-                  className="draft-table-pass-arrow absolute flex h-7 w-7 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full"
+                  key={`arrow-${relativeOffset}`}
+                  className="draft-table-pass-arrow absolute flex h-8 w-12 -translate-x-1/2 -translate-y-1/2 items-center justify-center"
                   style={{ ...position, transform: `translate(-50%, -50%) rotate(${rotation}deg)` }}
                   aria-hidden="true"
                 >
-                  <svg viewBox="0 0 24 24" className="h-4 w-4 fill-current"><path d="M3 10.5h12.2L11 6.3 13.3 4 21 12l-7.7 8-2.3-2.3 4.2-4.2H3v-3Z" /></svg>
+                  <svg viewBox="0 0 28 16" className="draft-table-arrow-glyph h-full w-full">
+                    <path d="M1.5 1.5 13.5 8 1.5 14.5" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M14.5 1.5 26.5 8 14.5 14.5" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
                 </span>
               );
             })}
-          </div>
-          <p className="mt-3 text-center text-[10px] text-zinc-500">Pack icons show how many packs are currently waiting at each seat.</p>
         </div>
       </div>
     </div>
@@ -357,11 +406,13 @@ function loadTrayPrefs(): TrayPrefs {
   }
 }
 
-export function Draft(): JSX.Element {
+export function Draft({ onFinalPickAnimationComplete }: { onFinalPickAnimationComplete?: () => void } = {}): JSX.Element {
   const { state, pushToast } = useApp();
   const draft = state.draft;
   const ranked = state.room?.ranked ?? false;
   const [selected, setSelected] = useState<string | null>(null);
+  const [additionalSelected, setAdditionalSelected] = useState<string[]>([]);
+  const [useCogwork, setUseCogwork] = useState(false);
   const [picking, setPicking] = useState(false);
   const [tableOverviewOpen, setTableOverviewOpen] = useState(false);
   const [deckStatsOpen, setDeckStatsOpen] = useState(false);
@@ -371,6 +422,10 @@ export function Draft(): JSX.Element {
   }));
   const [outgoingPack, setOutgoingPack] = useState<AnimatedPack | null>(null);
   const [pickFlight, setPickFlight] = useState<PickFlight | null>(null);
+  const knownPickStateRef = useRef({
+    draftId: state.draft?.draftId ?? null,
+    ids: new Set(state.draft?.picks.map((pick) => pick.instanceId) ?? []),
+  });
 
   const [prefs, setPrefs] = useState<TrayPrefs>(loadTrayPrefs);
   useEffect(() => {
@@ -402,6 +457,8 @@ export function Draft(): JSX.Element {
   useEffect(() => {
     setPicking(false);
     setSelected(null);
+    setAdditionalSelected([]);
+    setUseCogwork(false);
   }, [packKey, pickCount]);
 
   const allIds = useMemo(() => {
@@ -418,7 +475,43 @@ export function Draft(): JSX.Element {
   const remaining = useCountdown(draft?.pickDeadline ?? null);
 
   const picks = useMemo(() => draft?.picks ?? [], [draft]);
+  const availableCogworks = picks.filter((pick) => pick.draftEffect === "cogwork-librarian").length;
   const lanesApi = useDraftLanes(draft?.draftId, picks, cards);
+
+  // Manual picks capture their source before the request is sent. Timer
+  // autopicks arrive only as a new server draft state, so detect the newly
+  // added pick during layout while the old visible pack is still mounted and
+  // route it through the same pick-flight animation.
+  useLayoutEffect(() => {
+    if (!draft) return;
+    const known = knownPickStateRef.current;
+    if (known.draftId !== draft.draftId) {
+      knownPickStateRef.current = {
+        draftId: draft.draftId,
+        ids: new Set(draft.picks.map((pick) => pick.instanceId)),
+      };
+      return;
+    }
+
+    const addedPick = draft.picks.find((pick) => !known.ids.has(pick.instanceId));
+    knownPickStateRef.current = {
+      draftId: draft.draftId,
+      ids: new Set(draft.picks.map((pick) => pick.instanceId)),
+    };
+    if (!addedPick || pickFlight) return;
+
+    const source = document.querySelector<HTMLElement>(
+      `[data-pack-card-instance="${addedPick.instanceId}"]`
+    );
+    if (!source) return;
+    setPickFlight({
+      instanceId: addedPick.instanceId,
+      cardId: addedPick.cardId,
+      source: rectValues(source.getBoundingClientRect()),
+      target: null,
+      view: prefs.view,
+    });
+  }, [draft, pickFlight, prefs.view]);
 
   useLayoutEffect(() => {
     if (!draft || !pickFlight || pickFlight.target) return;
@@ -474,19 +567,21 @@ export function Draft(): JSX.Element {
   };
 
   const finishPickFlight = (): void => {
+    const finishedDraft = draft.complete;
     if (pickFlight) {
       document
         .querySelector<HTMLElement>(`[data-draft-pick-instance="${pickFlight.instanceId}"]`)
         ?.classList.remove("draft-pick-arrival");
     }
     setPickFlight(null);
+    if (finishedDraft) onFinalPickAnimationComplete?.();
   };
 
-  const makePick = async (instanceId: string): Promise<void> => {
+  const makePick = async (instanceId: string, additionalInstanceIds: string[] = []): Promise<void> => {
     if (picking) return;
     beginPickFlight(instanceId);
     setPicking(true);
-    const r = await call("makePick", { instanceId });
+    const r = await call("makePick", { instanceId, additionalInstanceIds });
     if (!r.ok) {
       setPickFlight(null);
       setPicking(false);
@@ -535,6 +630,24 @@ export function Draft(): JSX.Element {
   const incomingDirection = packDirection(visiblePack.round) === "left" ? "right" : "left";
   const visiblePackIsLive = (visiblePack.pack?.id ?? null) === (draft.currentPack?.id ?? null);
 
+  const togglePackSelection = (instanceId: string): void => {
+    if (!useCogwork || !selected) {
+      setSelected((current) => current === instanceId ? null : instanceId);
+      setAdditionalSelected([]);
+      return;
+    }
+    if (selected === instanceId) {
+      setSelected(null);
+      setAdditionalSelected([]);
+      return;
+    }
+    setAdditionalSelected((current) => {
+      if (current.includes(instanceId)) return current.filter((id) => id !== instanceId);
+      if (current.length >= availableCogworks) return current;
+      return [...current, instanceId];
+    });
+  };
+
   const renderPackGrid = (pack: Pack, interactive: boolean): JSX.Element => (
     <CardGrid
       columns={5}
@@ -550,7 +663,7 @@ export function Draft(): JSX.Element {
           <Card
             data={cards[dc.cardId]}
             size="md"
-            selected={interactive && selected === dc.instanceId}
+            selected={interactive && (selected === dc.instanceId || additionalSelected.includes(dc.instanceId))}
             highlight={interactive && autoPickId === dc.instanceId ? "autopick" : null}
             dimmed={interactive && picking}
             className="!w-full"
@@ -560,8 +673,8 @@ export function Draft(): JSX.Element {
               setSelected(dc.instanceId);
               setPackPickData(event.dataTransfer, dc.instanceId);
             } : undefined}
-            onClick={interactive ? () => setSelected((cur) => (cur === dc.instanceId ? null : dc.instanceId)) : undefined}
-            onDoubleClick={interactive ? () => void makePick(dc.instanceId) : undefined}
+            onClick={interactive ? () => togglePackSelection(dc.instanceId) : undefined}
+            onDoubleClick={interactive && !useCogwork ? () => void makePick(dc.instanceId) : undefined}
           />
         </div>
       ))}
@@ -594,17 +707,6 @@ export function Draft(): JSX.Element {
           />
         </div>
         <div className="draft-header-view-bar flex shrink-0 items-center gap-1.5 px-2 py-1">
-          <button
-            type="button"
-            className={`draft-deck-stats-toggle flex min-w-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[10px] font-black uppercase tracking-[0.08em] transition-colors duration-150 ${deckStatsOpen ? "is-open text-amber-100" : "text-zinc-300 hover:text-amber-200"}`}
-            onClick={() => setDeckStatsOpen((current) => !current)}
-            aria-expanded={deckStatsOpen}
-            aria-controls="draft-deck-stats-panel"
-          >
-            <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 shrink-0 fill-current" aria-hidden="true"><path d="M4 19h16v2H4v-2Zm1-8h3v6H5v-6Zm5-4h3v10h-3V7Zm5-4h3v14h-3V3Z" /></svg>
-            <span>Deck Stats</span>
-            <svg viewBox="0 0 24 24" className={`h-3 w-3 shrink-0 fill-current transition-transform duration-200 ${deckStatsOpen ? "rotate-180" : ""}`} aria-hidden="true"><path d="m7 10 5 5 5-5H7Z" /></svg>
-          </button>
           <ViewToggle view={prefs.view} onView={(view) => setPrefs((p) => ({ ...p, view }))} />
         </div>
       </header>
@@ -665,18 +767,39 @@ export function Draft(): JSX.Element {
                   </div>
                 </div>
               )}
+              {availableCogworks > 0 && (draft.currentPack?.cards.length ?? 0) > 1 && (
+                <button
+                  type="button"
+                  className={`draft-cogwork-button px-3 py-2 text-[10px] font-black uppercase tracking-[0.08em] ${useCogwork ? "is-active" : ""}`}
+                  disabled={picking}
+                  aria-pressed={useCogwork}
+                  title="Draft one additional card for each Cogwork Librarian you return to this pack"
+                  onClick={() => {
+                    setUseCogwork((current) => !current);
+                    setAdditionalSelected([]);
+                  }}
+                >
+                  <span aria-hidden="true">⚙</span>
+                  <span>{useCogwork ? "Cogwork active" : "Use Cogwork"}</span>
+                  {availableCogworks > 1 && <span>×{availableCogworks}</span>}
+                </button>
+              )}
               <button
                 type="button"
                 className="draft-confirm-button min-w-[142px] px-6 py-2.5"
-                disabled={!selected || picking || !draft.currentPack}
+                disabled={!selected || picking || !draft.currentPack || (useCogwork && additionalSelected.length === 0)}
                 onClick={() => {
-                  if (selected) void makePick(selected);
+                  if (selected) void makePick(selected, useCogwork ? additionalSelected : []);
                 }}
               >
                 {picking
                   ? "Picking…"
                   : selected
-                    ? "Confirm pick"
+                    ? useCogwork && additionalSelected.length === 0
+                      ? "Select extra card"
+                      : additionalSelected.length > 0
+                        ? `Confirm ${1 + additionalSelected.length} picks`
+                        : "Confirm pick"
                     : draft.currentPack
                       ? "Select a card"
                       : "Waiting…"}

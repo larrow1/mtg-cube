@@ -2,7 +2,7 @@
  * App-wide store: plain React context + useReducer.
  * - session persisted under localStorage "mtg-cube-session"
  * - latest RoomState / DraftView / GameView (stale GameView seq ignored)
- * - auto-rejoin with stored token on socket connect
+ * - stored room sessions remain available for an explicit rejoin from Home
  * - toast queue
  */
 import {
@@ -64,9 +64,9 @@ export interface CubeCardPreloadState {
 export interface AppState {
   session: Session | null;
   connected: boolean;
-  /** True once we have successfully joined (or rejoined) our room this run. */
+  /** True once we have successfully joined or explicitly rejoined a room this run. */
   joined: boolean;
-  /** Set when an automatic token rejoin was rejected (room gone, seat taken…). */
+  /** Set when a stored-session rejoin was rejected (room gone, seat taken…). */
   rejoinFailed: boolean;
   room: RoomState | null;
   /** Lobby-time card metadata and artwork preparation for the loaded cube. */
@@ -319,20 +319,6 @@ export function AppProvider({ children }: { children: ReactNode }): JSX.Element 
   useEffect(() => {
     const onConnect = (): void => {
       dispatch({ type: "connected", connected: true });
-      const s = loadSession();
-      if (s) {
-        // Auto-rejoin with the stored token; server re-emits current views.
-        void call("joinRoom", { roomId: s.roomId, playerName: s.name, token: s.token }).then((r) => {
-          if (r.ok && r.data) {
-            dispatch({
-              type: "sessionEstablished",
-              session: { ...s, playerId: r.data.playerId, token: r.data.token },
-            });
-          } else {
-            dispatch({ type: "rejoinFailed" });
-          }
-        });
-      }
       const accountToken = loadAccountToken();
       if (accountToken) {
         // Re-bind the stored account to this socket; a stale/invalid token is

@@ -53,7 +53,7 @@ export interface ClientToServerEvents {
     args: { seatCount: number; packsPerPlayer: number; cardsPerPack: number; pickTimerSeconds: number | "dynamic" | null },
     ack: (r: Ack) => void
   ) => void;
-  makePick: (args: { instanceId: string }, ack: (r: Ack) => void) => void;
+  makePick: (args: { instanceId: string; additionalInstanceIds?: string[] }, ack: (r: Ack) => void) => void;
 
   /** Submit deck after draft. main/side are instance ids from your picks; basics by name count. */
   submitDeck: (

@@ -256,7 +256,7 @@ function SandboxPanel(): JSX.Element | null {
   );
 }
 
-export function Home(): JSX.Element {
+export function Home({ suppressEntranceAnimation = false }: { suppressEntranceAnimation?: boolean } = {}): JSX.Element {
   const { state, dispatch, pushToast } = useApp();
   const { theme: activeThemeId, setTheme } = useVisualTheme();
   const [name, setName] = useState(() => state.session?.name ?? loadName());
@@ -295,6 +295,7 @@ export function Home(): JSX.Element {
         session: { roomId, playerId: r.data.playerId, token: r.data.token, name: trimmedName },
       });
     } else {
+      if (token) dispatch({ type: "rejoinFailed" });
       pushToast(r.error ?? "Could not join room");
     }
   };
@@ -303,7 +304,9 @@ export function Home(): JSX.Element {
 
   return (
     <div className="home-scene h-full overflow-hidden px-4 py-4 sm:px-6">
-      <div className="relative z-10 mx-auto flex h-full w-full max-w-6xl animate-fade-in flex-col justify-center">
+      <div className={`relative z-10 mx-auto flex h-full w-full max-w-6xl flex-col justify-center ${
+        suppressEntranceAnimation ? "" : "animate-fade-in"
+      }`}>
         {/* Logo treatment */}
         <div className="mb-4 shrink-0 text-center">
           <div className="mx-auto mb-2 flex h-14 w-14 items-center justify-center rounded-2xl border border-brass-400/40 bg-gradient-to-br from-felt-700 to-felt-950 shadow-card-lg">

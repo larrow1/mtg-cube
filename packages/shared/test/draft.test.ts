@@ -73,6 +73,17 @@ describe("createDraft", () => {
     expect(cube).toEqual(before);
   });
 
+  it("marks Cogwork Librarian as the supported face-up draft card", () => {
+    const cube = makeCube(6);
+    cube.cards.c0!.name = "Cogwork Librarian";
+    const state = createDraft(cube, config({ seatCount: 2, packsPerPlayer: 1, cardsPerPack: 3 }));
+    const dealt = [
+      ...state.seats.flatMap((seat) => seat.packQueue.flatMap((pack) => pack.cards)),
+      ...state.unopened.flatMap((packs) => packs.flatMap((pack) => pack.cards)),
+    ];
+    expect(dealt.find((card) => card.cardId === "c0")?.draftEffect).toBe("cogwork-librarian");
+  });
+
   it("throws a descriptive error when the cube is too small", () => {
     expect(() => createDraft(makeCube(100), config())).toThrow(/360/);
   });
@@ -154,6 +165,49 @@ describe("applyPick", () => {
     const state = threeSeatDraft();
     expect(() => applyPick(state, 99, "x")).toThrow(/No seat/);
   });
+
+  it("drafts an additional card and returns Cogwork Librarian to that pack", () => {
+    const state = threeSeatDraft();
+    const seat = state.seats[0]!;
+    const pack = seat.packQueue[0]!;
+    const librarian = { instanceId: "cogwork-1", cardId: "cogwork", draftEffect: "cogwork-librarian" as const };
+    seat.picks = [librarian];
+    const [first, second] = pack.cards;
+    const next = applyPick(state, 0, first!.instanceId, [second!.instanceId]);
+
+    expect(next.seats[0]!.picks.map((card) => card.instanceId)).toEqual([first!.instanceId, second!.instanceId]);
+    const passed = next.seats[1]!.packQueue[1]!;
+    expect(passed.cards.some((card) => card.instanceId === librarian.instanceId)).toBe(true);
+    expect(passed.cards).toHaveLength(1);
+  });
+
+  it("requires one previously drafted Cogwork Librarian per additional card", () => {
+    const state = threeSeatDraft();
+    const pack = state.seats[0]!.packQueue[0]!;
+    expect(() => applyPick(state, 0, pack.cards[0]!.instanceId, [pack.cards[1]!.instanceId])).toThrow(/Cogwork Librarians/);
+  });
+
+  it("rejects selecting the same card twice with Cogwork Librarian", () => {
+    const state = threeSeatDraft();
+    const seat = state.seats[0]!;
+    seat.picks = [{ instanceId: "cogwork-1", cardId: "cogwork", draftEffect: "cogwork-librarian" }];
+    const pickId = seat.packQueue[0]!.cards[0]!.instanceId;
+    expect(() => applyPick(state, 0, pickId, [pickId])).toThrow(/unique/);
+  });
+
+  it("supports exchanging multiple Cogwork Librarians for multiple additional cards", () => {
+    const state = createDraft(makeCube(18), config({ seatCount: 3, packsPerPlayer: 1, cardsPerPack: 3 }));
+    const seat = state.seats[0]!;
+    seat.picks = [
+      { instanceId: "cogwork-1", cardId: "cogwork", draftEffect: "cogwork-librarian" },
+      { instanceId: "cogwork-2", cardId: "cogwork", draftEffect: "cogwork-librarian" },
+    ];
+    const ids = seat.packQueue[0]!.cards.map((card) => card.instanceId);
+    const next = applyPick(state, 0, ids[0]!, ids.slice(1));
+
+    expect(next.seats[0]!.picks.map((card) => card.instanceId)).toEqual(ids);
+    expect(next.seats[1]!.packQueue[1]!.cards.map((card) => card.instanceId).sort()).toEqual(["cogwork-1", "cogwork-2"]);
+  });
 });
 
 describe("runBotPicks", () => {
@@ -221,6 +275,18 @@ describe("runBotPicks", () => {
     const picked = after.seats[0]!.picks.map((c) => c.instanceId);
     expect(picked).toContain("y2");
   });
+
+  it("uses a drafted Cogwork Librarian for an additional bot pick", () => {
+    const cube = makeCube(24);
+    const state = createDraft(cube, config({ seatCount: 2, packsPerPlayer: 1, cardsPerPack: 3 }));
+    state.seats[0]!.picks = [{ instanceId: "cogwork-1", cardId: "cogwork", draftEffect: "cogwork-librarian" }];
+    state.seats[1]!.isBot = false;
+    const after = runBotPicks(state, createRng("cogwork-bot"), cube.cards);
+
+    expect(after.seats[0]!.picks).toHaveLength(2);
+    expect(after.seats[0]!.picks.some((card) => card.instanceId === "cogwork-1")).toBe(false);
+    expect(after.seats[1]!.packQueue[1]!.cards.some((card) => card.instanceId === "cogwork-1")).toBe(true);
+  });
 });
 
 describe("getDraftView", () => {
@@ -246,10 +312,12 @@ describe("getDraftView", () => {
       isBot: true,
       pickCount: 0,
       queuedPacks: 1,
+      faceUpPicks: [],
     });
-    // Public seat info exposes no card contents.
+    // Public seat info exposes only cards whose draft text makes them face up.
     for (const seat of view.seats) {
       expect(Object.keys(seat).sort()).toEqual([
+        "faceUpPicks",
         "isBot",
         "pickCount",
         "playerName",
@@ -265,5 +333,12 @@ describe("getDraftView", () => {
     const view = getDraftView(after, 0, [], null);
     expect(view.currentPack).toBeNull();
     expect(view.picks).toHaveLength(1);
+  });
+
+  it("publishes drafted Cogwork Librarians face up to every seat", () => {
+    const state = createDraft(makeCube(400), config());
+    state.seats[3]!.picks = [{ instanceId: "cogwork-1", cardId: "cogwork", draftEffect: "cogwork-librarian" }];
+    const view = getDraftView(state, 0, [], null);
+    expect(view.seats[3]!.faceUpPicks).toEqual(state.seats[3]!.picks);
   });
 });

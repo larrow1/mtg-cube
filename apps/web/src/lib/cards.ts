@@ -155,6 +155,16 @@ export function parseManaCost(cost: string | undefined): string[] {
   return out;
 }
 
+/** Mana-cost parts for compact list rows, preserving the divider on split cards. */
+export function listManaCostParts(data: CardData | undefined): string[] {
+  if (data?.layout === "split" && data.faces && data.faces.length >= 2) {
+    const first = parseManaCost(data.faces[0]?.manaCost);
+    const second = parseManaCost(data.faces[1]?.manaCost);
+    if (first.length > 0 || second.length > 0) return [...first, "//", ...second];
+  }
+  return parseManaCost(data?.manaCost);
+}
+
 /** Tailwind classes for a mana-symbol pip. */
 export function manaPipClasses(symbol: string): string {
   switch (symbol) {

@@ -147,8 +147,8 @@ export interface DraftLanes {
   /** laneId -> picks, sorted; includes SIDEBOARD_LANE_ID. */
   grouped: Map<string, DraftCard[]>;
   moveCard: (instanceId: string, laneId: string) => void;
-  /** Create a new custom lane containing the dragged card. */
-  addLaneWithCard: (instanceId: string) => void;
+  /** Create a new custom lane containing the dragged card, optionally at an index. */
+  addLaneWithCard: (instanceId: string, index?: number) => string;
   renameLane: (laneId: string, name: string) => void;
 }
 
@@ -204,18 +204,24 @@ export function useDraftLanes(
   );
 
   const addLaneWithCard = useCallback(
-    (instanceId: string): void => {
+    (instanceId: string, index?: number): string => {
       const id = `lane-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
       setBox((cur) => {
         const n = cur.s.lanes.filter((l) => !DEFAULT_LANE_IDS.has(l.id)).length + 1;
+        const insertionIndex = Math.max(0, Math.min(index ?? cur.s.lanes.length, cur.s.lanes.length));
         return {
           ...cur,
           s: prune({
-            lanes: [...cur.s.lanes, { id, name: `Lane ${n}` }],
+            lanes: [
+              ...cur.s.lanes.slice(0, insertionIndex),
+              { id, name: `Lane ${n}` },
+              ...cur.s.lanes.slice(insertionIndex),
+            ],
             assignments: { ...cur.s.assignments, [instanceId]: id },
           }),
         };
       });
+      return id;
     },
     [prune]
   );

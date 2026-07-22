@@ -4,7 +4,7 @@
  *   - viewer in active game -> Game
  *   - else by room.phase    -> Lobby / Draft / Deckbuild
  */
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AccountMenu } from "./components/AccountMenu";
 import { AuthModal } from "./components/AuthModal";
 import { CardPreviewProvider } from "./components/Card";
@@ -15,37 +15,264 @@ import { useApp } from "./store";
 import { AdminPortal } from "./screens/AdminPortal";
 import { Home } from "./screens/Home";
 import { Lobby } from "./screens/Lobby";
+import { MatchLobby } from "./screens/MatchLobby";
 import { Draft } from "./screens/Draft";
 import { Deckbuild } from "./screens/Deckbuild";
 import { Game } from "./screens/Game";
 import { demoGameView, demoRoom, demoSession } from "./lib/demoGame";
 
-function Router(): JSX.Element {
+function Router({
+  leaving,
+  onRequestLeave,
+  onLeaveAnimationComplete,
+  suppressHomeEntrance,
+}: {
+  leaving: boolean;
+  onRequestLeave: () => void;
+  onLeaveAnimationComplete: () => void;
+  suppressHomeEntrance: boolean;
+}): JSX.Element {
   const { state } = useApp();
   const { session, joined, room, game } = state;
+  const phase = room?.phase ?? null;
+  const previousPhase = useRef(phase);
+  const landingReady = joined && Boolean(room && session) && phase === "lobby";
+  const previousLandingReady = useRef(landingReady);
+  const [draftTransition, setDraftTransition] = useState<"turning" | null>(null);
+  const [deckTransition, setDeckTransition] = useState<"waiting" | "turning" | null>(null);
+  const [lobbyTransition, setLobbyTransition] = useState<"turning" | "done" | null>(null);
+  const [landingTransition, setLandingTransition] = useState<"turning" | "done" | null>(null);
+  const draftTransitionJustStarted = previousPhase.current === "lobby" && phase === "drafting";
+  const transitionJustStarted = previousPhase.current === "drafting" && phase === "deckbuild";
+  const landingTransitionJustStarted = !previousLandingReady.current && landingReady;
+
+  useEffect(() => {
+    const wasReady = previousLandingReady.current;
+    previousLandingReady.current = landingReady;
+    if (!wasReady && landingReady) {
+      setLandingTransition("turning");
+      const fallback = window.setTimeout(() => setLandingTransition("done"), 1350);
+      return () => window.clearTimeout(fallback);
+    }
+    if (!landingReady) setLandingTransition(null);
+  }, [landingReady]);
+
+  useEffect(() => {
+    const previous = previousPhase.current;
+    previousPhase.current = phase;
+    if (previous === "lobby" && phase === "drafting") {
+      setDraftTransition("turning");
+    } else if (phase !== "drafting") {
+      setDraftTransition(null);
+    }
+    if (previous === "drafting" && phase === "deckbuild") {
+      setDeckTransition("waiting");
+      // The final pick normally advances us via its animation-end callback.
+      // This fallback prevents a stalled screen if animations are interrupted.
+      const fallback = window.setTimeout(() => {
+        setDeckTransition((current) => current === "waiting" ? "turning" : current);
+      }, 1500);
+      return () => window.clearTimeout(fallback);
+    }
+    if (phase !== "deckbuild") setDeckTransition(null);
+  }, [phase]);
+
+  useEffect(() => {
+    if (draftTransition !== "turning") return;
+    // Animation events can be skipped when a tab is backgrounded, so always
+    // discard the cube wrapper on a short fallback as well.
+    const fallback = window.setTimeout(() => setDraftTransition(null), 1350);
+    return () => window.clearTimeout(fallback);
+  }, [draftTransition]);
+
+  useEffect(() => {
+    if (deckTransition !== "turning") return;
+    // Once the turn is complete, discard the transformed cube entirely and
+    // render the regular Deck Builder. Keeping an apparently finished 3D face
+    // mounted can leave browser hit-testing attached to the hidden face.
+    const fallback = window.setTimeout(() => setDeckTransition(null), 1350);
+    return () => window.clearTimeout(fallback);
+  }, [deckTransition]);
+
+  useEffect(() => {
+    if (lobbyTransition !== "turning") return;
+    const fallback = window.setTimeout(() => setLobbyTransition("done"), 1350);
+    return () => window.clearTimeout(fallback);
+  }, [lobbyTransition]);
+
+  useEffect(() => {
+    if (phase === "lobby" || phase === "drafting") setLobbyTransition(null);
+  }, [phase]);
+
+  const beginDeckTurn = useCallback(() => {
+    setDeckTransition("turning");
+  }, []);
+
+  const beginLobbyTurn = useCallback(() => {
+    setLobbyTransition("turning");
+  }, []);
 
   // A standalone, fully populated table for visual UI work — no room or draft needed.
   if (new URLSearchParams(window.location.search).get("demo") === "game") {
     return <Game demoView={demoGameView} demoRoom={demoRoom} demoSession={demoSession} />;
   }
 
-  if (!joined || !room || !session) return <Home />;
+  if (!joined || !room || !session) {
+    return (
+      <div className="phase-cube-viewport">
+        <div className="phase-cube">
+          <div className="phase-cube-face phase-cube-draft-face">
+            <Home suppressEntranceAnimation={suppressHomeEntrance} />
+          </div>
+          <div className="phase-cube-face phase-cube-deck-face">
+            <div className="lobby-scene h-full w-full" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (leaving) {
+    const activeGame = game
+      && state.dismissedGameId !== game.gameId
+      && game.state.players.some((player) => player.playerId === session.playerId);
+    let currentScreen: JSX.Element;
+    if (activeGame) {
+      currentScreen = <Game />;
+    } else if (lobbyTransition === "done") {
+      currentScreen = <MatchLobby />;
+    } else if (phase === "lobby") {
+      currentScreen = <Lobby onLeave={onRequestLeave} />;
+    } else if (phase === "drafting" || (phase === "deckbuild" && deckTransition === "waiting")) {
+      currentScreen = <Draft />;
+    } else {
+      currentScreen = <Deckbuild />;
+    }
+    return (
+      <div className="phase-cube-viewport">
+        <div
+          className="phase-cube is-turning-left"
+          onAnimationEnd={(event) => {
+            if (event.target === event.currentTarget) onLeaveAnimationComplete();
+          }}
+        >
+          <div className="phase-cube-face phase-cube-draft-face">
+            {currentScreen}
+          </div>
+          <div className="phase-cube-face phase-cube-left-face">
+            <Home />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (phase === "lobby" && (landingTransitionJustStarted || landingTransition === "turning")) {
+    return (
+      <div className="phase-cube-viewport">
+        <div
+          className="phase-cube is-turning"
+          onAnimationEnd={(event) => {
+            if (event.target === event.currentTarget) setLandingTransition("done");
+          }}
+        >
+          <div className="phase-cube-face phase-cube-draft-face">
+            <Home />
+          </div>
+          <div className="phase-cube-face phase-cube-deck-face">
+            <Lobby onLeave={onRequestLeave} />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (phase === "lobby" && landingTransition === "done") {
+    return <Lobby onLeave={onRequestLeave} suppressEntranceAnimation />;
+  }
+
+  if (phase === "drafting" && (draftTransitionJustStarted || draftTransition === "turning")) {
+    return (
+      <div className="phase-cube-viewport">
+        <div
+          className="phase-cube is-turning"
+          onAnimationEnd={(event) => {
+            if (event.target === event.currentTarget) setDraftTransition(null);
+          }}
+        >
+          <div className="phase-cube-face phase-cube-draft-face">
+            <Lobby onLeave={onRequestLeave} suppressEntranceAnimation />
+          </div>
+          <div className="phase-cube-face phase-cube-deck-face">
+            <Draft />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   if (game && state.dismissedGameId !== game.gameId) {
     const participant = game.state.players.some((p) => p.playerId === session.playerId);
     if (participant) return <Game />;
   }
 
+  if (lobbyTransition === "turning") {
+    return (
+      <div className="phase-cube-viewport">
+        <div
+          className="phase-cube is-turning"
+          onAnimationEnd={(event) => {
+            if (event.target === event.currentTarget) setLobbyTransition("done");
+          }}
+        >
+          <div className="phase-cube-face phase-cube-draft-face">
+            <Deckbuild />
+          </div>
+          <div className="phase-cube-face phase-cube-deck-face">
+            <MatchLobby />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+
+  if (lobbyTransition === "done") return <MatchLobby suppressEntranceAnimation />;
+
+  if (phase === "deckbuild" && (transitionJustStarted || deckTransition === "waiting")) {
+    return <Draft onFinalPickAnimationComplete={beginDeckTurn} />;
+  }
+
+  if (phase === "deckbuild" && deckTransition === "turning") {
+    return (
+      <div className="phase-cube-viewport">
+        <div
+          className="phase-cube is-turning"
+          onAnimationEnd={(event) => {
+            if (event.target === event.currentTarget) setDeckTransition(null);
+          }}
+        >
+          <div className="phase-cube-face phase-cube-draft-face">
+            <Draft />
+          </div>
+          <div className="phase-cube-face phase-cube-deck-face">
+            <Deckbuild onDone={beginLobbyTurn} />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   switch (room.phase) {
     case "lobby":
-      return <Lobby />;
+      return <Lobby onLeave={onRequestLeave} />;
     case "drafting":
       return <Draft />;
     case "deckbuild":
     case "playing":
-      return <Deckbuild />;
+      return <Deckbuild onDone={beginLobbyTurn} />;
     default:
-      return <Lobby />;
+      return <Lobby onLeave={onRequestLeave} />;
   }
 }
 
@@ -116,8 +343,8 @@ function leaveCopy(
  * phase-aware stakes, then leaves the room and returns to the home screen.
  * The wordmark doubles as a home button through the same confirmation.
  */
-function TopBar(): JSX.Element {
-  const { state, leaveRoom } = useApp();
+function TopBar({ onLeave, leaving }: { onLeave: () => void; leaving: boolean }): JSX.Element {
+  const { state } = useApp();
   const [confirmOpen, setConfirmOpen] = useState(false);
   const joined = state.joined && state.room != null;
   const demoGame = new URLSearchParams(window.location.search).get("demo") === "game";
@@ -132,7 +359,7 @@ function TopBar(): JSX.Element {
   const copy = joined ? leaveCopy(room!.phase, inActiveMatch, room!.ranked) : null;
 
   const openConfirm = (): void => {
-    if (joined) setConfirmOpen(true);
+    if (joined && !leaving) setConfirmOpen(true);
   };
 
   return (
@@ -140,6 +367,7 @@ function TopBar(): JSX.Element {
       <button
         type="button"
         onClick={openConfirm}
+        disabled={leaving}
         className={`flex items-center gap-1.5 text-xs font-black tracking-tight text-zinc-400 transition-colors duration-150 ${
           joined ? "hover:text-zinc-200" : "cursor-default"
         }`}
@@ -155,6 +383,7 @@ function TopBar(): JSX.Element {
           <button
             type="button"
             onClick={openConfirm}
+            disabled={leaving}
             className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] font-semibold text-zinc-300 transition-colors duration-150 hover:border-red-400/40 hover:bg-red-500/10 hover:text-red-200"
             title="Leave and return to the home screen"
           >
@@ -172,7 +401,7 @@ function TopBar(): JSX.Element {
           onClose={() => setConfirmOpen(false)}
           onConfirm={() => {
             setConfirmOpen(false);
-            leaveRoom();
+            onLeave();
           }}
           confirmLabel={copy.confirm}
           danger={copy.danger}
@@ -186,16 +415,44 @@ function TopBar(): JSX.Element {
 }
 
 function AppShell(): JSX.Element {
-  const { state } = useApp();
+  const { state, leaveRoom } = useApp();
   const { theme } = useVisualTheme();
+  const [leaving, setLeaving] = useState(false);
+  const [suppressHomeEntrance, setSuppressHomeEntrance] = useState(false);
+
+  const beginLeave = useCallback(() => {
+    if (state.joined) setLeaving(true);
+  }, [state.joined]);
+
+  const finishLeave = useCallback(() => {
+    setSuppressHomeEntrance(true);
+    setLeaving(false);
+    leaveRoom();
+  }, [leaveRoom]);
+
+  useEffect(() => {
+    if (!leaving) return;
+    const fallback = window.setTimeout(finishLeave, 1350);
+    return () => window.clearTimeout(fallback);
+  }, [finishLeave, leaving]);
+
+  useEffect(() => {
+    if (state.joined) setSuppressHomeEntrance(false);
+    else setLeaving(false);
+  }, [state.joined]);
 
   return (
     <CardPreviewProvider>
       <div className="visual-theme-shell flex h-full flex-col" data-visual-theme={theme}>
         <ConnectionBanner />
-        <TopBar />
+        <TopBar onLeave={beginLeave} leaving={leaving} />
         <div className="min-h-0 flex-1 overflow-y-auto">
-          <Router />
+          <Router
+            leaving={leaving}
+            onRequestLeave={beginLeave}
+            onLeaveAnimationComplete={finishLeave}
+            suppressHomeEntrance={suppressHomeEntrance}
+          />
         </div>
         {state.authOpen && <AuthModal />}
         <AdminLayer />

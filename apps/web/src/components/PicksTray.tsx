@@ -4,7 +4,7 @@
  * visible, drag-to-move between lanes, drag-to-create lanes, inline lane
  * rename, and a pinned Sideboard lane. Height is user-draggable via the grip.
  */
-import { useState, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent } from "react";
 import type { CardData, DraftCard } from "@mtg-cube/shared";
 import { Card } from "./Card";
 import { getPackPickInstanceId } from "../lib/dnd";
@@ -114,30 +114,32 @@ function LaneColumn({
   picks,
   cards,
   cardW,
-  laneH,
   sideboard,
   lanesApi,
   dragOver,
   setDragOver,
   onPackPick,
+  onMoveCard,
+  arrivingInstanceId,
+  className = "",
 }: {
   lane: Lane;
   picks: DraftCard[];
   cards: Record<string, CardData>;
   cardW: number;
-  laneH: number;
   sideboard: boolean;
   lanesApi: DraftLanes;
   dragOver: string | null;
   setDragOver: (id: string | null) => void;
   onPackPick?: PackPickDrop;
+  onMoveCard: (instanceId: string, laneId: string) => void;
+  arrivingInstanceId?: string | null;
+  className?: string;
 }): JSX.Element {
-  const cardH = cardW * 7 / 5;
-  const minimumStep = cardH * 0.15;
-  const step = picks.length <= 1
-    ? cardH
-    : Math.min(cardH, Math.max(minimumStep, (laneH - cardH) / (picks.length - 1)));
-  const overlap = step - cardH;
+  // Match Deck Builder Cards view: keep a fixed name-band overlap so resizing
+  // the divider only changes the visible viewport. Cards never accordion or
+  // redistribute themselves relative to one another while the tray moves.
+  const overlap = "-119%";
   const isOver = dragOver === lane.id;
 
   return (
@@ -148,7 +150,7 @@ function LaneColumn({
           : isOver
             ? "bg-brass-400/10 ring-1 ring-brass-400/50"
             : ""
-      }`}
+      } ${className}`}
       style={{ width: cardW + 10 }}
       onDragOver={(e) => {
         e.preventDefault();
@@ -165,7 +167,7 @@ function LaneColumn({
           return;
         }
         const id = e.dataTransfer.getData(DRAG_MIME);
-        if (id) lanesApi.moveCard(id, lane.id);
+        if (id) onMoveCard(id, lane.id);
       }}
     >
       <LaneHeader
@@ -183,8 +185,10 @@ function LaneColumn({
             <div
               key={pick.instanceId}
               data-draft-pick-instance={pick.instanceId}
-              className="relative transition-transform duration-100 hover:z-30 hover:-translate-y-1"
-              style={{ marginTop: i === 0 ? 0 : `${overlap}px` }}
+              className={`relative transition-transform duration-100 hover:z-30 hover:-translate-y-1 ${
+                arrivingInstanceId === pick.instanceId ? "deckbuilder-card-column-arrival" : ""
+              }`}
+              style={{ marginTop: i === 0 ? 0 : overlap }}
             >
               <Card
                 data={cards[pick.cardId]}
@@ -239,6 +243,90 @@ export function PicksTray(props: PicksTrayProps): JSX.Element {
   const { picks, cards, lanesApi, trayH, onResize, onPackPick } = props;
   const [dragOver, setDragOver] = useState<string | null>(null);
   const [newLaneOver, setNewLaneOver] = useState(false);
+  const mainboardScrollRef = useRef<HTMLDivElement>(null);
+  const [pendingLaneGap, setPendingLaneGap] = useState<{ key: string; index: number } | null>(null);
+  const laneGapTimer = useRef<number | null>(null);
+  const [arrivingCardId, setArrivingCardId] = useState<string | null>(null);
+  const arrivingCardTimer = useRef<number | null>(null);
+
+  useEffect(() => {
+    const resetPendingLane = (): void => {
+      if (laneGapTimer.current !== null) window.clearTimeout(laneGapTimer.current);
+      laneGapTimer.current = null;
+      setPendingLaneGap(null);
+    };
+    document.addEventListener("dragend", resetPendingLane);
+    return () => {
+      document.removeEventListener("dragend", resetPendingLane);
+      if (laneGapTimer.current !== null) window.clearTimeout(laneGapTimer.current);
+      if (arrivingCardTimer.current !== null) window.clearTimeout(arrivingCardTimer.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    const scroller = mainboardScrollRef.current;
+    if (!scroller) return;
+    const redirectWheel = (event: WheelEvent): void => {
+      if (scroller.scrollWidth <= scroller.clientWidth) return;
+      const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+      if (delta === 0) return;
+      event.preventDefault();
+      scroller.scrollLeft += delta;
+    };
+    scroller.addEventListener("wheel", redirectWheel, { passive: false, capture: true });
+    return () => scroller.removeEventListener("wheel", redirectWheel, { capture: true });
+  }, []);
+
+  const clearLaneGapTimer = (): void => {
+    if (laneGapTimer.current !== null) window.clearTimeout(laneGapTimer.current);
+    laneGapTimer.current = null;
+  };
+
+  const beginLaneGapHold = (key: string, index: number): void => {
+    if (pendingLaneGap?.key === key || laneGapTimer.current !== null) return;
+    laneGapTimer.current = window.setTimeout(() => {
+      laneGapTimer.current = null;
+      setPendingLaneGap({ key, index });
+    }, 250);
+  };
+
+  const leaveLaneGap = (key: string): void => {
+    clearLaneGapTimer();
+    setPendingLaneGap((current) => current?.key === key ? null : current);
+  };
+
+  const markCardArrival = (instanceId: string): void => {
+    if (arrivingCardTimer.current !== null) window.clearTimeout(arrivingCardTimer.current);
+    setArrivingCardId(instanceId);
+    arrivingCardTimer.current = window.setTimeout(() => {
+      arrivingCardTimer.current = null;
+      setArrivingCardId(null);
+    }, 420);
+  };
+
+  const moveCardToLane = (instanceId: string, laneId: string): void => {
+    lanesApi.moveCard(instanceId, laneId);
+    markCardArrival(instanceId);
+  };
+
+  const dropIntoNewLane = (event: DragEvent<HTMLDivElement>, index: number): void => {
+    event.preventDefault();
+    event.stopPropagation();
+    clearLaneGapTimer();
+    const packId = getPackPickInstanceId(event.dataTransfer);
+    if (packId) {
+      const laneId = lanesApi.addLaneWithCard(packId, index);
+      onPackPick?.(packId, laneId);
+      setPendingLaneGap(null);
+      return;
+    }
+    const instanceId = event.dataTransfer.getData(DRAG_MIME);
+    if (instanceId) {
+      lanesApi.addLaneWithCard(instanceId, index);
+      markCardArrival(instanceId);
+    }
+    setPendingLaneGap(null);
+  };
 
   const startResize = (e: ReactMouseEvent<HTMLDivElement>): void => {
     e.preventDefault();
@@ -255,8 +343,6 @@ export function PicksTray(props: PicksTrayProps): JSX.Element {
     window.addEventListener("mouseup", onUp);
   };
 
-  // Resizing reveals more of each stack rather than scaling the cards.
-  const laneH = Math.max(40, trayH - 64);
   const cardW = 130;
 
   const sideboardLane: Lane = { id: SIDEBOARD_LANE_ID, name: "Sideboard" };
@@ -280,47 +366,91 @@ export function PicksTray(props: PicksTrayProps): JSX.Element {
         <span className="hidden text-[10px] text-zinc-600 sm:inline">drag cards between lanes · click a lane name to rename</span>
       </div>
       <div className="flex min-h-0 flex-1 pl-3 pb-2">
-          <div className="scrollbar-slim flex min-w-0 flex-1 gap-2 overflow-x-auto pr-3">
-            {lanesApi.lanes.map((lane) => (
-              <LaneColumn
-                key={lane.id}
-                lane={lane}
-                picks={lanesApi.grouped.get(lane.id) ?? []}
-                cards={cards}
-                cardW={cardW}
-                laneH={laneH}
-                sideboard={false}
-                lanesApi={lanesApi}
-                dragOver={dragOver}
-                setDragOver={setDragOver}
-                onPackPick={onPackPick}
+          <div
+            ref={mainboardScrollRef}
+            className="deckbuilder-mainboard-scroll scrollbar-slim min-h-0 min-w-0 flex-1 overflow-x-auto overflow-y-hidden"
+            tabIndex={0}
+            aria-label="Draft card columns"
+            onDragOver={(event) => {
+              const scroller = event.currentTarget;
+              const bounds = scroller.getBoundingClientRect();
+              const edgeSize = 72;
+              if (event.clientX < bounds.left + edgeSize) scroller.scrollLeft -= 18;
+              else if (event.clientX > bounds.right - edgeSize) scroller.scrollLeft += 18;
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+              event.preventDefault();
+              event.currentTarget.scrollBy({
+                left: event.key === "ArrowLeft" ? -150 : 150,
+                behavior: "smooth",
+              });
+            }}
+          >
+            <div className="flex h-full w-max min-w-full gap-0 pr-3">
+              {lanesApi.lanes.map((lane, index) => {
+                const previousLane = index > 0 ? lanesApi.lanes[index - 1] : null;
+                const gapKey = previousLane ? `${previousLane.id}:${lane.id}` : null;
+                const preparedGap = gapKey && pendingLaneGap?.key === gapKey;
+                return (
+                  <div key={lane.id} className="contents">
+                    {gapKey && (
+                      <div
+                        className={`deckbuilder-column-gap flex h-full shrink-0 items-center justify-center overflow-hidden transition-[width,border-color,background-color] duration-200 ${
+                          preparedGap
+                            ? "is-prepared w-[140px] border border-amber-300/55 bg-amber-300/[0.06]"
+                            : "w-2 border-x border-transparent hover:border-amber-300/30 hover:bg-amber-300/[0.03]"
+                        }`}
+                        onDragEnter={(event) => {
+                          event.preventDefault();
+                          beginLaneGapHold(gapKey, index);
+                        }}
+                        onDragOver={(event) => event.preventDefault()}
+                        onDragLeave={() => leaveLaneGap(gapKey)}
+                        onDrop={(event) => dropIntoNewLane(event, index)}
+                        title="Hold a card here to create a lane"
+                      >
+                        {preparedGap && (
+                          <span className="pointer-events-none text-3xl font-light text-amber-200/75">+</span>
+                        )}
+                      </div>
+                    )}
+                    <LaneColumn
+                      lane={lane}
+                      picks={lanesApi.grouped.get(lane.id) ?? []}
+                      cards={cards}
+                      cardW={cardW}
+                      sideboard={false}
+                      lanesApi={lanesApi}
+                      dragOver={dragOver}
+                      setDragOver={setDragOver}
+                      onPackPick={onPackPick}
+                      onMoveCard={moveCardToLane}
+                      arrivingInstanceId={arrivingCardId}
+                      className={lane.id.startsWith("lane-") ? "deckbuilder-column-created" : ""}
+                    />
+                  </div>
+                );
+              })}
+              <div className="w-2 shrink-0" />
+              {/* Invisible far-right target, matching Deck Builder Cards view. */}
+              <div
+                className="h-full w-[140px] shrink-0 bg-transparent"
+                onDragEnter={(event) => {
+                  event.preventDefault();
+                  setNewLaneOver(true);
+                }}
+                onDragOver={(event: DragEvent<HTMLDivElement>) => event.preventDefault()}
+                onDragLeave={() => setNewLaneOver(false)}
+                onDrop={(event) => {
+                  setNewLaneOver(false);
+                  dropIntoNewLane(event, lanesApi.lanes.length);
+                }}
+                title="Drop a card here to create a new lane"
+                aria-label="Drop a card here to create a new lane"
+                data-drag-over={newLaneOver || undefined}
               />
-            ))}
-            {/* Drop target: create a new lane */}
-            <div
-              className={`h-full shrink-0 rounded-lg transition-colors duration-100 ${
-                newLaneOver ? "bg-brass-400/10 ring-1 ring-brass-400/70" : ""
-              }`}
-              style={{ width: cardW + 10 }}
-              onDragOver={(e: DragEvent<HTMLDivElement>) => {
-                e.preventDefault();
-                setNewLaneOver(true);
-              }}
-              onDragLeave={() => setNewLaneOver(false)}
-              onDrop={(e) => {
-                e.preventDefault();
-                setNewLaneOver(false);
-                const packId = getPackPickInstanceId(e.dataTransfer);
-                if (packId) {
-                  onPackPick?.(packId, null);
-                  return;
-                }
-                const id = e.dataTransfer.getData(DRAG_MIME);
-                if (id) lanesApi.addLaneWithCard(id);
-              }}
-              title="Drop a card here to create a new lane"
-              aria-label="Drop a card here to create a new lane"
-            />
+            </div>
           </div>
           <aside className="h-full w-60 shrink-0 border-l border-amber-200/25 bg-gradient-to-r from-amber-950/20 to-transparent pl-2.5 pr-2 min-[1400px]:w-72">
             <LaneColumn
@@ -328,12 +458,13 @@ export function PicksTray(props: PicksTrayProps): JSX.Element {
               picks={lanesApi.grouped.get(SIDEBOARD_LANE_ID) ?? []}
               cards={cards}
               cardW={cardW}
-              laneH={laneH}
               sideboard
               lanesApi={lanesApi}
               dragOver={dragOver}
               setDragOver={setDragOver}
               onPackPick={onPackPick}
+              onMoveCard={moveCardToLane}
+              arrivingInstanceId={arrivingCardId}
             />
           </aside>
         </div>

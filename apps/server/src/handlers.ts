@@ -447,7 +447,10 @@ export function registerHandlers(io: AppServer, socket: AppSocket, rooms: Map<st
       const seatIndex = room.seatIndexOf(player.id);
       if (seatIndex < 0) throw new Error("You are not seated in this draft");
       const instanceId = String(args?.instanceId ?? "");
-      performPick(io, room, seatIndex, instanceId);
+      const additionalInstanceIds = Array.isArray(args?.additionalInstanceIds)
+        ? args.additionalInstanceIds.slice(0, 8).map((id) => String(id))
+        : [];
+      performPick(io, room, seatIndex, instanceId, additionalInstanceIds);
       room.touch();
       reply({ ok: true });
     });

@@ -235,7 +235,13 @@ function CubePanel({ room, isHost }: CubePanelProps): JSX.Element {
   );
 }
 
-export function Lobby(): JSX.Element {
+export function Lobby({
+  onLeave,
+  suppressEntranceAnimation = false,
+}: {
+  onLeave?: () => void;
+  suppressEntranceAnimation?: boolean;
+} = {}): JSX.Element {
   const { state, pushToast, leaveRoom } = useApp();
   const room = state.room;
   const me = state.session;
@@ -280,7 +286,7 @@ export function Lobby(): JSX.Element {
 
   return (
     <div className="lobby-scene min-h-full px-4 py-5 md:px-6 md:py-6">
-      <div className="relative z-10 mx-auto max-w-6xl animate-fade-in">
+      <div className={`relative z-10 mx-auto max-w-6xl ${suppressEntranceAnimation ? "" : "animate-fade-in"}`}>
       {/* Header: room code */}
       <header className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
@@ -310,7 +316,7 @@ export function Lobby(): JSX.Element {
             </div>
           </div>
         </div>
-        <button type="button" className="btn-ghost !text-xs" onClick={leaveRoom}>
+        <button type="button" className="btn-ghost !text-xs" onClick={onLeave ?? leaveRoom}>
           <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-current" aria-hidden="true">
             <path d="M10 3h8a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1h-8v-2h7V5h-7V3Zm1.5 6.5V7l-6 5 6 5v-2.5H16v-3h-4.5Z" />
           </svg>

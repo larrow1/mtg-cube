@@ -92,15 +92,26 @@ export interface PreviewValue {
 const PreviewContext = createContext<Dispatch<SetStateAction<PreviewValue | null>> | null>(null);
 
 const PREVIEW_WIDTH = 248;
+const DUAL_PREVIEW_WIDTH = 506;
 const PREVIEW_GAP = 12;
 const PREVIEW_MARGIN = 8;
+
+const DOUBLE_FACED_LAYOUTS = new Set([
+  "transform",
+  "modal_dfc",
+  "double_faced_token",
+  "reversible_card",
+]);
+
+function hasBackFace(data: CardData | undefined): boolean {
+  return Boolean(data?.faces && data.faces.length >= 2 && DOUBLE_FACED_LAYOUTS.has(data.layout));
+}
 
 export function CardPreviewProvider({ children }: { children: ReactNode }): JSX.Element {
   const [preview, setPreview] = useState<PreviewValue | null>(null);
   const boxRef = useRef<HTMLDivElement | null>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
-  const face = preview ? activeFace(preview.data, preview.faceIndex) : undefined;
-  const oracle = face && "oracleText" in face ? face.oracleText : undefined;
+  const showBothFaces = hasBackFace(preview?.data);
 
   // Position after render (we need the preview's measured height to clamp).
   useLayoutEffect(() => {
@@ -112,6 +123,9 @@ export function CardPreviewProvider({ children }: { children: ReactNode }): JSX.
     const height = boxRef.current?.offsetHeight ?? 420;
     const vw = window.innerWidth;
     const vh = window.innerHeight;
+    const previewWidth = showBothFaces
+      ? Math.min(DUAL_PREVIEW_WIDTH, vw - PREVIEW_MARGIN * 2)
+      : PREVIEW_WIDTH;
     if (!a) {
       setPos({ left: PREVIEW_MARGIN, top: vh - height - PREVIEW_MARGIN });
       return;
@@ -119,21 +133,21 @@ export function CardPreviewProvider({ children }: { children: ReactNode }): JSX.
     let left: number;
     let top: number;
     if (preview.placement === "above") {
-      left = (a.left + a.right) / 2 - PREVIEW_WIDTH / 2;
+      left = (a.left + a.right) / 2 - previewWidth / 2;
       top = a.top - PREVIEW_GAP - height;
     } else {
       // Prefer the right side of the hovered card; flip left when cramped.
       left = a.right + PREVIEW_GAP;
-      if (left + PREVIEW_WIDTH > vw - PREVIEW_MARGIN) {
-        left = a.left - PREVIEW_GAP - PREVIEW_WIDTH;
+      if (left + previewWidth > vw - PREVIEW_MARGIN) {
+        left = a.left - PREVIEW_GAP - previewWidth;
       }
       // Center vertically on the card.
       top = (a.top + a.bottom) / 2 - height / 2;
     }
-    left = Math.max(PREVIEW_MARGIN, Math.min(left, vw - PREVIEW_WIDTH - PREVIEW_MARGIN));
+    left = Math.max(PREVIEW_MARGIN, Math.min(left, vw - previewWidth - PREVIEW_MARGIN));
     top = Math.max(PREVIEW_MARGIN, Math.min(top, vh - height - PREVIEW_MARGIN));
     setPos({ left, top });
-  }, [preview]);
+  }, [preview, showBothFaces]);
 
   return (
     <PreviewContext.Provider value={setPreview}>
@@ -141,21 +155,37 @@ export function CardPreviewProvider({ children }: { children: ReactNode }): JSX.
       {preview && (preview.data || preview.gameCard?.isToken) && (
         <div
           ref={boxRef}
-          className="pointer-events-none fixed z-[70] w-[248px] animate-fade-in"
-          style={pos ? { left: pos.left, top: pos.top } : { left: PREVIEW_MARGIN, top: -9999 }}
+          className="pointer-events-none fixed z-[70] animate-fade-in"
+          style={{
+            width: showBothFaces
+              ? `min(${DUAL_PREVIEW_WIDTH}px, calc(100vw - ${PREVIEW_MARGIN * 2}px))`
+              : PREVIEW_WIDTH,
+            ...(pos ? { left: pos.left, top: pos.top } : { left: PREVIEW_MARGIN, top: -9999 }),
+          }}
         >
-          <Card
-            data={preview.data}
-            gameCard={preview.gameCard?.isToken ? preview.gameCard : undefined}
-            faceIndex={preview.faceIndex}
-            size="lg"
-            disablePreview
-            className="shadow-card-lg"
-          />
-          {oracle && (
-            <div className="panel mt-1.5 max-h-40 overflow-hidden whitespace-pre-line p-2.5 text-[11px] leading-snug text-zinc-300">
-              {oracle}
+          {showBothFaces ? (
+            <div className="flex items-start gap-2.5">
+              {[0, 1].map((faceIndex) => (
+                <div key={faceIndex} className="min-w-0 flex-1">
+                  <Card
+                    data={preview.data}
+                    faceIndex={faceIndex}
+                    size="lg"
+                    disablePreview
+                    className="!w-full shadow-card-lg"
+                  />
+                </div>
+              ))}
             </div>
+          ) : (
+            <Card
+              data={preview.data}
+              gameCard={preview.gameCard?.isToken ? preview.gameCard : undefined}
+              faceIndex={preview.faceIndex}
+              size="lg"
+              disablePreview
+              className="shadow-card-lg"
+            />
           )}
         </div>
       )}
@@ -500,6 +530,8 @@ export interface CardProps {
   onDragStart?: (e: DragEvent<HTMLDivElement>) => void;
   className?: string;
   disablePreview?: boolean;
+  /** Keep clickable cards from lifting/scaling on hover. */
+  disableHoverMotion?: boolean;
   /** Override where the enlarged hover preview opens. */
   previewPlacement?: "side" | "above";
   title?: string;
@@ -525,6 +557,7 @@ export function Card(props: CardProps): JSX.Element {
     onDragStart,
     className = "",
     disablePreview = false,
+    disableHoverMotion = false,
     previewPlacement = "side",
     title,
   } = props;
@@ -694,7 +727,7 @@ export function Card(props: CardProps): JSX.Element {
       className={`relative shrink-0 select-none ${artTile ? ART_TILE_SIZE_CLASSES[size] : SIZE_CLASSES[size]} ${className} ${onClick || onDoubleClick || onContextMenu ? "cursor-pointer" : ""}`}
     >
       <div
-        className={`relative w-full transition-all duration-150 ${artTile ? "aspect-[4/3] rounded-lg" : "aspect-[5/7] rounded-[6%]"} ${ring} ${tapped ? "rotate-90" : ""} ${dimmed ? "opacity-50" : ""} ${onClick || onDoubleClick ? "hover:-translate-y-1 hover:scale-[1.03]" : ""}`}
+        className={`relative w-full ${disableHoverMotion ? "transition-none" : "transition-all duration-150"} ${artTile ? "aspect-[4/3] rounded-lg" : "aspect-[5/7] rounded-[6%]"} ${ring} ${tapped ? "rotate-90" : ""} ${dimmed ? "opacity-50" : ""} ${(onClick || onDoubleClick) && !disableHoverMotion ? "hover:-translate-y-1 hover:scale-[1.03]" : ""}`}
       >
         {body}
         {highlight === "autopick" && (
