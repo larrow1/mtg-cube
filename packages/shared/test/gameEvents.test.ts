@@ -48,8 +48,13 @@ function mkDeck(owner: string, size = 40): GameCard[] {
   return Array.from({ length: size }, (_, i) => mkCard(owner, i));
 }
 
+/**
+ * v15: auto-pass OFF — these tests assert what lands ON the stack, so the
+ * flow driver must not pass priority for both players and resolve it out
+ * from under them. (See game.test.ts's newGame for the same reasoning.)
+ */
 function newGame(seed = "events-seed"): GameState {
-  return createGame(
+  const g = createGame(
     "g1",
     [
       { playerId: "p1", deck: mkDeck("p1") },
@@ -57,10 +62,27 @@ function newGame(seed = "events-seed"): GameState {
     ],
     seed
   );
+  g.autoPass = { p1: false, p2: false };
+  return g;
 }
 
 function player(s: GameState, id: string) {
   return s.players.find((p) => p.playerId === id)!;
+}
+
+/**
+ * v15: walk the active player forward with explicit `nextStep`s, closing the
+ * attacker-declaration window on the way (CR 508.1 makes it a turn-based
+ * action `nextStep` refuses to skip).
+ */
+function walkTo(s: GameState, playerId: string, step: TurnStep, context?: ActionContext): GameState {
+  for (let i = 0; i < 24 && s.step !== step; i++) {
+    s =
+      s.step === "declareAttackers" && !s.combat!.attackersDeclared
+        ? applyAction(s, playerId, { type: "commitAttackers" }, 0, context)
+        : applyAction(s, playerId, { type: "nextStep" }, 0, context);
+  }
+  return s;
 }
 
 function other(s: GameState, id: string): string {
@@ -377,26 +399,29 @@ describe("v9 attackDeclared team vs self", () => {
         atk2: { triggers: [{ event: "attack" as const, optional: false, description: "self attack 2", effect: { kind: "scry", count: 1 } as TriggerEffect }] },
       },
     };
-    // v12: walk to declare-attackers (untap auto-runs to main1 first).
-    let s = applyAction(g, A, { type: "nextStep" }, 0, ctx); // -> main1
-    s = applyAction(s, A, { type: "nextStep" }, 0, ctx); // -> declareAttackers
+    // v15: nothing fires while the declaration window is open — the whole
+    // declaration is one turn-based action (CR 508.1m), so both attackers go
+    // in first and every attack trigger fires together at the commit.
+    let s = walkTo(g, A, "declareAttackers", ctx);
     s = applyAction(s, A, { type: "setAttacking", instanceId: a1.instanceId, attacking: true }, 0, ctx);
-    expect(triggersFrom(s, "adl1")).toHaveLength(1); // team fired on the FIRST declaration
-    expect(triggersFrom(s, a1.instanceId)).toHaveLength(1); // legacy self attack still fires
-
     s = applyAction(s, A, { type: "setAttacking", instanceId: a2.instanceId, attacking: true }, 0, ctx);
-    expect(triggersFrom(s, "adl1")).toHaveLength(1); // second attacker same combat: no refire
-    expect(triggersFrom(s, a2.instanceId)).toHaveLength(1); // but its own self trigger fires
+    expect(triggersFrom(s, "adl1")).toHaveLength(0);
 
-    // New turn (attackers cleared, team flag re-armed) -> new declaration
-    // fires again. The unresolved triggers HOLD every transit step (v12), so
-    // both turn passes stop at untap and the walk advances one step at a time.
+    s = applyAction(s, A, { type: "commitAttackers" }, 0, ctx);
+    expect(triggersFrom(s, "adl1")).toHaveLength(1); // team fires ONCE for the combat
+    expect(triggersFrom(s, a1.instanceId)).toHaveLength(1); // legacy self attack per creature
+    expect(triggersFrom(s, a2.instanceId)).toHaveLength(1);
+
+    // New turn (attackers cleared, team flag re-armed) -> a new declaration
+    // fires again. The unresolved triggers stay on the stack throughout;
+    // untap never holds for them (CR 502.4) but upkeep onwards does.
     const B = other(s, A);
-    s = applyAction(s, A, { type: "nextTurn" }, 0, ctx); // B active, held at untap
-    expect(s.step).toBe("untap");
-    s = applyAction(s, B, { type: "nextTurn" }, 0, ctx); // A active again, held at untap
-    while (s.step !== "declareAttackers") s = applyAction(s, A, { type: "nextStep" }, 0, ctx);
+    s = applyAction(s, A, { type: "nextTurn" }, 0, ctx); // B active
+    expect(s.step).toBe("upkeep");
+    s = applyAction(s, B, { type: "nextTurn" }, 0, ctx); // A active again
+    s = walkTo(s, A, "declareAttackers", ctx);
     s = applyAction(s, A, { type: "setAttacking", instanceId: a1.instanceId, attacking: true }, 0, ctx);
+    s = applyAction(s, A, { type: "commitAttackers" }, 0, ctx);
     expect(triggersFrom(s, "adl1")).toHaveLength(2);
     expect(triggersFrom(s, a1.instanceId)).toHaveLength(2);
   });
@@ -448,15 +473,17 @@ describe("v9 draw conditions (you/opponent, exceptDrawStepFirst)", () => {
   it("draw-step draws fire you/opponent conditions; the legacy exemption skips the first draw-step draw", () => {
     const { g, A, ctx } = setup();
     // Turn 1 active player skips the draw; go around to A's turn-2 draw.
-    // v12: the draw happens INSIDE the turn-pass auto-run — B's draw fires
-    // nothing (own draws aren't "an opponent's"), so B lands in main1; A's
-    // draw fires the watchers, so the chain HOLDS in A's draw step.
+    // B's draw fires nothing (own draws aren't "an opponent's"); A's turn-2
+    // draw fires the watchers.
     let s = applyAction(g, A, { type: "nextTurn" }, 0, ctx);
-    expect(s.step).toBe("main1"); // B's chain completed untouched
+    s = walkTo(s, s.activePlayerId, "main1", ctx); // B's draw step passed through
+    expect(triggersFrom(s, "md1")).toHaveLength(0);
+    expect(triggersFrom(s, "od1")).toHaveLength(0);
     s = applyAction(s, s.activePlayerId, { type: "nextTurn" }, 0, ctx);
     expect(s.activePlayerId).toBe(A);
     expect(s.turnNumber).toBe(2);
-    expect(s.step).toBe("draw"); // held mid-chain by the watcher triggers
+    s = walkTo(s, A, "draw", ctx);
+    expect(s.step).toBe("draw");
     expect(triggersFrom(s, "md1")).toHaveLength(1); // who:"you", drawer = controller
     expect(triggersFrom(s, "od1")).toHaveLength(1); // who:"opponent" WITHOUT the exemption
     expect(triggersFrom(s, "bow1")).toHaveLength(0); // legacy opponentDraws exempts the draw-step first draw

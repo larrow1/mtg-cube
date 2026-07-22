@@ -808,6 +808,11 @@
     ]
   },
   "Mana Vault": {
+    "replacements": [
+      {
+        "kind": "doesNotUntap"
+      }
+    ],
     "triggers": [
       {
         "description": "At the beginning of your upkeep, you may pay {4}. If you do, untap this artifact.",

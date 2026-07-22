@@ -3,6 +3,7 @@ import type {
   ActivatedSearchAbility,
   CardData,
   CardScript,
+  GameAction,
   GameCard,
   GameState,
   TriggerEffect,
@@ -35,8 +36,14 @@ function mkDeck(owner: string, size = 40): GameCard[] {
   return Array.from({ length: size }, (_, i) => mkCard(owner, i));
 }
 
+/**
+ * v15: the default test game runs with auto-pass OFF for both players — the
+ * "hold full control" mode — so every priority pass and step advance in these
+ * tests is explicit and the assertions stay about the thing under test. The
+ * auto-pass shortcut itself is covered by `newAutoGame` in the v15 block.
+ */
 function newGame(seed = "game-seed"): GameState {
-  return createGame(
+  const g = createGame(
     "g1",
     [
       { playerId: "p1", deck: mkDeck("p1") },
@@ -44,6 +51,15 @@ function newGame(seed = "game-seed"): GameState {
     ],
     seed
   );
+  g.autoPass = { p1: false, p2: false };
+  return g;
+}
+
+/** A game with v15 auto-pass on for both players (the production default). */
+function newAutoGame(seed = "game-seed"): GameState {
+  const g = newGame(seed);
+  g.autoPass = { p1: true, p2: true };
+  return g;
 }
 
 function player(s: GameState, id: string) {
@@ -105,6 +121,23 @@ function atStep(s: GameState, playerId: string, step: TurnStep = "main1"): GameS
   s.activePlayerId = playerId;
   s.priorityPlayerId = playerId;
   s.step = step;
+  return s;
+}
+
+/**
+ * v15: walk the active player forward with explicit `nextStep`s until `step`
+ * is reached, closing the attacker-declaration window on the way (CR 508.1
+ * makes it a turn-based action `nextStep` refuses to skip). For tests that
+ * only care about arriving somewhere, not about how.
+ */
+function walkTo(s: GameState, playerId: string, step: TurnStep, context?: ActionContext): GameState {
+  for (let i = 0; i < 24 && s.step !== step; i++) {
+    const action: GameAction =
+      s.step === "declareAttackers" && !s.combat!.attackersDeclared
+        ? { type: "commitAttackers" }
+        : { type: "nextStep" };
+    s = applyAction(s, playerId, action, 0, context);
+  }
   return s;
 }
 
@@ -335,9 +368,11 @@ describe("tap / mana / counters / attack", () => {
     const blocker = handCard(s, "p2");
     s = applyAction(s, "p2", { type: "moveCard", instanceId: blocker, from: "hand", to: "battlefield" });
 
-    // v12: declarations live in their combat steps.
+    // v12: declarations live in their combat steps. v15: each declaration is
+    // a window that has to be committed before the step can end.
     atStep(s, "p1", "declareAttackers");
     s = applyAction(s, "p1", { type: "setAttacking", instanceId: attacker, attacking: true });
+    s = applyAction(s, "p1", { type: "commitAttackers" });
     s = applyAction(s, "p1", { type: "nextStep" }); // -> declareBlockers
     s = applyAction(s, "p2", { type: "setBlocking", instanceId: blocker, blocking: attacker });
     expect(player(s, "p1").zones.battlefield[0]!.attacking).toBe(true);
@@ -364,30 +399,45 @@ describe("turn structure", () => {
     const inactive = other(g, active);
     expect(() => applyAction(g, inactive, { type: "nextStep" })).toThrow(EngineError);
 
-    // v12: untap/upkeep/draw are transit — one nextStep lands in main1; the
-    // starting player still skips the turn-1 draw along the way.
+    // v15: untap grants no priority (CR 502.4) so it is stepped through, but
+    // upkeep and draw are real priority windows and each one stops. The
+    // starting player still skips the turn-1 draw.
     let s = applyAction(g, active, { type: "nextStep" });
+    expect(s.step).toBe("upkeep");
+    s = applyAction(s, active, { type: "nextStep" });
+    expect(s.step).toBe("draw");
+    s = applyAction(s, active, { type: "nextStep" });
     expect(s.step).toBe("main1");
     expect(player(s, active).zones.hand).toHaveLength(7);
 
     // Mana pools empty at every step boundary (v3 rule), so floating mana
     // never survives a walk through combat to main2.
     s = applyAction(s, active, { type: "addMana", color: "R", amount: 2 });
-    while (s.step !== "main2") s = applyAction(s, active, { type: "nextStep" });
+    while (s.step !== "main2") {
+      // The attack-declaration window has to be closed before nextStep will
+      // leave the declare-attackers step (CR 508.1); declaring nothing then
+      // skips declare-blockers and combat-damage (CR 508.8).
+      if (s.step === "declareAttackers" && !s.combat!.attackersDeclared) {
+        s = applyAction(s, active, { type: "commitAttackers" });
+      } else {
+        s = applyAction(s, active, { type: "nextStep" });
+      }
+    }
     expect(player(s, active).manaPool).toEqual({});
 
-    // main2 -> end STOPS (the shared instant window); nextStep from end
-    // passes the turn, and the opponent auto-runs untap/upkeep/draw into
-    // their main1, drawing on the way.
+    // main2 -> end -> cleanup -> the turn passes; the new active player's
+    // untap runs on the way in and they land in their upkeep.
     s = applyAction(s, active, { type: "nextStep" });
     expect(s.step).toBe("end");
     s = applyAction(s, active, { type: "nextStep" });
     expect(s.activePlayerId).toBe(inactive);
     expect(s.priorityPlayerId).toBe(inactive);
-    expect(s.step).toBe("main1");
+    expect(s.step).toBe("upkeep");
     expect(s.turnNumber).toBe(1); // increments when it comes back to the starter
 
-    // Non-starting player DID draw on their turn-1 draw step (in the chain).
+    // Their draw step still draws when they reach it.
+    s = applyAction(s, inactive, { type: "nextStep" });
+    expect(s.step).toBe("draw");
     expect(player(s, inactive).zones.hand).toHaveLength(8);
   });
 
@@ -404,13 +454,14 @@ describe("turn structure", () => {
     s = applyAction(s, first, { type: "nextTurn" });
     expect(s.activePlayerId).toBe(second);
     expect(s.turnNumber).toBe(1);
-    expect(s.step).toBe("main1"); // v12: the incoming player auto-runs untap/upkeep/draw
+    // v15: untap grants no priority, so the incoming player lands in upkeep.
+    expect(s.step).toBe("upkeep");
     expect(() => applyAction(s, first, { type: "nextTurn" })).toThrow(EngineError);
 
     s = applyAction(s, second, { type: "nextTurn" });
     expect(s.activePlayerId).toBe(first);
     expect(s.turnNumber).toBe(2);
-    expect(s.step).toBe("main1");
+    expect(s.step).toBe("upkeep");
     // The returning active player's permanents untapped on their untap step.
     expect(player(s, first).zones.battlefield[0]!.tapped).toBe(false);
   });
@@ -640,11 +691,12 @@ describe("auto-advance the step/turn on a double pass with an empty stack (v14)"
     const active = g.activePlayerId;
     atStep(g, active, "main1");
     const s = bothPass(g);
-    // main1 -> beginCombat (transit) -> declareAttackers (manual, holds).
-    expect(s.step).toBe("declareAttackers");
+    // v15: every step is a real priority window, so main1 ends at the very
+    // next one — begin combat — instead of v12's transit skip to attackers.
+    expect(s.step).toBe("beginCombat");
     expect(s.activePlayerId).toBe(active);
     expect(s.priorityPasses).toBe(0);
-    expect(s.log.some((e) => /moved to the declareAttackers step/.test(e.message))).toBe(true);
+    expect(s.log.some((e) => /moved to the beginCombat step/.test(e.message))).toBe(true);
   });
 
   it("both players passing from the end step passes the turn, mirroring nextStep", () => {
@@ -652,12 +704,12 @@ describe("auto-advance the step/turn on a double pass with an empty stack (v14)"
     const active = g.activePlayerId;
     const inactive = other(g, active);
     atStep(g, active, "end");
-    const handBefore = player(g, inactive).zones.hand.length;
     const s = bothPass(g);
+    // end -> cleanup (no priority, CR 514.3) -> the turn passes -> untap (no
+    // priority, CR 502.4) -> upkeep, the first window the new player holds.
     expect(s.activePlayerId).toBe(inactive);
     expect(s.priorityPlayerId).toBe(inactive);
-    expect(s.step).toBe("main1");
-    expect(player(s, inactive).zones.hand).toHaveLength(handBefore + 1); // drew in the chain
+    expect(s.step).toBe("upkeep");
   });
 
   it("a stack that isn't empty is unaffected — that path still goes through auto-resolve, not step advance", () => {
@@ -1110,14 +1162,14 @@ describe("triggered abilities", () => {
         [theirsCardId]: mkScript("endStep", { kind: "gainLife", amount: 2 }),
       },
     };
-    while (s.step !== "end") s = applyAction(s, active, { type: "nextStep" }, 0, ctx);
+    s = walkTo(s, active, "end", ctx);
     // Only the active player's permanent triggered.
     expect(s.stack).toHaveLength(1);
     expect(s.stack[0]!.triggerSourceId).toBe(mine);
     expect(s.stack[0]!.controllerId).toBe(active);
   });
 
-  it("attack triggers fire on declaring only — not on un-declaring or redundant re-declares", () => {
+  it("attack triggers fire once at commit, however the declaration was toggled (v15)", () => {
     const g = newGame();
     const id = handCard(g, "p1");
     const cardId = player(g, "p1").zones.hand[0]!.cardId;
@@ -1125,19 +1177,32 @@ describe("triggered abilities", () => {
     let s = applyAction(g, "p1", { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx);
 
     atStep(s, "p1", "declareAttackers"); // v12: declarations live here
+    // v15 (CR 508.1m): nothing triggers while the window is open — the whole
+    // declaration is one turn-based action, so toggling is free.
     s = applyAction(s, "p1", { type: "setAttacking", instanceId: id, attacking: true }, 0, ctx);
-    expect(s.stack).toHaveLength(1);
-    // Redundant re-declare: no second trigger.
-    s = applyAction(s, "p1", { type: "setAttacking", instanceId: id, attacking: true }, 0, ctx);
-    expect(s.stack).toHaveLength(1);
-    // Un-declaring never fires.
+    expect(s.stack).toHaveLength(0);
+    expect(player(s, "p1").zones.battlefield[0]!.tapped).toBe(true); // CR 508.1f
+    // Taking it back also takes the attack tap back.
     s = applyAction(s, "p1", { type: "setAttacking", instanceId: id, attacking: false }, 0, ctx);
-    expect(s.stack).toHaveLength(1);
-    // Declaring again after un-declaring fires again (untap first — the
-    // original declaration auto-tapped the creature, v12).
-    s = applyAction(s, "p1", { type: "tapCard", instanceId: id, tapped: false }, 0, ctx);
+    expect(s.stack).toHaveLength(0);
+    expect(player(s, "p1").zones.battlefield[0]!.tapped).toBe(false);
+    // Re-declaring and committing fires exactly one trigger.
     s = applyAction(s, "p1", { type: "setAttacking", instanceId: id, attacking: true }, 0, ctx);
-    expect(s.stack).toHaveLength(2);
+    s = applyAction(s, "p1", { type: "commitAttackers" }, 0, ctx);
+    expect(s.stack).toHaveLength(1);
+    expect(s.stack[0]!.triggerSourceId).toBe(id);
+  });
+
+  it("committing an empty attack skips declare-blockers and combat-damage (CR 508.8)", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    atStep(g, active, "declareAttackers");
+    let s = applyAction(g, active, { type: "commitAttackers" });
+    expect(s.combat!.attackersDeclared).toBe(true);
+    expect(s.combat!.attackersThisCombat).toBe(0);
+    s = applyAction(s, active, { type: "nextStep" });
+    expect(s.step).toBe("endCombat");
+    expect(s.log.some((e) => /CR 508\.8/.test(e.message))).toBe(true);
   });
 
   it("castSpell triggers fire on the caster's own permanents, above the cast spell", () => {
@@ -1244,14 +1309,16 @@ describe("triggered abilities", () => {
         [bystanderCardId]: mkScript("combatDamageToPlayer", { kind: "scry", count: 1 }),
       },
     };
-    // v12: walk to declare-attackers (untap chains through main1), declare
-    // there, then blocks happen in declare-blockers.
-    while (s.step !== "declareAttackers") s = applyAction(s, active, { type: "nextStep" }, 0, ctx);
+    // v12: walk to declare-attackers, declare there, then blocks happen in
+    // declare-blockers. v15: the declaration is committed before the step ends.
+    s = walkTo(s, active, "declareAttackers", ctx);
     s = applyAction(s, active, { type: "setAttacking", instanceId: attacker1, attacking: true }, 0, ctx);
     s = applyAction(s, active, { type: "setAttacking", instanceId: attacker2, attacking: true }, 0, ctx);
+    s = applyAction(s, active, { type: "commitAttackers" }, 0, ctx);
     s = applyAction(s, active, { type: "nextStep" }, 0, ctx); // -> declareBlockers
     // attacker2 gets blocked; attacker1 is unblocked; bystander stays home.
     s = applyAction(s, inactive, { type: "setBlocking", instanceId: blocker, blocking: attacker2 }, 0, ctx);
+    s = applyAction(s, inactive, { type: "commitBlockers" }, 0, ctx);
 
     s = applyAction(s, active, { type: "nextStep" }, 0, ctx); // -> combatDamage
     const triggers = s.stack.filter((c) => c.isTrigger);
@@ -2018,9 +2085,10 @@ describe("targeted triggers, opponentDraws & amass (v6)", () => {
 
   it("the turn-based draw-step draw is exempt", () => {
     const { g, ctx } = bowSetup();
-    // v12: draw-step draws happen inside the turn-pass auto-run. Pass the
-    // turn twice so EACH player takes a draw-step draw; the exemption means
-    // neither draw fires the bow, so no transit step ever holds the chain.
+    // v15: draw-step draws happen inside the auto-pass chain. Pass the turn
+    // twice so EACH player takes a draw-step draw; the exemption means
+    // neither draw fires the bow, so nothing ever holds the chain.
+    g.autoPass = { p1: true, p2: true };
     let s = applyAction(g, g.activePlayerId, { type: "nextTurn" }, 0, ctx);
     expect(s.step).toBe("main1");
     s = applyAction(s, s.activePlayerId, { type: "nextTurn" }, 0, ctx);
@@ -2537,6 +2605,7 @@ describe("timing guardrails & transit automation (v12)", () => {
     expect(() => applyAction(s, "p2", { type: "setBlocking", instanceId: "blk1", blocking: "atk1" })).toThrow(
       /declare-blockers step/
     );
+    s = applyAction(s, "p1", { type: "commitAttackers" });
     s = applyAction(s, "p1", { type: "nextStep" }); // -> declareBlockers
     // The active player may not block.
     expect(() => applyAction(s, "p1", { type: "setBlocking", instanceId: "bys1", blocking: "atk1" })).toThrow(
@@ -2556,8 +2625,10 @@ describe("timing guardrails & transit automation (v12)", () => {
     expect(player(s, "p2").zones.battlefield.find((c) => c.instanceId === "blk1")!.blocking).toBe("atk1");
   });
 
-  it("game start: one nextStep chains untap -> upkeep -> draw (skipped) into main1", () => {
-    const g = newGame();
+  it("game start: auto-pass carries the starter untap -> upkeep -> draw (skipped) into main1", () => {
+    // v15: the chain is no longer a hardcoded transit list — every step here
+    // is a real priority window that both players auto-pass through.
+    const g = newAutoGame();
     const starter = g.activePlayerId;
     const s = applyAction(g, starter, { type: "nextStep" });
     expect(s.step).toBe("main1");
@@ -2567,7 +2638,23 @@ describe("timing guardrails & transit automation (v12)", () => {
   });
 
   it("an upkeep trigger HOLDS the chain; pass-pass-resolve resumes it into main1 (v11 interlock)", () => {
-    const g = newGame();
+    const g = newAutoGame();
+    const active = g.activePlayerId;
+    const id = handCard(g, active);
+    const cardId = player(g, active).zones.hand[0]!.cardId;
+    const ctx2 = { scripts: { [cardId]: mkScript("upkeep", { kind: "gainLife", amount: 3 }) } };
+    let s = applyAction(g, active, { type: "moveCard", instanceId: id, from: "hand", to: "battlefield" }, 0, ctx2);
+    s = applyAction(s, active, { type: "nextStep" }, 0, ctx2);
+    // v15: with auto-pass on and neither player able to respond, the upkeep
+    // trigger goes on the stack and resolves inside the same chain — the
+    // shortcut both players agreed to (CR 732), landing them in main1.
+    expect(player(s, active).life).toBe(23);
+    expect(s.stack).toHaveLength(0);
+    expect(s.step).toBe("main1");
+  });
+
+  it("holding full control stops on the upkeep trigger instead of auto-resolving it (v15)", () => {
+    const g = newGame(); // auto-pass off for both
     const active = g.activePlayerId;
     const id = handCard(g, active);
     const cardId = player(g, active).zones.hand[0]!.cardId;
@@ -2579,10 +2666,11 @@ describe("timing guardrails & transit automation (v12)", () => {
     expect(s.stack[0]!.isTrigger).toBe(true);
     // v11 interlock: the held trigger still needs both players to pass.
     expect(() => applyAction(s, active, { type: "resolveTopOfStack" }, 0, ctx2)).toThrow(/pass priority/);
-    s = bothPass(s, ctx2); // auto-resolves (v13) and resumes the transit chain
+    s = bothPass(s, ctx2); // auto-resolves (v13) on the second pass
     expect(player(s, active).life).toBe(23);
     expect(s.stack).toHaveLength(0);
-    expect(s.step).toBe("main1"); // the resolve resumed the auto-advance
+    // Still in upkeep — with full control held, nothing advances by itself.
+    expect(s.step).toBe("upkeep");
   });
 
   it("nextStep from main2 stops at the end step (the shared instant window)", () => {
@@ -2595,7 +2683,7 @@ describe("timing guardrails & transit automation (v12)", () => {
   });
 
   it("nextStep from the end step passes the turn; the opponent auto-runs to main1, drawing", () => {
-    const g = newGame();
+    const g = newAutoGame();
     const active = g.activePlayerId;
     const inactive = other(g, active);
     atStep(g, active, "end");
@@ -2607,8 +2695,8 @@ describe("timing guardrails & transit automation (v12)", () => {
     expect(player(s, inactive).zones.hand).toHaveLength(handBefore + 1); // drew in the chain
   });
 
-  it("a draw watcher (when {on:'draw', who:'you'}) holds the draw step mid-chain", () => {
-    const g = newGame();
+  it("a draw watcher (when {on:'draw', who:'you'}) fires on the turn-based draw mid-chain", () => {
+    const g = newAutoGame();
     const active = g.activePlayerId;
     const inactive = other(g, active);
     const watcher = mkCard(inactive, 730);
@@ -2630,15 +2718,215 @@ describe("timing guardrails & transit automation (v12)", () => {
     };
     const ctx2 = { scripts };
     atStep(g, active, "end");
-    let s = applyAction(g, active, { type: "nextStep" }, 0, ctx2);
+    const s = applyAction(g, active, { type: "nextStep" }, 0, ctx2);
+    // The watcher triggered on the draw-step draw and, with nobody able to
+    // respond, resolved inside the same chain (v15 auto-pass).
     expect(s.activePlayerId).toBe(inactive);
-    expect(s.step).toBe("draw"); // held mid-chain: the draw fired the watcher
-    expect(s.stack).toHaveLength(1);
-    expect(s.stack[0]!.triggerSourceId).toBe("wd1");
-    // Pass-pass-resolve (v11) applies the effect and resumes the chain.
-    s = bothPass(s, ctx2); // auto-resolves (v13)
     expect(player(s, inactive).life).toBe(21);
     expect(s.stack).toHaveLength(0);
     expect(s.step).toBe("main1");
+  });
+
+  it("a draw watcher holds the draw step for a player holding full control (v15)", () => {
+    const g = newGame(); // both holding full control
+    // The NON-starting player, so the turn-1 draw-step skip doesn't apply.
+    const active = other(g, g.activePlayerId);
+    const watcher = mkCard(active, 730);
+    watcher.cardId = "watchdraw";
+    watcher.instanceId = "wd1";
+    player(g, active).zones.battlefield.push(watcher);
+    const ctx2: ActionContext = {
+      scripts: {
+        watchdraw: {
+          triggers: [
+            {
+              event: "etb",
+              when: { on: "draw", who: "you" },
+              optional: false,
+              description: "you drew",
+              effect: { kind: "gainLife", amount: 1 },
+            },
+          ],
+        },
+      },
+    };
+    // Straight into the active player's own draw step: the turn-based draw
+    // fires their watcher, and with full control held nothing resolves it.
+    atStep(g, active, "upkeep");
+    const s = applyAction(g, active, { type: "nextStep" }, 0, ctx2);
+    expect(s.step).toBe("draw");
+    expect(s.stack).toHaveLength(1);
+    expect(s.stack[0]!.triggerSourceId).toBe("wd1");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v15
+// ---------------------------------------------------------------------------
+
+describe("turn flow, priority stops & auto-pass (v15)", () => {
+  /** A creature both players can see (so isCreature/eligibility works). */
+  function creatureData(id: string): CardData {
+    return { ...mkCardData(id), typeLine: "Creature — Bear", power: "2", toughness: "2" };
+  }
+
+  it("every step except untap and cleanup is a real priority window (CR 500.3)", () => {
+    const g = newGame(); // full control: nothing advances by itself
+    const active = g.activePlayerId;
+    // untap grants no priority, so a single nextStep lands in upkeep.
+    let s = applyAction(g, active, { type: "nextStep" });
+    expect(s.step).toBe("upkeep");
+    expect(s.priorityPlayerId).toBe(active);
+    // The non-active player can respond in the active player's upkeep — the
+    // thing v12's transit steps made impossible.
+    s = applyAction(s, active, { type: "passPriority" });
+    expect(s.priorityPlayerId).toBe(other(s, active));
+    expect(s.step).toBe("upkeep");
+  });
+
+  it("auto-pass carries a player with nothing to do, but stops in their own main phases", () => {
+    const g = newAutoGame();
+    const active = g.activePlayerId;
+    // One nextStep out of the opening untap runs the whole beginning phase.
+    let s = applyAction(g, active, { type: "nextStep" });
+    expect(s.step).toBe("main1");
+    expect(s.priorityPlayerId).toBe(active);
+    // Pressing Next in main1 (a plain pass) runs the whole combat phase:
+    // with no creatures there is no declaration to make, so the empty attack
+    // auto-commits, CR 508.8 skips blockers/damage, and main2 is the next stop.
+    s = applyAction(s, active, { type: "passPriority" });
+    expect(s.step).toBe("main2");
+    expect(s.priorityPlayerId).toBe(active);
+  });
+
+  it("stops for the attack declaration when a creature could attack, and taps it (CR 508.1f)", () => {
+    const g = newAutoGame();
+    const active = g.activePlayerId;
+    const bear = mkCard(active, 900);
+    bear.cardId = "bear";
+    bear.instanceId = "bear1";
+    player(g, active).zones.battlefield.push(bear);
+    const context: ActionContext = { cards: { bear: creatureData("bear") } };
+
+    atStep(g, active, "main1");
+    let s = applyAction(g, active, { type: "passPriority" }, 0, context);
+    // The flow stopped at the open declaration window instead of blowing past.
+    expect(s.step).toBe("declareAttackers");
+    expect(s.combat!.attackersDeclared).toBe(false);
+
+    s = applyAction(s, active, { type: "declareAllAttackers" }, 0, context);
+    expect(player(s, active).zones.battlefield[0]!.attacking).toBe(true);
+    expect(player(s, active).zones.battlefield[0]!.tapped).toBe(true);
+    expect(s.step).toBe("declareAttackers"); // still open — commit is separate
+
+    s = applyAction(s, active, { type: "clearAttackers" }, 0, context);
+    expect(player(s, active).zones.battlefield[0]!.attacking).toBe(false);
+    expect(player(s, active).zones.battlefield[0]!.tapped).toBe(false);
+  });
+
+  it("a declaration window blocks priority until it is committed", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    atStep(g, active, "declareAttackers");
+    expect(() => applyAction(g, active, { type: "passPriority" })).toThrow(/commit the attack/);
+    expect(() => applyAction(g, active, { type: "nextStep" })).toThrow(/Finish declaring attackers/);
+    const s = applyAction(g, active, { type: "commitAttackers" });
+    // CR 508.2: the active player receives priority once the declaration ends.
+    expect(s.priorityPlayerId).toBe(active);
+    expect(s.priorityPasses).toBe(0);
+    expect(() => applyAction(s, active, { type: "passPriority" })).not.toThrow();
+  });
+
+  it("blocker declarations hand priority to the ACTIVE player, not the declarer (CR 509.2)", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    const defender = other(g, active);
+    atStep(g, active, "declareBlockers");
+    const s = applyAction(g, defender, { type: "commitBlockers" });
+    expect(s.combat!.blockersDeclared).toBe(true);
+    expect(s.priorityPlayerId).toBe(active);
+  });
+
+  it("setAutoPass off holds full control; on resumes the flow", () => {
+    const g = newAutoGame();
+    const active = g.activePlayerId;
+    atStep(g, active, "end");
+    let s = applyAction(g, active, { type: "setAutoPass", enabled: false });
+    // Holding full control, the end step stays put.
+    expect(s.step).toBe("end");
+    expect(s.autoPass![active]).toBe(false);
+    s = applyAction(s, active, { type: "setAutoPass", enabled: true });
+    // Turning it back on immediately runs the flow through to the next stop.
+    expect(s.activePlayerId).toBe(other(g, active));
+    expect(s.step).toBe("main1");
+  });
+
+  it("the mulligan window holds the flow until both players keep", () => {
+    const g = newAutoGame();
+    const active = g.activePlayerId;
+    // An unrelated action must not start the turn while hands are being kept.
+    let s = applyAction(g, active, { type: "setLife", playerId: active, life: 20 });
+    expect(s.step).toBe("untap");
+    s = applyAction(s, active, { type: "keepHand", bottomCount: 0, bottomInstanceIds: [] });
+    expect(s.step).toBe("untap"); // one keep is not enough
+    s = applyAction(s, other(s, active), { type: "keepHand", bottomCount: 0, bottomInstanceIds: [] });
+    expect(s.openingHandKept).toEqual([active, other(s, active)]);
+    expect(s.step).toBe("main1"); // both kept — the turn starts
+  });
+});
+
+describe("untap restrictions (v15, CR 502.3)", () => {
+  it("a doesNotUntap permanent stays tapped through its controller's untap step", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    const vault = mkCard(active, 950);
+    vault.cardId = "vault";
+    vault.instanceId = "vault1";
+    vault.tapped = true;
+    const normal = mkCard(active, 951);
+    normal.cardId = "rock";
+    normal.instanceId = "rock1";
+    normal.tapped = true;
+    player(g, active).zones.battlefield.push(vault, normal);
+    const context: ActionContext = {
+      scripts: { vault: { triggers: [], replacements: [{ kind: "doesNotUntap" }] } },
+    };
+
+    // Round the turn back to this player's own untap step.
+    let s = applyAction(g, active, { type: "nextTurn" }, 0, context);
+    s = applyAction(s, other(s, active), { type: "nextTurn" }, 0, context);
+    expect(s.activePlayerId).toBe(active);
+    expect(player(s, active).zones.battlefield.find((c) => c.instanceId === "vault1")!.tapped).toBe(true);
+    expect(player(s, active).zones.battlefield.find((c) => c.instanceId === "rock1")!.tapped).toBe(false);
+    expect(s.log.some((e) => /did not untap/.test(e.message))).toBe(true);
+  });
+
+  it("a stun counter is removed instead of untapping (CR 701.53a)", () => {
+    const g = newGame();
+    const active = g.activePlayerId;
+    const stunned = mkCard(active, 960);
+    stunned.instanceId = "stun1";
+    stunned.tapped = true;
+    stunned.counters = { stun: 2 };
+    player(g, active).zones.battlefield.push(stunned);
+
+    let s = applyAction(g, active, { type: "nextTurn" });
+    s = applyAction(s, other(s, active), { type: "nextTurn" });
+    let card = player(s, active).zones.battlefield.find((c) => c.instanceId === "stun1")!;
+    expect(card.tapped).toBe(true);
+    expect(card.counters["stun"]).toBe(1);
+
+    // Next untap step: the last counter goes, still tapped.
+    s = applyAction(s, active, { type: "nextTurn" });
+    s = applyAction(s, other(s, active), { type: "nextTurn" });
+    card = player(s, active).zones.battlefield.find((c) => c.instanceId === "stun1")!;
+    expect(card.tapped).toBe(true);
+    expect(card.counters["stun"]).toBeUndefined();
+
+    // And the one after that it finally untaps.
+    s = applyAction(s, active, { type: "nextTurn" });
+    s = applyAction(s, other(s, active), { type: "nextTurn" });
+    card = player(s, active).zones.battlefield.find((c) => c.instanceId === "stun1")!;
+    expect(card.tapped).toBe(false);
   });
 });

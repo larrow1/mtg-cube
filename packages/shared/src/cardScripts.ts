@@ -764,16 +764,25 @@ function parseLine(line: string, self: string): CardTrigger[] {
 }
 
 /**
- * v10: parse one oracle line as a self-arrival replacement rule.
+ * v10: parse one oracle line as a self-modifying rule.
  *  - "~ enters the battlefield tapped." / "This land enters tapped."
  *    Anchored: "… tapped unless …" and other riders never match (conditional
  *    taps stay manual).
  *  - "~ enters the battlefield with N <word> counters on it." — number words
  *    only ("with X charge counters" fails parseCount and stays unmodeled).
+ *  - v15: "~ doesn't untap during your untap step." (CR 502.3). Anchored the
+ *    same way — a conditional rider ("unless you pay {2}") leaves the card
+ *    untapping normally, which is the safe direction: the player can re-tap
+ *    by hand, whereas a permanent wrongly held down is invisible.
  */
 function parseReplacement(line: string, self: string): ReplacementRule | null {
   if (new RegExp(`^(?:${self}) enters(?: the battlefield)? tapped\\.?$`, "i").test(line)) {
     return { kind: "entersTapped" };
+  }
+  if (
+    new RegExp(`^(?:${self}) doesn't untap during (?:your|its controller's) untap step\\.?$`, "i").test(line)
+  ) {
+    return { kind: "doesNotUntap" };
   }
   const m = line.match(
     new RegExp(

@@ -21,7 +21,7 @@ import type {
   TriggerEffect,
   ZoneName,
 } from "@mtg-cube/shared";
-import { canPayFor, effectNeedsTarget, effectTargetKinds, hasInstantSpeed, scriptFor } from "@mtg-cube/shared";
+import { describePrompt, effectNeedsTarget, effectTargetKinds, isCreatureCard, scriptFor } from "@mtg-cube/shared";
 import { call } from "../socket";
 import { useApp, type Session } from "../store";
 import { classifyRow, compareByCmcName, nameOf, randomSeed, type RowKind } from "../lib/cards";
@@ -313,8 +313,6 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
   const [blockSource, setBlockSource] = useState<string | null>(null);
   const [manaPicker, setManaPicker] = useState<ManaPickerState | null>(null);
   const [logOpen, setLogOpen] = useState(true);
-  const [autoMode, setAutoMode] = useState(false);
-  const lastAutoSeq = useRef(-1);
   /** v6: instanceId of the top-of-stack trigger awaiting a target choice. */
   const [targetingTrigger, setTargetingTrigger] = useState<string | null>(null);
   /** v8: a targeted spell waiting for its cast-time target (CR 601.2c). */
@@ -350,112 +348,12 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
     return active?.id ?? view.gameId;
   }, [room, session, view]);
 
-  /**
-   * v5 Auto mode (CR 500.2-inspired house rule): with nothing castable at
-   * instant speed (CR 117.1a instants, CR 702.8a flash) and an empty stack,
-   * the active player's non-decision steps advance themselves and the
-   * non-active player passes priority back. Suspended by anything on the
-   * stack, a pending search, the mulligan window, or a rejected action.
-   */
-  useEffect(() => {
-    if (!autoMode || !view || !session) return;
-    const gs = view.state;
-    const cards = view.cards;
-    if (gs.finished || gs.pendingSearch) return;
-    const me = gs.players.find((p) => p.playerId === session.playerId);
-    const opp = gs.players.find((p) => p.playerId !== session.playerId);
-    if (!me || !opp) return;
-    if (lastAutoSeq.current >= gs.seq) return;
-
-    // Mulligan window: same conditions the keep/mull banner uses.
-    const boardEmpty =
-      me.zones.battlefield.length === 0 &&
-      opp.zones.battlefield.length === 0 &&
-      me.zones.graveyard.length === 0;
-    if (gs.turnNumber === 1 && gs.step === "untap" && boardEmpty && !getMull(view).kept) return;
-
-    const canActNow = me.zones.hand.some((gc) => {
-      const d = cards[gc.cardId];
-      return d !== undefined && hasInstantSpeed(d) && canPayFor(d, me, cards);
-    });
-    const isUntappedCreature = (gc: GameCard): boolean => {
-      if (gc.tapped) return false;
-      const tl = gc.isToken
-        ? gc.tokenTypeLine ?? ""
-        : cards[gc.cardId]?.faces?.[0]?.typeLine ?? cards[gc.cardId]?.typeLine ?? "";
-      return /\bCreature\b/i.test(tl);
-    };
-
-    // v6: any possible action at all, for main-phase auto-advance — a castable
-    // card of any speed, an available land drop, or an activatable ability.
-    const hasAnyAction = (): boolean => {
-      for (const gc of me.zones.hand) {
-        const d = cards[gc.cardId];
-        if (!d) continue;
-        const tl = d.faces?.[0]?.typeLine ?? d.typeLine;
-        if (/\bLand\b/i.test(tl)) {
-          if (me.landsPlayedThisTurn < 1) return true;
-        } else if (canPayFor(d, me, cards)) {
-          return true;
-        }
-      }
-      for (const gc of me.zones.battlefield) {
-        if (gc.isToken || gc.faceDown) continue;
-        const d = cards[gc.cardId];
-        if (!d) continue;
-        const activated = scriptFor(d)?.activated ?? [];
-        if (activated.some((a) => !a.costTap || !gc.tapped)) return true;
-      }
-      return false;
-    };
-
-    let action: GameAction | null = null;
-    if (gs.stack.length > 0) {
-      // v13: the top of the stack resolves automatically the instant both
-      // players have passed in succession (CR 117.4) — the engine does this
-      // as part of the second passPriority action itself. Auto mode just
-      // needs to pass when holding priority with nothing to respond with;
-      // an entry still awaiting a fresh target choice stops the engine's
-      // auto-resolve too, and waits for that controller's manual pick.
-      if (gs.priorityPlayerId === me.playerId && !canActNow) {
-        action = { type: "passPriority" };
-      }
-    } else if (gs.activePlayerId === me.playerId) {
-      if (!canActNow) {
-        // v12: transit steps (upkeep/draw/beginCombat/endCombat/cleanup)
-        // auto-advance server-side, lingering only while a trigger holds the
-        // stack — handled by the stack branch above. Only MANUAL steps are
-        // auto-advance candidates here, plus untap for the game-start hold
-        // (createGame sits at untap until the first nextStep).
-        if (gs.step === "untap" || gs.step === "end") action = { type: "nextStep" };
-        else if (gs.step === "declareAttackers" && !me.zones.battlefield.some(isUntappedCreature)) {
-          action = { type: "nextStep" };
-        } else if (gs.step === "declareBlockers" && !opp.zones.battlefield.some(isUntappedCreature)) {
-          action = { type: "nextStep" };
-        } else if (gs.step === "combatDamage") {
-          action = { type: "nextStep" };
-        } else if ((gs.step === "main1" || gs.step === "main2") && !hasAnyAction()) {
-          // v6: truly nothing to do — main phases pass too, so empty turns
-          // hand themselves over completely.
-          action = { type: "nextStep" };
-        }
-      }
-    } else if (gs.priorityPlayerId === me.playerId && !canActNow) {
-      action = { type: "passPriority" };
-    }
-    if (!action) return;
-
-    const chosen = action;
-    const seq = gs.seq;
-    // Short beat so triggers/log stay readable as steps flow past.
-    const timer = window.setTimeout(() => {
-      lastAutoSeq.current = seq;
-      void call("gameAction", { matchId, action: chosen }).then((r) => {
-        if (!r.ok) setAutoMode(false); // engine disagreed — hand control back
-      });
-    }, 700);
-    return () => window.clearTimeout(timer);
-  }, [autoMode, view, session, matchId]);
+  // v15: Auto mode is gone from the client entirely. It used to be a 700ms
+  // timer that re-derived "can I act?" here and sent nextStep/passPriority on
+  // the player's behalf — a second copy of the rules that could disagree with
+  // the engine. The engine now owns it: `GameState.autoPass` (on by default)
+  // makes the flow driver pass for a player with no legal action, so both
+  // seats stay in sync and nothing depends on a client being open.
 
   // v6: cancel target selection whenever the trigger being targeted stops
   // being the top of the stack (resolved elsewhere, countered, superseded).
@@ -487,9 +385,15 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
   const isMyTurn = gs.activePlayerId === me.playerId && viewerIsPlayer;
   const haveIPriority = gs.priorityPlayerId === me.playerId && viewerIsPlayer;
   const canAct = viewerIsPlayer && !gs.finished;
-  // v11: toggles render only in their legal steps (server re-validates).
-  const canAttackToggle = canAct && isMyTurn && gs.step === "declareAttackers";
-  const canBlockToggle = canAct && !isMyTurn && gs.step === "declareBlockers";
+  // v15: declarations are only legal while their window is still open — once
+  // committed (CR 508.1k/509.1g) the choice is locked in for the combat.
+  const canAttackToggle =
+    canAct && isMyTurn && gs.step === "declareAttackers" && gs.combat?.attackersDeclared !== true;
+  const canBlockToggle =
+    canAct && !isMyTurn && gs.step === "declareBlockers" && gs.combat?.blockersDeclared !== true;
+  // v15: the single contextual action button, described by the engine.
+  const prompt = describePrompt(gs, me.playerId, cards);
+  const autoPassOn = gs.autoPass?.[me.playerId] !== false;
 
   // v4 pendingSearch: mine opens the blocking search modal; anyone else's
   // (opponent, or either player for spectators) shows the searching chip.
@@ -826,6 +730,14 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
         send({ type: "attach", instanceId: attachSource, targetInstanceId: gc.instanceId });
       }
       setAttachSource(null);
+      return;
+    }
+    // v15: while the attack declaration window is open, a plain click on one
+    // of your creatures toggles it into the attack (tapping it unless it has
+    // vigilance, CR 508.1f). This comes BEFORE the tap-for-mana branch — in
+    // the declare-attackers step, clicking a creature means "attack".
+    if (canAttackToggle && isCreatureCard(gc, cards)) {
+      send({ type: "setAttacking", instanceId: gc.instanceId, attacking: !gc.attacking });
       return;
     }
     // Untapped mana producers tap for mana on plain click: one color goes
@@ -1203,22 +1115,12 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
                     RANKED
                   </span>
                 )}
-                {viewerIsPlayer && !gs.finished && (
-                  <button
-                    type="button"
-                    onClick={() => setAutoMode((a) => !a)}
-                    className={`chip transition-colors duration-150 ${
-                      autoMode
-                        ? "border-emerald-400/60 font-black tracking-widest text-emerald-300 shadow-[0_0_10px_rgba(52,211,153,0.25)]"
-                        : "border-white/15 font-semibold tracking-widest text-zinc-400 hover:text-zinc-200"
-                    }`}
-                    title="Auto mode: steps advance and priority passes by themselves whenever you have no possible play — even main phases (and whole turns) pass when you have nothing castable, no land drop, and no ability to activate"
-                  >
-                    <span className={`h-1.5 w-1.5 rounded-full ${autoMode ? "animate-pulse bg-emerald-400" : "bg-zinc-600"}`} />
-                    AUTO {autoMode ? "ON" : "OFF"}
-                  </button>
-                )}
               </div>
+              {prompt.banner && (
+                <span className="chip animate-pop-in self-center border-brass-400/50 font-semibold text-brass-200">
+                  {prompt.banner}
+                </span>
+              )}
               {pendingSearch && !myPendingSearch && (
                 <span className="chip animate-pop-in self-center border-sky-400/50 font-semibold text-sky-300">
                   <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-400" />
@@ -1232,10 +1134,10 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
                 isMyTurn={isMyTurn}
                 haveIPriority={haveIPriority}
                 priorityPlayerName={nameFor(gs.priorityPlayerId)}
-                finished={gs.finished}
-                onNextStep={() => send({ type: "nextStep" })}
-                onNextTurn={() => send({ type: "nextTurn" })}
-                onPassPriority={() => send({ type: "passPriority" })}
+                prompt={prompt}
+                autoPass={autoPassOn}
+                onSend={send}
+                onToggleAutoPass={() => send({ type: "setAutoPass", enabled: !autoPassOn })}
               />
             </div>
           </div>

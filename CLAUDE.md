@@ -100,31 +100,48 @@ resolveTopOfStack throws until both players pass in succession, CR
 117.4-117.5; casting grants the caster priority) and direct spell-effect
 resolution (an instant/sorcery's onResolve effect applies in the SAME
 resolveTopOfStack action, CR 608 — no more synthetic effect entry);
-v12 timing guardrails & transit automation (lands/sorcery-speed casts only
-in your own main phases with an empty stack, CR 305.1/117.1a, override
-escape hatch; setAttacking/setBlocking locked to their steps with untapped
-checks, attackers auto-tap unless Vigilance, CR 508/509; transit steps
-untap/upkeep/draw/beginCombat/endCombat/cleanup auto-advance while the
-stack is empty — manual play lives in main1/combat/main2/end, turn-pass
-lands the opponent in main1 with upkeep+draw automated); v13 the second
+v12 timing guardrails (lands/sorcery-speed casts only in your own main
+phases with an empty stack, CR 305.1/117.1a, override escape hatch;
+setAttacking/setBlocking locked to their steps with untapped checks,
+attackers auto-tap unless Vigilance, CR 508/509); v13 the second
 passPriority auto-resolves the top of the stack itself (CR 117.4 —
 resolution isn't a separate click) unless it still needs a fresh target
 choice; counterTopOfStack's priority gate was removed (manual escape hatch,
-would otherwise be unreachable, folded into v12's STACK_EMPTYING_ACTIONS/
-autoAdvanceTransit interlock) and Auto mode simplifies to "just pass";
-v14 the second passPriority over an EMPTY stack now also auto-advances the
-step/turn itself (CR 500.4 — a manual step ends once both players decline
-to act in it, not just when the active player clicks nextStep/nextTurn);
-shared `advanceToNextStep` helper backs both the automatic and explicit
-paths;
-326 shared tests;
+would otherwise be unreachable); v14 the second passPriority over an EMPTY
+stack also ends the step (CR 500.2);
+**v15 turn-flow rewrite** — the turn structure is now DATA
+(`packages/shared/src/game/turnFlow.ts`: phase / grantsPriority / ribbon
+group per step) and ONE `runFlow` driver replaces v12's TRANSIT_STEPS,
+v13's and v14's inline branches, and the client's 700ms Auto-mode timer.
+EVERY step is a real priority window except untap and cleanup (CR
+500.3/502.4/514.3) — v12's transit steps made your own upkeep and
+begin-combat unreachable, a genuine rules bug. Quiet steps are skipped by
+engine-side auto-pass (`GameState.autoPass`, ON by default, `setAutoPass`
+= Arena's hold-full-control), with the active player's own main phases
+always a STOP. Attacker/blocker declarations are turn-based WINDOWS
+(`GameState.combat`) that block priority until `commitAttackers` /
+`commitBlockers`: attack triggers fire once at commit (CR 508.1m, no more
+double-fire on re-toggle), the attack tap is reversible while the window is
+open (CR 508.1f), and zero attackers skips declare-blockers + combat-damage
+(CR 508.8). `hasLegalAction` is the ONE "can I act now" definition (shared
+by auto-pass and the client); `describePrompt` drives the single contextual
+Next button. Untap honours `doesNotUntap` scripts + stun counters (CR
+502.3/701.53a — Mana Vault no longer untaps for free). Engine log lines may
+be `{playerId, message}` so steps of the opponent's turn are attributed to
+them, not to whoever acted;
+338 shared tests;
 Arena-style UI (draft lanes/drag-to-pick, deck builder, battlefield art
 tiles with color frames + keyword chips, mana symbols).
 
 The MTG Comprehensive Rules live in `docs/rules/` (plain text, split by
 section) — query them via the `mtg-rules` subagent instead of guessing rules.
 
-Roadmap (rough priority): extend targeting beyond damageAnyTarget (target
+Roadmap (rough priority): **combat damage** — the combatDamage step deals
+NO damage today (CR 510.1/510.2 assignment and the CR 704.5g lethal-damage
+state-based action are both unimplemented, so life totals and creature
+deaths in combat are still manual); v15 made the steps around that hole
+flow correctly, which makes it the most visible gap → extend targeting
+beyond damageAnyTarget (target
 creature/permanent effects — unlocks automating most remaining manual
 triggers) → task-level interception rules (draw substitution, damage
 prevention, trigger doubling — the interceptTasks hook is ready) → richer

@@ -17,7 +17,7 @@ corpus; it knows the layout below and returns exact rule numbers + text.
 | 400–408 | section-4-zones.md | 401 library, 402 hand, 403 battlefield, 405 **stack** |
 | 500–514 | section-5-turn-structure.md | 505 **main phase (land plays)**, 506–511 combat steps, 512 end step, 514 cleanup |
 | 600–616 | section-6-spells-abilities-effects.md | 601 **casting spells**, 602 activated abilities, 603 triggered abilities, 605 mana abilities, 608 resolution, 614 replacement effects |
-| 700–730 | section-7-additional-rules.md | 701 keyword actions, 702 **keyword abilities (702.8 flash, 702.20 haste…)**, 704 state-based actions, 716 shortcuts |
+| 700–730 | section-7-additional-rules.md | 701 keyword actions, 702 **keyword abilities (702.8 flash, 702.20 haste…)**, 704 state-based actions, 732 shortcuts, 733 illegal actions |
 | 800–811 | section-8-multiplayer-rules.md | multiplayer variants |
 | 900–905 | section-9-casual-variants.md | casual variants |
 | Glossary | glossary.md | term definitions A–Z |

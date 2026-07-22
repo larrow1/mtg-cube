@@ -59,6 +59,7 @@ import type {
   CardData,
   CardScript,
   CardTrigger,
+  CombatState,
   EffectTask,
   EventCardFilter,
   GameAction,
@@ -78,6 +79,7 @@ import type {
 import { TURN_STEPS } from "../types.js";
 import { createRng, shuffle } from "../rng.js";
 import {
+  canPayFor,
   describePoolSpend,
   hasInstantSpeed,
   manaSourcesOf,
@@ -85,39 +87,23 @@ import {
   parsedCostSize,
   planManaPayment,
 } from "./mana.js";
+import { STEP_INFO, isMainPhase, nextStepFrom } from "./turnFlow.js";
 
 /**
- * v12: TRANSIT steps run themselves — entering one performs its turn-based
- * actions and trigger emission, then auto-advances while the stack stays
- * empty. MANUAL steps (main1, declareAttackers, declareBlockers,
- * combatDamage, main2, end) hold for player decisions.
+ * v15: how far the flow driver will carry a single action before giving up.
+ * A full turn with both players auto-passing is roughly 25 iterations; 200
+ * is a runaway backstop, not a working limit.
  */
-const TRANSIT_STEPS: ReadonlySet<TurnStep> = new Set([
-  "untap",
-  "upkeep",
-  "draw",
-  "beginCombat",
-  "endCombat",
-  "cleanup",
-]);
+const FLOW_GUARD = 200;
 
 /**
- * Actions that can empty the stack and so resume a held transit step.
- * passPriority is NOT listed here even though v13's auto-resolve can empty
- * the stack as a side effect of the second pass — unlike the others, most
- * passPriority calls resolve nothing at all (holding priority with an empty
- * stack is the common case), and autoAdvanceTransit would incorrectly fire
- * on every one of them, re-entering the current transit step and resetting
- * priorityPlayerId out from under the pass that just happened. Instead the
- * passPriority case below calls autoAdvanceTransit itself, ONLY when its
- * own auto-resolve actually ran.
+ * One pending log entry. A bare string is attributed to whoever took the
+ * action (the overwhelmingly common case). The object form names the player
+ * the message is ABOUT — v15's flow driver can advance several steps of the
+ * OTHER player's turn inside one action, and "Bo moved to the upkeep step"
+ * during Ada's turn is simply wrong.
  */
-const STACK_EMPTYING_ACTIONS: ReadonlySet<GameAction["type"]> = new Set([
-  "resolveTopOfStack",
-  "counterTopOfStack",
-  "declineTrigger",
-  "completeSearch",
-]);
+type LogLine = string | { playerId: string | null; message: string };
 
 export class EngineError extends Error {
   constructor(message: string) {
@@ -198,6 +184,25 @@ function emptyZones(): Record<ZoneName, GameCard[]> {
   };
 }
 
+/** v15: a closed pair of combat declaration windows (no combat in progress). */
+function freshCombat(): CombatState {
+  return { attackersDeclared: false, blockersDeclared: false, attackersThisCombat: 0 };
+}
+
+/**
+ * v15: fill in flow fields that states serialized before v15 don't carry, so
+ * an in-flight game keeps working across a deploy. Called once per action on
+ * the freshly cloned state, before anything reads them.
+ */
+function ensureFlowState(s: GameState): void {
+  s.combat ??= freshCombat();
+  s.openingHandKept ??= [];
+  if (!s.autoPass) {
+    // Absent = the pre-v15 default, which is what v15 defaults to anyway.
+    s.autoPass = { [s.players[0].playerId]: true, [s.players[1].playerId]: true };
+  }
+}
+
 /** Normalize a deck card into a clean library card. */
 function freshCard(card: GameCard, ownerId: string): GameCard {
   return {
@@ -260,6 +265,10 @@ export function createGame(
     startingPlayerId,
     finished: false,
     winnerId: null,
+    combat: freshCombat(),
+    // v15: auto-pass is ON for both players by default (CR 732 shortcut).
+    autoPass: { [states[0].playerId]: true, [states[1].playerId]: true },
+    openingHandKept: [],
     seq: 0,
     log: [
       {
@@ -310,9 +319,10 @@ export function applyAction(
   }
 
   const s = structuredClone(state);
+  ensureFlowState(s);
   const actor = s.players[actorIdx]!;
   const opponent = s.players[actorIdx === 0 ? 1 : 0]!;
-  const logs: string[] = [];
+  const logs: LogLine[] = [];
   // v11: track consecutive priority passes since the stack's top last changed
   // (CR 117.4). Anything that pushes a new object onto the stack — a cast,
   // a trigger matched by runTriggerMatching below, the admin spawnCard-to-stack
@@ -629,6 +639,11 @@ export function applyAction(
       if (s.activePlayerId !== actorId) {
         throw new EngineError("Only the active player declares attackers (CR 508.1).");
       }
+      // v15: the declaration is a single turn-based action — once committed
+      // it is locked in for the combat (CR 508.1k/506.4a).
+      if (s.combat!.attackersDeclared) {
+        throw new EngineError("Attackers are already declared this combat (CR 508.1k).");
+      }
       const card = findControlled(actor, action.instanceId, ["battlefield"]);
       const wasAttacking = card.attacking;
       if (action.attacking && !wasAttacking && card.tapped) {
@@ -636,23 +651,56 @@ export function applyAction(
       }
       card.attacking = action.attacking;
       logs.push(`${action.attacking ? "declared" : "removed"} ${cardLabel(card)} as an attacker`);
-      if (action.attacking && !wasAttacking && !hasVigilance(card)) {
-        card.tapped = true;
-        logs.push(`${cardLabel(card)} taps as it attacks`);
-        emitEvent({ kind: "becameTapped", instanceId: card.instanceId, controllerId: card.controllerId });
+      // CR 508.1f: tapping to attack is not a cost, so taking the attack back
+      // while the window is still open takes the tap back with it.
+      if (!hasVigilance(card) && action.attacking !== wasAttacking) {
+        card.tapped = action.attacking;
+        if (action.attacking) {
+          logs.push(`${cardLabel(card)} taps as it attacks`);
+          emitEvent({ kind: "becameTapped", instanceId: card.instanceId, controllerId: card.controllerId });
+        }
       }
-      // Attack events fire on declaring only (never on un-declaring, and
-      // not again when a redundant setAttacking(true) repeats the state).
-      if (action.attacking && !wasAttacking) {
-        const firstThisCombat = s.attackDeclaredThisCombat !== true;
-        s.attackDeclaredThisCombat = true;
-        emitEvent({
-          kind: "attackDeclared",
-          instanceId: card.instanceId,
-          controllerId: card.controllerId,
-          firstThisCombat,
-        });
+      // v15: the attackDeclared event fires at commitAttackers, once, for the
+      // whole declaration (CR 508.1m) — not per click, which double-fired
+      // "whenever this attacks" triggers whenever a player changed their mind.
+      break;
+    }
+
+    case "commitAttackers": {
+      requireOpenAttackWindow(s, actorId);
+      commitDeclaration(s, "attackers", logs);
+      break;
+    }
+
+    case "declareAllAttackers": {
+      requireOpenAttackWindow(s, actorId);
+      const added: string[] = [];
+      for (const card of actor.zones.battlefield) {
+        if (card.attacking || card.tapped || !isCreature(card)) continue;
+        card.attacking = true;
+        added.push(cardLabel(card));
+        if (!hasVigilance(card)) {
+          card.tapped = true;
+          emitEvent({ kind: "becameTapped", instanceId: card.instanceId, controllerId: card.controllerId });
+        }
       }
+      logs.push(
+        added.length === 0 ? "had no creatures able to attack" : `sent ${added.join(", ")} to attack`
+      );
+      break;
+    }
+
+    case "clearAttackers": {
+      requireOpenAttackWindow(s, actorId);
+      let removed = 0;
+      for (const card of actor.zones.battlefield) {
+        if (!card.attacking) continue;
+        card.attacking = false;
+        removed += 1;
+        // CR 508.1f: the attack tap was never a cost, so it comes back off.
+        if (!hasVigilance(card)) card.tapped = false;
+      }
+      logs.push(removed === 0 ? "cleared the attack (nothing was declared)" : "took back the whole attack");
       break;
     }
 
@@ -665,6 +713,9 @@ export function applyAction(
       }
       if (s.activePlayerId === actorId) {
         throw new EngineError("Only the defending player declares blockers (CR 509.1).");
+      }
+      if (s.combat!.blockersDeclared) {
+        throw new EngineError("Blockers are already declared this combat (CR 509.1g).");
       }
       const card = findControlled(actor, action.instanceId, ["battlefield"]);
       if (action.blocking !== null) {
@@ -685,6 +736,28 @@ export function applyAction(
           ? `removed ${cardLabel(card)} from blocking`
           : `declared ${cardLabel(card)} as a blocker`
       );
+      break;
+    }
+
+    case "commitBlockers": {
+      if (s.step !== "declareBlockers") {
+        throw new EngineError("Blockers are declared during the declare-blockers step (CR 509.1).");
+      }
+      if (s.activePlayerId === actorId) {
+        throw new EngineError("Only the defending player declares blockers (CR 509.1).");
+      }
+      if (s.combat!.blockersDeclared) {
+        throw new EngineError("Blockers are already declared this combat (CR 509.1g).");
+      }
+      commitDeclaration(s, "blockers", logs);
+      break;
+    }
+
+    case "setAutoPass": {
+      // v15 (CR 732): the player's own shortcut setting. Turning it off is
+      // "hold full control" — every priority window will stop for them.
+      s.autoPass = { ...s.autoPass, [actorId]: action.enabled };
+      logs.push(action.enabled ? "turned auto-pass on" : "turned auto-pass off (holding full control)");
       break;
     }
 
@@ -728,21 +801,32 @@ export function applyAction(
           ? "kept their hand"
           : `kept their hand, putting ${bottomCount} card${bottomCount === 1 ? "" : "s"} on the bottom`
       );
+      // v15: the flow driver holds at turn-1 untap until BOTH players have
+      // kept, so nothing advances underneath the mulligan UI.
+      if (!s.openingHandKept!.includes(actorId)) s.openingHandKept!.push(actorId);
       break;
     }
 
     case "nextStep": {
+      // Explicit "skip ahead" shortcut for the active player — the ordinary
+      // route out of a step is both players passing (CR 500.2), which the
+      // flow driver handles. An open declaration window must be committed
+      // first, or the declaration would be silently skipped.
       requireActive(s, actorId, "nextStep");
+      if (openDeclaration(s)) {
+        throw new EngineError(
+          s.step === "declareAttackers"
+            ? "Finish declaring attackers first (CR 508.1)."
+            : "Blockers are still being declared (CR 509.1)."
+        );
+      }
       advanceToNextStep(s, logs);
-      // v12: flow through transit steps until a manual step or a held trigger.
-      autoAdvanceTransit(s, logs);
       break;
     }
 
     case "nextTurn": {
       requireActive(s, actorId, "nextTurn");
       advanceTurn(s, logs);
-      autoAdvanceTransit(s, logs);
       break;
     }
 
@@ -750,35 +834,17 @@ export function applyAction(
       if (s.priorityPlayerId !== actorId) {
         throw new EngineError("You do not have priority");
       }
-      s.priorityPlayerId = opponent.playerId;
-      s.priorityPasses = Math.min(2, s.priorityPasses + 1);
-      logs.push("passed priority");
-      // v13 (CR 117.4): once both players have passed in succession, the top
-      // of the stack resolves automatically — no separate click needed.
-      // Exception: an entry still awaiting a FRESH target choice (no
-      // chosenTarget from cast time) stops here for its controller to pick.
-      if (s.priorityPasses >= 2 && s.stack.length > 0 && !topNeedsFreshTarget(s)) {
-        resolveStackTop(s, s.activePlayerId, { type: "resolveTopOfStack" }, logs);
-        // v12 integration: if that resolution emptied the stack during a
-        // held transit step, resume the auto-advance (see STACK_EMPTYING_ACTIONS
-        // — passPriority is deliberately excluded from that blanket set so
-        // this only fires when auto-resolve actually did something).
-        autoAdvanceTransit(s, logs);
-      } else if (
-        s.priorityPasses >= 2 &&
-        s.stack.length === 0 &&
-        !s.finished &&
-        !s.pendingSearch &&
-        !s.players.some((p) => p.hasLost)
-      ) {
-        // v14 (CR 500.4/117.5): both players passed with nothing on the
-        // stack — the current step/phase ends on its own, no explicit
-        // nextStep/nextTurn click required. Mirrors the nextStep action's
-        // own advance logic, then lets autoAdvanceTransit chain through any
-        // following transit steps exactly as nextStep already does.
-        advanceToNextStep(s, logs);
-        autoAdvanceTransit(s, logs);
+      // v15: a declaration window is a turn-based action, not a priority
+      // window — nobody holds priority until it closes (CR 508.1/509.1).
+      const pending = openDeclaration(s);
+      if (pending) {
+        throw new EngineError(
+          pending.kind === "attackers"
+            ? "Attackers are still being declared — commit the attack first (CR 508.1)."
+            : "Blockers are still being declared — commit the blocks first (CR 509.1)."
+        );
       }
+      passPriorityFor(s, actorId, logs, false);
       break;
     }
 
@@ -944,18 +1010,19 @@ export function applyAction(
   // (CR 117.4).
   if (s.stack.length > stackLenBefore) s.priorityPasses = 0;
 
-  // v12: a stack-emptying action during a held transit step resumes the
-  // auto-advance (its own events were just matched — anything they pushed
-  // onto the stack holds the step again). passPriority is included because
-  // v13's own auto-resolve (above) can empty the stack as a side effect of
-  // the second pass, not just an explicit resolve/counter/decline/search.
-  if (STACK_EMPTYING_ACTIONS.has(action.type)) {
-    autoAdvanceTransit(s, logs);
-  }
+  // v15: ONE flow driver, run after every action. It completes priority-less
+  // steps, closes empty declaration windows, auto-passes for players with
+  // nothing to do, and resolves the stack when both have passed — replacing
+  // v12's transit chain, v13's inline auto-resolve and v14's inline advance.
+  runFlow(s, logs);
 
   s.seq += 1;
-  for (const message of logs) {
-    s.log.push({ seq: s.seq, playerId: actorId, message, ts: now });
+  for (const line of logs) {
+    if (typeof line === "string") {
+      s.log.push({ seq: s.seq, playerId: actorId, message: line, ts: now });
+    } else {
+      s.log.push({ seq: s.seq, playerId: line.playerId, message: line.message, ts: now });
+    }
   }
   runStateBasedChecks(s, now);
   return s;
@@ -1069,7 +1136,7 @@ function arriveOnBattlefield(
   card: GameCard,
   controller: PlayerGameState,
   from: ZoneName | null,
-  logs: string[],
+  logs: LogLine[],
   opts?: { entersTapped?: boolean }
 ): void {
   card.controllerId = controller.playerId;
@@ -1123,7 +1190,7 @@ function spawnTokens(
   s: GameState,
   owner: PlayerGameState,
   opts: { name: string; typeLine: string; power?: string; toughness?: string; count: number; tapped: boolean },
-  logs: string[],
+  logs: LogLine[],
   logPrefix = ""
 ): void {
   const seq = s.seq + 1;
@@ -1300,7 +1367,7 @@ function pushTriggerCard(
   source: GameCard,
   controllerId: string,
   t: CardTrigger,
-  logs: string[]
+  logs: LogLine[]
 ): void {
   const trigger: GameCard = {
     instanceId: `tr${s.seq + 1}-${triggerCounter++}`,
@@ -1337,7 +1404,7 @@ function pushTriggerCard(
  * Preserved rule: on a death, a script whose dies condition matched fires only
  * dies — its matching leavesBattlefield conditions are suppressed.
  */
-function runTriggerMatching(s: GameState, logs: string[]): void {
+function runTriggerMatching(s: GameState, logs: LogLine[]): void {
   const buffered = events;
   events = [];
   if (!ctx.scripts || buffered.length === 0) return;
@@ -1470,7 +1537,7 @@ function resolveEffectTarget(
   actorId: string,
   action: Extract<GameAction, { type: "resolveTopOfStack" }>,
   label: string,
-  logs: string[]
+  logs: LogLine[]
 ): TargetRef | undefined {
   if (!effectNeedsTarget(effect)) return undefined;
   if (action.target) {
@@ -1500,7 +1567,7 @@ function resolveEffectTarget(
 function resolveTrigger(
   s: GameState,
   trigger: GameCard,
-  logs: string[],
+  logs: LogLine[],
   actorId: string,
   action: Extract<GameAction, { type: "resolveTopOfStack" }>
 ): void {
@@ -1551,7 +1618,7 @@ function resolveStackTop(
   s: GameState,
   actorId: string,
   action: Extract<GameAction, { type: "resolveTopOfStack" }>,
-  logs: string[]
+  logs: LogLine[]
 ): void {
   const card = s.stack.pop();
   if (!card) throw new EngineError("The stack is empty");
@@ -1620,7 +1687,7 @@ function applyEffect(
   effect: TriggerEffect,
   label: string,
   sourceId: string | undefined,
-  logs: string[],
+  logs: LogLine[],
   target?: TargetRef
 ): void {
   runTasks(s, compileEffect(controller, opponent, effect, label, sourceId, target), logs);
@@ -1720,7 +1787,7 @@ function interceptTasks(_s: GameState, tasks: EffectTask[]): EffectTask[] {
 }
 
 /** Run a compiled task list: intercept, then execute (coalescing draw/token runs for log parity). */
-function runTasks(s: GameState, tasks: EffectTask[], logs: string[]): void {
+function runTasks(s: GameState, tasks: EffectTask[], logs: LogLine[]): void {
   const finalTasks = interceptTasks(s, tasks);
   let i = 0;
   while (i < finalTasks.length) {
@@ -1789,7 +1856,7 @@ function runTasks(s: GameState, tasks: EffectTask[], logs: string[]): void {
 }
 
 /** Execute one primitive task. Missing/stale referents fizzle with a log. */
-function executeTask(s: GameState, t: EffectTask, logs: string[]): void {
+function executeTask(s: GameState, t: EffectTask, logs: LogLine[]): void {
   switch (t.task) {
     case "draw":
     case "createToken":
@@ -1920,7 +1987,7 @@ function applyMoveCard(
   s: GameState,
   actor: PlayerGameState,
   action: Extract<GameAction, { type: "moveCard" }>,
-  logs: string[]
+  logs: LogLine[]
 ): void {
   const { instanceId, from } = action;
   let to = action.to;
@@ -2121,7 +2188,7 @@ function enforceCastFromHand(
   card: GameCard,
   to: "stack" | "battlefield",
   override: boolean,
-  logs: string[]
+  logs: LogLine[]
 ): void {
   const typeLine = frontTypeLine(card);
   const isLand = typeLine !== undefined && /\bLand\b/i.test(typeLine);
@@ -2284,49 +2351,364 @@ function castFilterMatches(
 }
 
 /**
- * v12: while the current step is TRANSIT and nothing needs a player (empty
- * stack, no search, nobody lost), keep advancing — cleanup advances the turn.
- * Trigger matching runs INSIDE the loop so triggers emitted by a step land on
- * the stack before the continue/hold decision (the v9 end-of-action pass
- * would otherwise decide too late). The guard bounds runaway chains.
+ * Advance from the current step to the next one, honouring CR 508.8's skip
+ * (see `nextStepFrom`). Leaving cleanup ends the turn.
  */
-/** Advance from the current step to the next one (cleanup ends the turn). */
-function advanceToNextStep(s: GameState, logs: string[]): void {
-  if (s.step === "cleanup") {
+function advanceToNextStep(s: GameState, logs: LogLine[]): void {
+  const next = nextStepFrom(s);
+  // CR 511.3: everything is removed from combat as soon as the end of combat
+  // step ENDS — after any "at end of combat" window, before the next step.
+  if (s.step === "endCombat") removeFromCombat(s);
+  if (next === null) {
     advanceTurn(s, logs);
-  } else {
-    const idx = TURN_STEPS.indexOf(s.step);
-    const next = TURN_STEPS[idx + 1];
-    if (next === undefined) throw new EngineError(`Cannot advance past step "${s.step}"`);
-    enterStep(s, next, logs);
+    return;
+  }
+  if (next === "endCombat" && s.step === "declareAttackers") {
+    logs.push({
+      playerId: s.activePlayerId,
+      message: "declared no attackers — skipping the declare-blockers and combat-damage steps (CR 508.8)",
+    });
+  }
+  enterStep(s, next, logs);
+}
+
+/** Shared guard for the three attack-declaration actions (CR 508.1). */
+function requireOpenAttackWindow(s: GameState, actorId: string): void {
+  if (s.step !== "declareAttackers") {
+    throw new EngineError("Attackers are declared during the declare-attackers step (CR 508.1).");
+  }
+  if (s.activePlayerId !== actorId) {
+    throw new EngineError("Only the active player declares attackers (CR 508.1).");
+  }
+  if (s.combat!.attackersDeclared) {
+    throw new EngineError("Attackers are already declared this combat (CR 508.1k).");
   }
 }
 
-function autoAdvanceTransit(s: GameState, logs: string[]): void {
-  let guard = 0;
-  for (;;) {
-    runTriggerMatching(s, logs);
-    if (
-      guard++ > 30 ||
-      s.finished ||
-      s.pendingSearch ||
-      s.stack.length > 0 ||
-      !TRANSIT_STEPS.has(s.step) ||
-      s.players.some((p) => p.hasLost)
-    ) {
-      return;
-    }
-    if (s.step === "cleanup") {
-      advanceTurn(s, logs);
-    } else {
-      const next = TURN_STEPS[TURN_STEPS.indexOf(s.step) + 1]!;
-      enterStep(s, next, logs);
+/** CR 506.4/511.3: clear every creature's attacking/blocking state. */
+function removeFromCombat(s: GameState): void {
+  for (const p of s.players) {
+    for (const c of p.zones.battlefield) {
+      c.attacking = false;
+      c.blocking = null;
     }
   }
+}
+
+/**
+ * CR 502.3 turn-based action: "the active player determines which permanents
+ * they control will untap. Then they untap them all simultaneously. Normally,
+ * all of a player's permanents untap, but effects can keep one or more of a
+ * player's permanents from untapping."
+ *
+ * Two restrictions are modelled, both declarative:
+ *  - a `doesNotUntap` replacement rule on the card's own script (printed
+ *    "this permanent doesn't untap during your untap step" text), and
+ *  - stun counters (CR 701.53a): a permanent with one untaps by removing a
+ *    stun counter instead.
+ */
+function untapStep(active: PlayerGameState, logs: LogLine[]): void {
+  const held: string[] = [];
+  const stunned: string[] = [];
+  for (const c of active.zones.battlefield) {
+    if (!c.tapped) continue;
+    if (untapRestricted(c)) {
+      held.push(cardLabel(c));
+      continue;
+    }
+    const stun = c.counters["stun"] ?? 0;
+    if (stun > 0) {
+      // CR 701.53a: removing the counter REPLACES the untap.
+      if (stun === 1) delete c.counters["stun"];
+      else c.counters["stun"] = stun - 1;
+      stunned.push(cardLabel(c));
+      continue;
+    }
+    c.tapped = false;
+  }
+  if (held.length > 0) {
+    logs.push({ playerId: active.playerId, message: `${held.join(", ")} did not untap` });
+  }
+  if (stunned.length > 0) {
+    logs.push({
+      playerId: active.playerId,
+      message: `${stunned.join(", ")} stayed tapped, removing a stun counter instead (CR 701.53a)`,
+    });
+  }
+}
+
+/** Does this permanent's own script keep it from untapping (CR 502.3)? */
+function untapRestricted(card: GameCard): boolean {
+  const rules = ctx.scripts?.[card.cardId]?.replacements ?? [];
+  return rules.some((r) => r.kind === "doesNotUntap");
+}
+
+// ---------------------------------------------------------------------------
+// v15: the flow driver — ONE mechanism where v12/v13/v14 had three
+// ---------------------------------------------------------------------------
+
+/**
+ * Is the turn-1 mulligan window still open? While it is, the flow driver does
+ * nothing at all: no step advances, no priority passes, nothing runs
+ * underneath the keep/mulligan UI. It closes as soon as both players have
+ * kept — or the moment anything leaves the untap step by another route (an
+ * explicit `nextStep`, or a test driving the state directly).
+ */
+function openingWindowOpen(s: GameState): boolean {
+  return (
+    s.turnNumber === 1 &&
+    s.step === "untap" &&
+    // The very FIRST untap of the game — not the second player's turn-1 untap,
+    // which is an ordinary step the flow should walk straight through.
+    s.activePlayerId === s.startingPlayerId &&
+    (s.openingHandKept?.length ?? 0) < 2
+  );
+}
+
+/** v15: auto-pass is opt-OUT — an absent flag means on. */
+function autoPassOn(s: GameState, playerId: string): boolean {
+  return s.autoPass?.[playerId] !== false;
+}
+
+/**
+ * v15: which player, if either, currently owes a combat declaration. CR
+ * 508.1/509.1 make declaring a TURN-BASED action, so while a window is open
+ * nobody has priority and the step cannot end.
+ */
+function openDeclaration(s: GameState): { kind: "attackers" | "blockers"; playerId: string } | null {
+  const combat = s.combat;
+  if (!combat) return null;
+  if (s.step === "declareAttackers" && !combat.attackersDeclared) {
+    return { kind: "attackers", playerId: s.activePlayerId };
+  }
+  if (s.step === "declareBlockers" && !combat.blockersDeclared) {
+    const defender = s.players.find((p) => p.playerId !== s.activePlayerId);
+    if (defender) return { kind: "blockers", playerId: defender.playerId };
+  }
+  return null;
+}
+
+/**
+ * Does this open declaration window need a human? Auto-pass may only close a
+ * window that offers no decision at all — nothing already declared AND
+ * nothing left that could be declared. Once a player has put even one
+ * creature in, the commit is always theirs to make: the tap happens as you
+ * click (CR 508.1f), so "everything I own is now tapped" must not be mistaken
+ * for "I have nothing to decide" and confirm the attack out from under them.
+ */
+export function declarationNeedsPlayer(
+  s: GameState,
+  playerId: string,
+  kind: "attackers" | "blockers"
+): boolean {
+  const p = s.players.find((x) => x.playerId === playerId);
+  if (!p) return false;
+  const alreadyDeclared = p.zones.battlefield.some((c) =>
+    kind === "attackers" ? c.attacking : c.blocking !== null
+  );
+  if (alreadyDeclared) return true;
+  // Nothing to block if nothing is attacking.
+  if (kind === "blockers" && !anyAttackers(s)) return false;
+  return p.zones.battlefield.some((c) => !c.tapped && isCreature(c));
+}
+
+function anyAttackers(s: GameState): boolean {
+  return s.players.some((p) => p.zones.battlefield.some((c) => c.attacking));
+}
+
+/** Type-line creature check (token-aware); false without card data. */
+function isCreature(card: GameCard): boolean {
+  const tl = typeLineOfCard(card);
+  return tl !== undefined && /\bCreature\b/i.test(tl);
+}
+
+/**
+ * v15: "stops" — priority windows the engine never auto-passes through, even
+ * with nothing to do. The active player always gets a beat in their own main
+ * phases, which is what makes the single Next button meaningful (main1 →
+ * combat is a deliberate press, not something the flow blows past).
+ * Everything else is governed by `hasLegalAction`.
+ */
+function isStop(s: GameState, playerId: string): boolean {
+  return playerId === s.activePlayerId && isMainPhase(s.step) && s.stack.length === 0;
+}
+
+/**
+ * v15: does this player have ANY action available right now? This is the one
+ * definition of "can act", shared by the engine's auto-pass and the client's
+ * action button — before v15 the client kept its own copy and the two could
+ * disagree.
+ *
+ * Deliberately CONSERVATIVE where the engine can't tell: without card data
+ * (a context-less engine) nothing can be classified as castable, so this
+ * returns false and auto-pass keeps the game flowing. Casting itself stays
+ * permissive in that situation, exactly as v5 cost enforcement does — a
+ * player can still act manually, they just aren't waited for.
+ */
+export function hasLegalAction(s: GameState, playerId: string, context: ActionContext = ctx): boolean {
+  const p = s.players.find((x) => x.playerId === playerId);
+  if (!p || p.hasLost || s.finished) return false;
+
+  // A target choice this player owes is an action — never auto-pass past it,
+  // or the stack would deadlock at priorityPasses 2 with nothing resolving.
+  const top = s.stack[s.stack.length - 1];
+  if (top && top.controllerId === playerId && topNeedsFreshTarget(s)) return true;
+
+  const cards = context.cards;
+  if (!cards) return false;
+
+  const isActive = s.activePlayerId === playerId;
+  const sorcerySpeedOk = isActive && isMainPhase(s.step) && s.stack.length === 0;
+
+  for (const gc of p.zones.hand) {
+    const data = cards[gc.cardId];
+    if (!data) continue;
+    const tl = data.faces?.[0]?.typeLine ?? data.typeLine;
+    if (/\bLand\b/i.test(tl)) {
+      // CR 305.1/305.2: own main phase, empty stack, land drop unspent.
+      if (sorcerySpeedOk && p.landsPlayedThisTurn < 1) return true;
+      continue;
+    }
+    if (!hasInstantSpeed(data) && !sorcerySpeedOk) continue;
+    if (canPayFor(data, p, cards)) return true;
+  }
+
+  for (const gc of p.zones.battlefield) {
+    if (gc.isToken || gc.faceDown) continue;
+    const activated = context.scripts?.[gc.cardId]?.activated ?? [];
+    if (activated.some((a) => !a.costTap || !gc.tapped)) return true;
+  }
+  return false;
+}
+
+/**
+ * v15: the single post-action driver. Replaces v12's `autoAdvanceTransit`,
+ * v13's inline auto-resolve call and v14's inline step advance.
+ *
+ * Each iteration: put triggers on the stack (CR 117.5), then take the one
+ * automatic thing the rules or the players' shortcuts call for — completing a
+ * priority-less step (CR 500.3), closing an empty declaration window, or
+ * passing priority for a player who has nothing to do (CR 732). It stops the
+ * moment a real decision is owed by a human.
+ */
+function runFlow(s: GameState, logs: LogLine[]): void {
+  for (let guard = 0; guard < FLOW_GUARD; guard++) {
+    runTriggerMatching(s, logs);
+    if (s.finished || s.pendingSearch || s.players.some((p) => p.hasLost)) return;
+    if (openingWindowOpen(s)) return;
+
+    // CR 500.3: untap and (normally) cleanup grant no priority — they end as
+    // soon as their turn-based actions are done. CR 514.3a: a cleanup that
+    // put triggers on the stack DOES grant priority, and is followed by
+    // another cleanup step.
+    if (!STEP_INFO[s.step].grantsPriority && !(s.step === "cleanup" && s.stack.length > 0)) {
+      advanceToNextStep(s, logs);
+      continue;
+    }
+
+    const declaration = openDeclaration(s);
+    if (declaration) {
+      // A declaration window is not a priority window — only the declaring
+      // player can end it, and only auto-pass may do so on their behalf when
+      // they have nothing to declare.
+      if (!autoPassOn(s, declaration.playerId)) return;
+      if (declarationNeedsPlayer(s, declaration.playerId, declaration.kind)) return;
+      commitDeclaration(s, declaration.kind, logs);
+      continue;
+    }
+
+    // Deadlock guard: both players have passed but the top of the stack is
+    // waiting on a target choice its controller must make by hand.
+    if (s.priorityPasses >= 2 && s.stack.length > 0) return;
+
+    const holder = s.priorityPlayerId;
+    if (!autoPassOn(s, holder)) return;
+    if (isStop(s, holder)) return;
+    if (hasLegalAction(s, holder)) return;
+    passPriorityFor(s, holder, logs, true);
+  }
+}
+
+/**
+ * The consequences of one player passing priority (CR 117.4): with both
+ * players passed in succession, either the top of the stack resolves or — on
+ * an empty stack — the step ends. Shared by the `passPriority` action and the
+ * flow driver's auto-pass.
+ */
+function passPriorityFor(s: GameState, playerId: string, logs: LogLine[], automatic: boolean): void {
+  const other = s.players.find((p) => p.playerId !== playerId);
+  if (!other) return;
+  s.priorityPlayerId = other.playerId;
+  s.priorityPasses = Math.min(2, s.priorityPasses + 1);
+  if (!automatic) logs.push("passed priority");
+
+  if (s.priorityPasses < 2) return;
+  if (s.stack.length > 0) {
+    // CR 117.4: the top of the stack resolves — it is not a separate action.
+    // An entry still awaiting a fresh target choice waits for its controller.
+    if (!topNeedsFreshTarget(s)) {
+      resolveStackTop(s, s.activePlayerId, { type: "resolveTopOfStack" }, logs);
+    }
+    return;
+  }
+  // CR 117.4/500.2: all players passed with an empty stack — the step ends.
+  advanceToNextStep(s, logs);
+}
+
+/** Close an open declaration window (CR 508.1 / 509.1). */
+function commitDeclaration(s: GameState, kind: "attackers" | "blockers", logs: LogLine[]): void {
+  const combat = s.combat!;
+  if (kind === "attackers") {
+    const active = s.players.find((p) => p.playerId === s.activePlayerId)!;
+    const declared = [...active.zones.battlefield]
+      .filter((c) => c.attacking)
+      .sort((a, b) => a.sortIndex - b.sortIndex);
+    combat.attackersDeclared = true;
+    combat.attackersThisCombat = declared.length;
+    // CR 508.1m/508.2b: attack triggers fire once, here, after the whole
+    // declaration — not per click, which would double-fire on a re-toggle.
+    for (const c of declared) {
+      const firstThisCombat = s.attackDeclaredThisCombat !== true;
+      s.attackDeclaredThisCombat = true;
+      emitEvent({
+        kind: "attackDeclared",
+        instanceId: c.instanceId,
+        controllerId: c.controllerId,
+        firstThisCombat,
+      });
+    }
+    logs.push({
+      playerId: active.playerId,
+      message:
+        declared.length === 0
+          ? "declared no attackers"
+          : `declared ${declared.length} attacker${declared.length === 1 ? "" : "s"}: ${declared
+              .map((c) => cardLabel(c))
+              .join(", ")}`,
+    });
+  } else {
+    const defender = s.players.find((p) => p.playerId !== s.activePlayerId)!;
+    const declared = defender.zones.battlefield.filter((c) => c.blocking !== null);
+    combat.blockersDeclared = true;
+    logs.push({
+      playerId: defender.playerId,
+      message:
+        declared.length === 0
+          ? "declared no blockers"
+          : `declared ${declared.length} blocker${declared.length === 1 ? "" : "s"}: ${declared
+              .map((c) => cardLabel(c))
+              .join(", ")}`,
+    });
+  }
+  // CR 508.2 / 509.2: the ACTIVE player receives priority once the
+  // declaration is complete — for blockers too, not the defender who just
+  // declared them.
+  s.priorityPlayerId = s.activePlayerId;
+  s.priorityPasses = 0;
 }
 
 /** Advance to the next step within the turn, applying turn-based effects. */
-function enterStep(s: GameState, step: TurnStep, logs: string[]): void {
+function enterStep(s: GameState, step: TurnStep, logs: LogLine[]): void {
   s.step = step;
   s.priorityPlayerId = s.activePlayerId;
   s.priorityPasses = 0;
@@ -2335,18 +2717,25 @@ function enterStep(s: GameState, step: TurnStep, logs: string[]): void {
   const active = s.players.find((p) => p.playerId === s.activePlayerId)!;
   const inactive = s.players.find((p) => p.playerId !== s.activePlayerId)!;
 
-  // A new combat (or leaving one) re-arms the "whenever you attack" trigger.
-  if (step === "beginCombat" || step === "endCombat") s.attackDeclaredThisCombat = false;
+  // A new combat (or leaving one) re-arms the "whenever you attack" trigger
+  // and re-opens both declaration windows (CR 508.1/509.1).
+  if (step === "beginCombat" || step === "endCombat") {
+    s.attackDeclaredThisCombat = false;
+    s.combat = freshCombat();
+  }
 
   emitEvent({ kind: "stepEntered", step, activePlayerId: s.activePlayerId });
 
   if (step === "untap") {
-    for (const c of active.zones.battlefield) c.tapped = false;
+    untapStep(active, logs);
   } else if (step === "draw") {
     const skipFirstDraw = s.turnNumber === 1 && s.activePlayerId === s.startingPlayerId;
     if (!skipFirstDraw) {
       const drawn = drawCards(active, 1, "drawStep");
-      logs.push(`moved to the draw step and drew ${drawn} card${drawn === 1 ? "" : "s"}`);
+      logs.push({
+        playerId: s.activePlayerId,
+        message: `moved to the draw step and drew ${drawn} card${drawn === 1 ? "" : "s"}`,
+      });
       return;
     }
   } else if (step === "combatDamage") {
@@ -2371,35 +2760,36 @@ function enterStep(s: GameState, step: TurnStep, logs: string[]): void {
       for (const c of p.zones.battlefield) c.damage = 0;
     }
   }
-  logs.push(`moved to the ${step} step`);
+  logs.push({ playerId: s.activePlayerId, message: `moved to the ${step} step` });
 }
 
-/** End the current turn: swap active player, apply untap-step effects. */
-function advanceTurn(s: GameState, logs: string[]): void {
+/** End the current turn: swap active player, then run the new untap step. */
+function advanceTurn(s: GameState, logs: LogLine[]): void {
   // Cleanup semantics apply even when the turn is ended early via nextTurn
   // (mana pools also empty here — every step transition clears them).
   for (const p of s.players) {
     p.manaPool = {};
-    for (const c of p.zones.battlefield) {
-      c.damage = 0;
-      c.attacking = false;
-      c.blocking = null;
-    }
+    for (const c of p.zones.battlefield) c.damage = 0;
   }
+  removeFromCombat(s);
 
   const current = s.players.find((p) => p.playerId === s.activePlayerId)!;
   const next = s.players.find((p) => p.playerId !== s.activePlayerId)!;
   s.activePlayerId = next.playerId;
-  s.priorityPlayerId = next.playerId;
-  s.priorityPasses = 0;
   if (next.playerId === s.startingPlayerId) s.turnNumber += 1;
   current.landsPlayedThisTurn = 0;
   next.landsPlayedThisTurn = 0;
   s.attackDeclaredThisCombat = false;
+  s.combat = freshCombat();
 
-  s.step = "untap";
-  for (const c of next.zones.battlefield) c.tapped = false;
-  logs.push(`ended their turn; turn ${s.turnNumber}, ${playerLabel(next.playerId)} is now active`);
+  logs.push({
+    playerId: current.playerId,
+    message: `ended their turn; turn ${s.turnNumber}, ${playerLabel(next.playerId)} is now active`,
+  });
+  // v15: the incoming untap step runs through the same path as any other
+  // step entry (turn-based actions + stepEntered event), instead of the
+  // hand-rolled untap advanceTurn used to inline.
+  enterStep(s, "untap", logs);
 }
 
 /**
@@ -2407,7 +2797,7 @@ function advanceTurn(s: GameState, logs: string[]): void {
  * all zones except sideboard (sideboards are preserved), reshuffle with the
  * new seed, redraw 7, reset life/poison/mana/turn. The starting player flips.
  */
-function restartGame(s: GameState, seed: string, logs: string[]): void {
+function restartGame(s: GameState, seed: string, logs: LogLine[]): void {
   const rng = createRng(seed);
 
   // Collect owned, non-token cards from the shared stack first (trigger
@@ -2455,6 +2845,10 @@ function restartGame(s: GameState, seed: string, logs: string[]): void {
   s.finished = false;
   s.winnerId = null;
   s.pendingSearch = null;
+  // v15: a restart re-opens the mulligan window and clears any live combat.
+  s.combat = freshCombat();
+  s.openingHandKept = [];
+  s.attackDeclaredThisCombat = false;
   logs.push(`restarted the game; ${newStarter.playerId} is on the play`);
 }
 

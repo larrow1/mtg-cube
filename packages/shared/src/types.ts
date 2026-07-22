@@ -447,14 +447,25 @@ export interface SpellResolutionScript {
 }
 
 /**
- * v10: self-arrival replacement rules, applied at the engine's single
- * battlefield-arrival choke point. Deliberately tiny vocabulary — future
- * kinds (draw substitution, damage prevention, trigger doubling) are added
- * here as data when a card needs them, never as engine surgery.
+ * v10: self-modifying rules for THIS card, applied at the engine's matching
+ * choke points. Deliberately tiny vocabulary — future kinds (draw
+ * substitution, damage prevention, trigger doubling) are added here as data
+ * when a card needs them, never as engine surgery.
+ *
+ * v15 widened the scope from "arrival only" to "arrival plus untap": the
+ * untap step is the engine's other single choke point for a self-referential
+ * rule, and CR 502.3 explicitly contemplates it ("effects can keep one or
+ * more of a player's permanents from untapping").
  */
 export type ReplacementRule =
   | { kind: "entersTapped" }
-  | { kind: "entersWithCounters"; counterType: string; count: number };
+  | { kind: "entersWithCounters"; counterType: string; count: number }
+  /**
+   * v15 (CR 502.3): this permanent doesn't untap during its controller's
+   * untap step. Inferred from the printed line "~ doesn't untap during your
+   * untap step" and friends.
+   */
+  | { kind: "doesNotUntap" };
 
 export interface CardScript {
   triggers: CardTrigger[];
@@ -535,6 +546,20 @@ export const TURN_STEPS = [
   "cleanup",
 ] as const;
 export type TurnStep = (typeof TURN_STEPS)[number];
+
+/** v15: state of the current combat's two declaration windows. */
+export interface CombatState {
+  /** CR 508.1 complete — the attacker declaration is locked in. */
+  attackersDeclared: boolean;
+  /** CR 509.1 complete — the blocker declaration is locked in. */
+  blockersDeclared: boolean;
+  /**
+   * How many attackers were DECLARED this combat. CR 508.8 keys the
+   * declare-blockers/combat-damage skip off the declaration itself, so
+   * killing the lone attacker in response does not un-skip those steps.
+   */
+  attackersThisCombat: number;
+}
 
 export interface GameCard {
   instanceId: string;
@@ -631,6 +656,35 @@ export interface GameState {
    * (states created before v9 keep working).
    */
   attackDeclaredThisCombat?: boolean;
+  /**
+   * v15: the combat-declaration windows (CR 508.1 / 509.1). Declaring
+   * attackers and blockers are TURN-BASED ACTIONS that complete before any
+   * player receives priority — so while a window is open, priority does not
+   * pass and the step cannot end. The declaring player toggles their choices
+   * freely with setAttacking/setBlocking, then closes the window with
+   * commitAttackers/commitBlockers, which is when the declaration triggers
+   * actually fire (CR 508.1m/508.2b, 509.1i/509.2a).
+   *
+   * Optional: absent is normalized to a fresh closed-window record, so states
+   * serialized before v15 keep working.
+   */
+  combat?: CombatState;
+  /**
+   * v15: per-player auto-pass (CR 732 "shortcuts"). ON by default for both
+   * players. While on, the engine passes priority for that player whenever
+   * they have no legal action available, and auto-commits an empty
+   * declaration when they have nothing that could attack or block. Turning it
+   * off is Arena's "hold full control": every priority window stops for you.
+   *
+   * Absent (or a missing player key) means ON.
+   */
+  autoPass?: Record<string, boolean>;
+  /**
+   * v15: player ids that have kept their opening hand. While turn 1 is still
+   * sitting in the untap step and either player has yet to keep, the flow
+   * driver holds — nothing auto-advances underneath the mulligan UI.
+   */
+  openingHandKept?: string[];
   /** Monotonic sequence number: every applied action bumps it. */
   seq: number;
   /** Log of human-readable events for the game log panel. */
@@ -705,8 +759,35 @@ export type GameAction =
   | { type: "attach"; instanceId: string; targetInstanceId: string | null }
   | { type: "createToken"; name: string; typeLine: string; power?: string; toughness?: string; count?: number; tapped?: boolean }
   | { type: "flipCard"; instanceId: string; faceIndex: number }
+  /**
+   * Toggle a creature in/out of the attack declaration while the window is
+   * open (v15: only before `commitAttackers`). Declaring taps it unless it
+   * has vigilance; un-declaring untaps it again (CR 508.1f — the tap is not
+   * a cost, so taking the attack back takes the tap back).
+   */
   | { type: "setAttacking"; instanceId: string; attacking: boolean }
   | { type: "setBlocking"; instanceId: string; blocking: string | null }
+  /**
+   * v15: close the attacker declaration window (CR 508.1). Active player,
+   * declare-attackers step. This is when attack triggers fire (CR 508.1m)
+   * and when CR 508.8's skip is decided. Declaring zero attackers is legal
+   * and skips straight to the end-of-combat step.
+   */
+  | { type: "commitAttackers" }
+  /**
+   * v15: Arena's "All Attack" — add every untapped creature you control to
+   * the attack. Does NOT commit; the player still confirms.
+   */
+  | { type: "declareAllAttackers" }
+  /** v15: Arena's "Cancel Attacks" — take the whole declaration back. */
+  | { type: "clearAttackers" }
+  /** v15: close the blocker declaration window (CR 509.1). Defending player. */
+  | { type: "commitBlockers" }
+  /**
+   * v15: turn this player's auto-pass shortcut on or off (CR 732). Off is
+   * Arena's "hold full control" — every priority window stops for you.
+   */
+  | { type: "setAutoPass"; enabled: boolean }
   | { type: "shuffleLibrary" }
   | { type: "mulligan" }
   | { type: "keepHand"; bottomCount: number; bottomInstanceIds: string[] }
