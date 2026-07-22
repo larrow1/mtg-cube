@@ -12,6 +12,7 @@ import type {
 } from "../src/types.js";
 import { EngineError, applyAction, createGame } from "../src/game/engine.js";
 import type { ActionContext } from "../src/game/engine.js";
+import { describePrompt } from "../src/game/prompt.js";
 
 function mkCard(owner: string, i: number): GameCard {
   return {
@@ -2859,6 +2860,50 @@ describe("turn flow, priority stops & auto-pass (v15)", () => {
     // Turning it back on immediately runs the flow through to the next stop.
     expect(s.activePlayerId).toBe(other(g, active));
     expect(s.step).toBe("main1");
+  });
+
+  it("tracks keeps and mulligans PER SEAT so one client can drive both (v15.1)", () => {
+    // The admin sandbox drives both seats from one browser tab via
+    // sandboxSwitchSeat. Keeping as one seat must not mark the other kept,
+    // or the second seat can never keep and the game never starts.
+    const g = newAutoGame();
+    const a = g.activePlayerId;
+    const b = other(g, a);
+
+    let s = applyAction(g, a, { type: "mulligan" });
+    expect(s.openingMulligans![a]).toBe(1);
+    expect(s.openingMulligans![b]).toBeUndefined();
+    s = applyAction(s, a, { type: "keepHand", bottomCount: 1, bottomInstanceIds: [handCard(s, a)] });
+    expect(s.openingHandKept).toEqual([a]);
+    expect(s.step).toBe("untap"); // still waiting on the other seat
+
+    // Seat B is untouched by any of that and still owes its own decision.
+    expect(s.openingHandKept!.includes(b)).toBe(false);
+    expect(describePrompt(s, b).kind).toBe("mulligan");
+    s = applyAction(s, b, { type: "keepHand", bottomCount: 0, bottomInstanceIds: [] });
+    expect(s.step).toBe("main1"); // both kept — the game starts
+
+    // Keeping twice would bottom a second batch of cards.
+    expect(() => applyAction(s, a, { type: "keepHand", bottomCount: 0, bottomInstanceIds: [] })).toThrow(
+      /already kept/
+    );
+    expect(() => applyAction(s, a, { type: "mulligan" })).toThrow(/already kept/);
+  });
+
+  it("the mulligan count survives a restart reset (v15.1)", () => {
+    const g = newAutoGame();
+    const a = g.activePlayerId;
+    let s = applyAction(g, a, { type: "mulligan" });
+    s = applyAction(s, a, { type: "mulligan" });
+    expect(s.openingMulligans![a]).toBe(2);
+    // restartGame re-opens the window; the count must reset with it (the log
+    // is NOT cleared, so counting log lines would have kept climbing).
+    s = applyAction(s, a, { type: "restartGame", seed: "again" });
+    expect(s.openingMulligans).toEqual({});
+    expect(s.openingHandKept).toEqual([]);
+    s = applyAction(s, a, { type: "mulligan" });
+    expect(s.openingMulligans![a]).toBe(1);
+    expect(lastLog(s)).toMatch(/#1/);
   });
 
   it("the mulligan window holds the flow until both players keep", () => {

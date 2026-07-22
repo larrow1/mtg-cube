@@ -39,30 +39,12 @@ import { StackPanel } from "../components/StackPanel";
 import { TargetArrows, type ArrowSpec } from "../components/TargetArrows";
 import { ZonePile } from "../components/ZonePile";
 
-// ---------------------------------------------------------------------------
-// Local (non-authoritative) per-game memory: mulligan bookkeeping only.
-// ---------------------------------------------------------------------------
-
-interface MullMemory {
-  kept: boolean;
-  mulls: number;
-}
-
-const mullMemory = new Map<string, MullMemory>();
-
-function gameEpochKey(view: GameView): string {
-  return `${view.gameId}:${view.state.log[0]?.ts ?? 0}`;
-}
-
-function getMull(view: GameView): MullMemory {
-  const key = gameEpochKey(view);
-  let m = mullMemory.get(key);
-  if (!m) {
-    m = { kept: false, mulls: 0 };
-    mullMemory.set(key, m);
-  }
-  return m;
-}
+// v15.1: mulligan bookkeeping used to live in a module-level Map keyed by
+// GAME, not by seat — so keeping as one seat hid the keep/mulligan overlay for
+// the other. In the admin sandbox, where one client drives both seats via
+// sandboxSwitchSeat, that made the second seat unable to keep and (since v15
+// holds the turn until BOTH players keep) the game unstartable. It also lost
+// its memory on reload. Both facts now come from GameState.
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -322,7 +304,6 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
     kinds: TargetRef["kind"][];
     override?: boolean;
   } | null>(null);
-  const [, forceRender] = useState(0);
 
   // Esc cancels attach/block targeting modes, the mana picker and the hand selection.
   useEffect(() => {
@@ -806,20 +787,22 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
   // Mulligan
   // -------------------------------------------------------------------------
 
-  const mull = getMull(view);
+  // v15.1: both facts are authoritative and PER SEAT, so switching seats in
+  // the sandbox (or reloading) shows exactly the window that seat still owes.
+  const iHaveKept = (gs.openingHandKept ?? []).includes(me.playerId);
+  const myMulligans = gs.openingMulligans?.[me.playerId] ?? 0;
   const boardEmpty =
     me.zones.battlefield.length === 0 &&
     opp.zones.battlefield.length === 0 &&
     me.zones.graveyard.length === 0 &&
     gs.stack.length === 0;
-  const showMulligan = viewerIsPlayer && !gs.finished && gs.turnNumber === 1 && gs.step === "untap" && boardEmpty && !mull.kept;
-  const expectedBottom = Math.max(0, me.zones.hand.length - (7 - mull.mulls));
+  const showMulligan =
+    viewerIsPlayer && !gs.finished && gs.turnNumber === 1 && gs.step === "untap" && boardEmpty && !iHaveKept;
+  const expectedBottom = Math.max(0, me.zones.hand.length - (7 - myMulligans));
 
   const keepHand = (): void => {
     if (expectedBottom === 0) {
       send({ type: "keepHand", bottomCount: 0, bottomInstanceIds: [] });
-      mull.kept = true;
-      forceRender((n) => n + 1);
     } else {
       setLondonOpen(true);
     }
@@ -827,8 +810,6 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
 
   const takeMulligan = (): void => {
     send({ type: "mulligan" });
-    mull.mulls += 1;
-    forceRender((n) => n + 1);
   };
 
   // -------------------------------------------------------------------------
@@ -1404,7 +1385,9 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
           <div className="text-center">
             <h2 className="text-2xl font-black text-zinc-50">Opening hand</h2>
             <p className="mt-1 text-sm text-zinc-400">
-              {mull.mulls === 0 ? "Keep these seven, or mulligan?" : `Mulligan ${mull.mulls} — you will keep ${Math.max(0, 7 - mull.mulls)} cards.`}
+              {myMulligans === 0
+                ? "Keep these seven, or mulligan?"
+                : `Mulligan ${myMulligans} — you will keep ${Math.max(0, 7 - myMulligans)} cards.`}
             </p>
           </div>
           <div className="flex flex-wrap justify-center gap-2">
@@ -1433,9 +1416,7 @@ export function Game({ demoView, demoRoom, demoSession }: GameProps = {}): JSX.E
           onCancel={() => setLondonOpen(false)}
           onConfirm={(ids) => {
             send({ type: "keepHand", bottomCount: ids.length, bottomInstanceIds: ids });
-            mull.kept = true;
             setLondonOpen(false);
-            forceRender((n) => n + 1);
           }}
         />
       )}

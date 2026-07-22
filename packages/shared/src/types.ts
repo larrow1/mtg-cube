@@ -695,6 +695,13 @@ export interface GameState {
    * driver holds — nothing auto-advances underneath the mulligan UI.
    */
   openingHandKept?: string[];
+  /**
+   * v15.1: mulligans each player has taken this game (London count — you keep
+   * `7 - n` cards). Authoritative so the keep/mulligan UI is per SEAT rather
+   * than per browser tab: the sandbox drives both seats from one client, and
+   * a reload must not resurrect a window the player already closed.
+   */
+  openingMulligans?: Record<string, number>;
   /** Monotonic sequence number: every applied action bumps it. */
   seq: number;
   /** Log of human-readable events for the game log panel. */

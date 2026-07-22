@@ -197,6 +197,7 @@ function freshCombat(): CombatState {
 function ensureFlowState(s: GameState): void {
   s.combat ??= freshCombat();
   s.openingHandKept ??= [];
+  s.openingMulligans ??= {};
   if (!s.autoPass) {
     // Absent = the pre-v15 default, which is what v15 defaults to anyway.
     s.autoPass = { [s.players[0].playerId]: true, [s.players[1].playerId]: true };
@@ -269,6 +270,7 @@ export function createGame(
     // v15: auto-pass is ON for both players by default (CR 732 shortcut).
     autoPass: { [states[0].playerId]: true, [states[1].playerId]: true },
     openingHandKept: [],
+    openingMulligans: {},
     seq: 0,
     log: [
       {
@@ -768,8 +770,14 @@ export function applyAction(
     }
 
     case "mulligan": {
-      const mullCount =
-        s.log.filter((e) => e.playerId === actorId && e.message.startsWith("took a mulligan")).length + 1;
+      // v15.1: counted on the state, not by scanning the log — the log is not
+      // cleared by restartGame, so the old scan kept climbing across restarts
+      // and would have handed the client a wrong London bottom-count.
+      if (s.openingHandKept!.includes(actorId)) {
+        throw new EngineError("You have already kept your opening hand");
+      }
+      const mullCount = (s.openingMulligans![actorId] ?? 0) + 1;
+      s.openingMulligans![actorId] = mullCount;
       actor.zones.library.push(...actor.zones.hand.splice(0));
       actor.zones.library = shuffle(actor.zones.library, createRng(`${s.id}:mulligan:${s.seq + 1}`));
       const drawn = drawCards(actor, 7, "silent");
@@ -778,6 +786,12 @@ export function applyAction(
     }
 
     case "keepHand": {
+      // v15.1: keeping twice would bottom a second batch of cards. Reloading
+      // the page used to resurrect the keep/mulligan overlay (its "have I
+      // kept?" memory lived only in the tab), which made that reachable.
+      if (s.openingHandKept!.includes(actorId)) {
+        throw new EngineError("You have already kept your opening hand");
+      }
       const { bottomCount, bottomInstanceIds } = action;
       if (!Number.isInteger(bottomCount) || bottomCount < 0) {
         throw new EngineError(`bottomCount must be a non-negative integer (got ${bottomCount})`);
@@ -2848,6 +2862,7 @@ function restartGame(s: GameState, seed: string, logs: LogLine[]): void {
   // v15: a restart re-opens the mulligan window and clears any live combat.
   s.combat = freshCombat();
   s.openingHandKept = [];
+  s.openingMulligans = {};
   s.attackDeclaredThisCombat = false;
   logs.push(`restarted the game; ${newStarter.playerId} is on the play`);
 }
