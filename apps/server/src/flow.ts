@@ -198,7 +198,13 @@ function autoPick(io: AppServer, room: Room, seatIndex: number): void {
 }
 
 /** Apply one human pick, run bots, open packs, re-emit views, manage timers. */
-export function performPick(io: AppServer, room: Room, seatIndex: number, instanceId: string): void {
+export function performPick(
+  io: AppServer,
+  room: Room,
+  seatIndex: number,
+  instanceId: string,
+  additionalInstanceIds: string[] = []
+): void {
   const state = room.draftState;
   if (!state || room.phase !== "drafting") throw new Error("No draft in progress");
   if (state.complete) throw new Error("The draft is already complete");
@@ -206,10 +212,14 @@ export function performPick(io: AppServer, room: Room, seatIndex: number, instan
   if (!seat) throw new Error("Invalid seat");
   const head = seat.packQueue[0];
   if (!head) throw new Error("You have no pack to pick from");
-  if (!head.cards.some((c) => c.instanceId === instanceId)) {
-    throw new Error("That card is not in your current pack");
+  const requestedIds = [instanceId, ...additionalInstanceIds];
+  if (new Set(requestedIds).size !== requestedIds.length) {
+    throw new Error("Each drafted card must be unique");
   }
-  room.draftState = applyPick(state, seatIndex, instanceId);
+  if (requestedIds.some((id) => !head.cards.some((card) => card.instanceId === id))) {
+    throw new Error("One of those cards is not in your current pack");
+  }
+  room.draftState = applyPick(state, seatIndex, instanceId, additionalInstanceIds);
   room.clearPickTimer(seatIndex);
   advanceDraft(room);
   if (room.draftState?.complete) {

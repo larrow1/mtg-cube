@@ -14,8 +14,8 @@ import { AUTO_LANE, type PackPickDrop } from "./PicksTray";
 import { getPackPickInstanceId } from "../lib/dnd";
 import {
   cmcBucket,
-  colorBucket,
   compareByCmcName,
+  listManaCostParts,
   parseManaCost,
   primaryType,
   type ColorBucket,
@@ -98,26 +98,26 @@ function artCropUrl(imageUrl: string | undefined): string | undefined {
 }
 
 /** Colors a list row should communicate, including lands' usable/fetchable mana. */
-function listRowColors(data: CardData | undefined): Color[] {
+export function listRowColors(data: CardData | undefined): Color[] {
   if (!data) return [];
   const printed = data.colors.length > 0 ? data.colors : data.colorIdentity;
   if (!data.typeLine.toLowerCase().includes("land")) {
-    // Scryfall's `colors` array uses canonical WUBRG order, which does not
-    // necessarily match the mana symbols printed on the card. Build the row
-    // gradient from the mana cost first so {2}{R}{G} reads red → green, then
-    // append any indicator-only colors that were not represented in the cost.
+    // List rows represent only the mana symbols printed on the front face.
+    // Do not fall back to color identity here: transforming cards can gain
+    // colors on their reverse face (Ajani, Goben, Tony Stark, etc.), but their
+    // list treatment should still match the front face's top-right mana cost.
     const ordered: Color[] = [];
     const add = (color: Color): void => {
       if (!ordered.includes(color)) ordered.push(color);
     };
-    for (const symbol of parseManaCost(data.manaCost)) {
+    const frontManaCost = data.faces?.[0]?.manaCost ?? data.manaCost;
+    for (const symbol of parseManaCost(frontManaCost)) {
       for (const character of symbol.toUpperCase()) {
         if (character === "W" || character === "U" || character === "B" || character === "R" || character === "G") {
           add(character);
         }
       }
     }
-    for (const color of printed) add(color);
     return ordered;
   }
 
@@ -134,6 +134,18 @@ function listRowColors(data: CardData | undefined): Color[] {
     if (fetchColors.length > 0) return fetchColors;
   }
 
+  // Preserve the order of mana symbols printed in the land's Add ability.
+  // Scryfall's `producedMana` is useful as a fallback, but its array order is
+  // not guaranteed to match the card frame (Savannah prints {G} before {W}).
+  const printedProduction: Color[] = [];
+  for (const match of oracle.matchAll(/\badd\b([^\n.]*)/gi)) {
+    for (const symbol of (match[1] ?? "").matchAll(/\{([WUBRG])\}/gi)) {
+      const color = symbol[1]?.toUpperCase() as Color | undefined;
+      if (color && !printedProduction.includes(color)) printedProduction.push(color);
+    }
+  }
+  if (printedProduction.length > 0) return printedProduction;
+
   const produced = LAND_TYPE_COLORS
     .map(([, color]) => color)
     .filter((color) => data.producedMana?.includes(color));
@@ -148,8 +160,51 @@ function isColorlessArtifact(data: CardData | undefined): boolean {
   return !parseManaCost(data.manaCost).some((symbol) => /[WUBRG]/i.test(symbol));
 }
 
-/** Creature subtypes: the words after the em-dash on the first face's type line. */
-function creatureSubtypes(data: CardData): string[] {
+/** Shared Arena list-row treatment used by both Draft and Deckbuild. */
+export function draftListRowAppearance(data: CardData | undefined): {
+  rowBucket: ColorBucket;
+  borderClass: string;
+  rowFill: string;
+  borderFill: string | null;
+} {
+  const cardColors = listRowColors(data);
+  const isLand = data?.typeLine.toLowerCase().includes("land") ?? false;
+  const bucket: ColorBucket = isColorlessArtifact(data)
+    ? "C"
+    : isLand
+      ? "L"
+      : cardColors.length === 0
+        ? "C"
+        : cardColors.length === 1
+          ? cardColors[0]!
+          : "M";
+  const normalizedName = data?.name.trim().toLowerCase();
+  const neutralLand = normalizedName === "gemstone mine" || normalizedName === "gemstone caverns";
+  const rowBucket: ColorBucket = neutralLand ? "C" : bucket === "L"
+    ? cardColors.length === 0 ? "C" : cardColors.length === 1 ? cardColors[0]! : cardColors.length > 2 ? "M" : "L"
+    : bucket;
+  const twoColor = !neutralLand && (bucket === "M" || bucket === "L") && cardColors.length === 2;
+  const firstColor = cardColors[0] as ColorBucket | undefined;
+  const secondColor = cardColors[1] as ColorBucket | undefined;
+  const manaFill = twoColor
+    ? `linear-gradient(${LIST_FILL_COLOR.M}, ${LIST_FILL_COLOR.M})`
+    : LIST_FILL_COLOR[rowBucket];
+  const gloss = "linear-gradient(180deg, rgba(255,255,255,0.48) 0%, rgba(255,255,255,0.14) 34%, rgba(255,255,255,0.02) 48%, rgba(0,0,0,0.08) 70%, rgba(0,0,0,0.2) 100%)";
+  const borderFill = twoColor
+    ? centeredListGradient(LIST_BORDER_FILL_COLOR, firstColor ?? "M", secondColor ?? "M")
+    : null;
+  return {
+    rowBucket,
+    borderClass: LIST_ROW_COLOR[rowBucket],
+    borderFill,
+    rowFill: borderFill
+      ? `${gloss} padding-box, ${manaFill} padding-box, ${borderFill} border-box`
+      : `${gloss}, ${manaFill}`,
+  };
+}
+
+/** Card subtypes: the words after the em-dash on the front face's type line. */
+function cardSubtypes(data: CardData): string[] {
   const first = data.typeLine.split(" // ")[0] ?? data.typeLine;
   const dash = first.indexOf("—");
   if (dash === -1) return [];
@@ -160,49 +215,58 @@ function creatureSubtypes(data: CardData): string[] {
     .filter(Boolean);
 }
 
-function TypeCounts({ main, cards }: { main: DraftCard[]; cards: Record<string, CardData> }): JSX.Element {
-  const { typeRows, subtypeRows, more } = useMemo(() => {
+export function TypeCounts({
+  main,
+  cards,
+  label = "Types (main)",
+}: {
+  main: DraftCard[];
+  cards: Record<string, CardData>;
+  label?: string;
+}): JSX.Element {
+  const typeRows = useMemo(() => {
     const typeCounts = new Map<string, number>();
-    const subCounts = new Map<string, number>();
+    const subtypeCounts = new Map<string, Map<string, number>>();
     for (const pick of main) {
       const data = cards[pick.cardId];
       const t = primaryType(data);
       typeCounts.set(t, (typeCounts.get(t) ?? 0) + 1);
-      if (t === "Creature" && data) {
-        for (const sub of creatureSubtypes(data)) {
-          subCounts.set(sub, (subCounts.get(sub) ?? 0) + 1);
+      if (data && t !== "Planeswalker" && t !== "Land") {
+        const counts = subtypeCounts.get(t) ?? new Map<string, number>();
+        for (const subtype of cardSubtypes(data)) {
+          counts.set(subtype, (counts.get(subtype) ?? 0) + 1);
         }
+        subtypeCounts.set(t, counts);
       }
     }
-    const typeRows = TYPE_ORDER.filter((t) => typeCounts.has(t)).map((t) => ({
+    return TYPE_ORDER.filter((t) => typeCounts.has(t)).map((t) => ({
       type: t,
       count: typeCounts.get(t) ?? 0,
+      subtypes: [...(subtypeCounts.get(t)?.entries() ?? [])]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])),
     }));
-    const sorted = [...subCounts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-    return { typeRows, subtypeRows: sorted.slice(0, 8), more: sorted.length > 8 };
   }, [main, cards]);
 
   return (
     <div className="panel-inset p-3">
-      <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-zinc-400">Types (main)</div>
+      <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-zinc-400">{label}</div>
       {typeRows.length === 0 ? (
         <div className="text-[11px] text-zinc-500">No picks yet.</div>
       ) : (
         <ul className="space-y-0.5 text-xs">
-          {typeRows.map(({ type, count }) => (
+          {typeRows.map(({ type, count, subtypes }) => (
             <li key={type}>
               <div className="flex items-baseline justify-between">
                 <span className="font-semibold text-zinc-200">{TYPE_PLURALS[type] ?? type}</span>
                 <span className="font-bold tabular-nums text-brass-300">{count}</span>
               </div>
-              {type === "Creature" && subtypeRows.length > 0 && (
+              {subtypes.length > 0 && (
                 <div className="ml-3 mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] leading-tight text-zinc-400">
-                  {subtypeRows.map(([sub, n]) => (
+                  {subtypes.map(([sub, n]) => (
                     <span key={sub}>
                       {sub} <span className="tabular-nums text-zinc-500">x{n}</span>
                     </span>
                   ))}
-                  {more && <span className="text-zinc-600">…</span>}
                 </div>
               )}
             </li>
@@ -218,11 +282,13 @@ export function ColorSplit({
   cards,
   label = "Mana colors (main)",
   showEmpty = false,
+  showLands = true,
 }: {
   main: DraftCard[];
   cards: Record<string, CardData>;
   label?: string;
   showEmpty?: boolean;
+  showLands?: boolean;
 }): JSX.Element | null {
   const counts = useMemo(() => {
     const map = new Map<ColorBucket, number>();
@@ -252,7 +318,9 @@ export function ColorSplit({
     return map;
   }, [main, cards]);
 
-  const order: ColorBucket[] = ["W", "U", "B", "R", "G", "C", "L"];
+  const order: ColorBucket[] = showLands
+    ? ["W", "U", "B", "R", "G", "C", "L"]
+    : ["W", "U", "B", "R", "G", "C"];
   const shown = order.filter((b) => (counts.get(b) ?? 0) > 0);
   if (shown.length === 0 && !showEmpty) return null;
 
@@ -297,29 +365,8 @@ function ListRow({
   moveLabel: string;
 }): JSX.Element {
   const { showPreview, clearPreview } = useCardPreview();
-  const bucket = isColorlessArtifact(data) ? "C" : colorBucket(data);
-  const pips = parseManaCost(data?.manaCost);
-  const cardColors = listRowColors(data);
-  const normalizedName = data?.name.trim().toLowerCase();
-  const neutralLand = normalizedName === "gemstone mine" || normalizedName === "gemstone caverns";
-  // Lands inherit their actual mana role: colorless lands match artifacts,
-  // one-color lands use that color, and 3+ color lands use the gold treatment.
-  const rowBucket: ColorBucket = neutralLand ? "C" : bucket === "L"
-    ? cardColors.length === 0 ? "C" : cardColors.length === 1 ? cardColors[0]! : cardColors.length > 2 ? "M" : "L"
-    : bucket;
-  const twoColor = !neutralLand && (bucket === "M" || bucket === "L") && cardColors.length === 2;
-  const firstColor = cardColors[0] as ColorBucket | undefined;
-  const secondColor = cardColors[1] as ColorBucket | undefined;
-  const manaFill = twoColor
-    ? `linear-gradient(${LIST_FILL_COLOR.M}, ${LIST_FILL_COLOR.M})`
-    : LIST_FILL_COLOR[rowBucket];
-  const gloss = "linear-gradient(180deg, rgba(255,255,255,0.48) 0%, rgba(255,255,255,0.14) 34%, rgba(255,255,255,0.02) 48%, rgba(0,0,0,0.08) 70%, rgba(0,0,0,0.2) 100%)";
-  const borderFill = twoColor
-    ? centeredListGradient(LIST_BORDER_FILL_COLOR, firstColor ?? "M", secondColor ?? "M")
-    : null;
-  const rowFill = borderFill
-    ? `${gloss} padding-box, ${manaFill} padding-box, ${borderFill} border-box`
-    : `${gloss}, ${manaFill}`;
+  const pips = listManaCostParts(data);
+  const { rowBucket, rowFill, borderFill } = draftListRowAppearance(data);
   return (
     <div
       data-draft-pick-instance={pick.instanceId}
@@ -359,7 +406,9 @@ function ListRow({
       </span>
       <span className="draft-list-card-name min-w-0 flex-1 truncate text-[12px] font-bold leading-none tracking-[-0.018em] text-black">{data?.name ?? "…"}</span>
       <span className="relative z-[3] ml-1 flex shrink-0 items-center gap-px">
-        {pips.slice(0, 6).map((s, i) => (
+        {pips.slice(0, 6).map((s, i) => s === "//" ? (
+          <span key={`split-${i}`} className="mx-px text-[8px] font-black leading-none text-black">//</span>
+        ) : (
           <span
             key={`${s}-${i}`}
             className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center overflow-hidden rounded-full border-[0.5px] border-black"
@@ -372,14 +421,87 @@ function ListRow({
   );
 }
 
+function DraftDeckBanner({
+  mainPicks,
+  cards,
+  open,
+  onOpen,
+}: {
+  mainPicks: readonly DraftCard[];
+  cards: Record<string, CardData>;
+  open: boolean;
+  onOpen: () => void;
+}): JSX.Element {
+  const compactCurve = new Array<number>(8).fill(0);
+  for (const pick of mainPicks) {
+    const data = cards[pick.cardId];
+    if (!data || data.typeLine.toLowerCase().includes("land")) continue;
+    const bucket = cmcBucket(data.cmc);
+    compactCurve[bucket] = (compactCurve[bucket] ?? 0) + 1;
+  }
+  const compactCurveMax = Math.max(1, ...compactCurve);
+  const deckCover = mainPicks
+    .map((pick) => cards[pick.cardId])
+    .find((data) => data?.imageSmall || data?.imageNormal);
+  const deckCoverUrl = artCropUrl(deckCover?.imageSmall ?? deckCover?.imageNormal);
+
+  return (
+    <button
+      type="button"
+      className={`draft-deck-banner relative flex h-[66px] w-full shrink-0 items-center gap-2 overflow-hidden px-2.5 py-1.5 text-left ${mainPicks.length >= 40 ? "is-complete" : ""}`}
+      onClick={onOpen}
+      aria-expanded={open}
+      aria-controls="draft-deck-stats-panel"
+      title="Open Deck Stats"
+    >
+      <div className="draft-deck-banner-art relative h-11 w-[58px] shrink-0" aria-hidden="true">
+        <span className="draft-deck-banner-card draft-deck-banner-card-front">
+          <img
+            src={deckCoverUrl ?? "/ui/empty-deck-vault.jpg"}
+            alt=""
+            className="draft-deck-banner-art-image"
+          />
+          <span className="draft-deck-banner-card-glass" />
+        </span>
+      </div>
+      <div className="min-w-0 flex-1 leading-none">
+        <div className="draft-deck-banner-title">Deck</div>
+        <div className="draft-deck-banner-count mt-1 flex items-baseline gap-1 tabular-nums">
+          <span>{mainPicks.length}</span>
+          <span className="draft-deck-banner-count-target">/ 40</span>
+          <span className="draft-deck-banner-count-label">Cards</span>
+        </div>
+      </div>
+      <div
+        className="draft-deck-mini-curve flex h-11 w-[70px] shrink-0 items-end justify-center gap-[2px] px-1.5 pb-1.5 pt-2"
+        role="img"
+        aria-label={`Mana curve for ${mainPicks.length} mainboard cards`}
+      >
+        {compactCurve.map((count, index) => (
+          <span
+            key={index}
+            className={count > 0 ? "is-filled" : "is-empty"}
+            style={{ height: `${Math.max(8, (count / compactCurveMax) * 100)}%` }}
+            title={`${count} card${count === 1 ? "" : "s"} at mana value ${index === 7 ? "7+" : index}`}
+          />
+        ))}
+      </div>
+    </button>
+  );
+}
+
 function PicksList({
   cards,
   lanesApi,
   onPackPick,
+  deckStatsOpen,
+  onOpenDeckStats,
 }: {
   cards: Record<string, CardData>;
   lanesApi: DraftLanes;
   onPackPick?: PackPickDrop;
+  deckStatsOpen: boolean;
+  onOpenDeckStats: () => void;
 }): JSX.Element {
   const [dragOver, setDragOver] = useState<string | null>(null);
   const allPicks = [...lanesApi.grouped.values()].flat();
@@ -400,18 +522,6 @@ function PicksList({
       return compareByCmcName(aData, bData);
     });
   const total = allPicks.length;
-  const compactCurve = new Array<number>(8).fill(0);
-  for (const pick of mainPicks) {
-    const data = cards[pick.cardId];
-    if (!data || data.typeLine.toLowerCase().includes("land")) continue;
-    const bucket = cmcBucket(data.cmc);
-    compactCurve[bucket] = (compactCurve[bucket] ?? 0) + 1;
-  }
-  const compactCurveMax = Math.max(1, ...compactCurve);
-  const deckCover = mainPicks
-    .map((pick) => cards[pick.cardId])
-    .find((data) => data?.imageSmall || data?.imageNormal);
-  const deckCoverUrl = artCropUrl(deckCover?.imageSmall ?? deckCover?.imageNormal);
 
   const dropOnMain = (instanceId: string): void => {
     const pick = allPicks.find((candidate) => candidate.instanceId === instanceId);
@@ -420,45 +530,12 @@ function PicksList({
 
   return (
     <div className="panel draft-list-zone flex min-h-0 flex-1 flex-col">
-      <div className={`draft-deck-banner relative flex h-[66px] shrink-0 items-center gap-2 overflow-hidden px-2.5 py-1.5 ${mainPicks.length >= 40 ? "is-complete" : ""}`}>
-        <div className="draft-deck-banner-art relative h-11 w-[58px] shrink-0" aria-hidden="true">
-          <span className="draft-deck-banner-card draft-deck-banner-card-front">
-            {deckCoverUrl ? (
-              <img src={deckCoverUrl} alt="" className="draft-deck-banner-art-image" />
-            ) : (
-              <img
-                src="/ui/empty-deck-vault.jpg"
-                alt=""
-                className="draft-deck-banner-art-image"
-              />
-            )}
-            <span className="draft-deck-banner-card-glass" />
-          </span>
-        </div>
-        <div className="min-w-0 flex-1 leading-none">
-          <div className="draft-deck-banner-title">Deck</div>
-          <div className="draft-deck-banner-count mt-1 flex items-baseline gap-1 tabular-nums">
-            <span>{mainPicks.length}</span>
-            <span className="draft-deck-banner-count-target">/ 40</span>
-            <span className="draft-deck-banner-count-label">Cards</span>
-          </div>
-        </div>
-        <div
-          className="draft-deck-mini-curve flex h-11 w-[70px] shrink-0 items-end justify-center gap-[2px] px-1.5 pb-1.5 pt-2"
-          role="img"
-          aria-label={`Mana curve for ${mainPicks.length} mainboard cards`}
-          title="Mainboard mana curve"
-        >
-          {compactCurve.map((count, index) => (
-            <span
-              key={index}
-              className={count > 0 ? "is-filled" : "is-empty"}
-              style={{ height: `${Math.max(8, (count / compactCurveMax) * 100)}%` }}
-              title={`${count} card${count === 1 ? "" : "s"} at mana value ${index === 7 ? "7+" : index}`}
-            />
-          ))}
-        </div>
-      </div>
+      <DraftDeckBanner
+        mainPicks={mainPicks}
+        cards={cards}
+        open={deckStatsOpen}
+        onOpen={onOpenDeckStats}
+      />
       <div className="scrollbar-slim min-h-0 flex-1 overflow-y-auto p-2">
         {total === 0 && (
           <div className="rounded-lg border border-dashed border-amber-100/15 py-4 text-center text-[11px] text-zinc-500">
@@ -569,7 +646,24 @@ export function PicksRail(props: PicksRailProps): JSX.Element {
   return (
     <aside className="draft-sidebar relative flex w-60 shrink-0 flex-col pl-2.5 min-[1400px]:w-72">
       {view === "list" && (
-        <PicksList cards={cards} lanesApi={lanesApi} onPackPick={onPackPick} />
+        <PicksList
+          cards={cards}
+          lanesApi={lanesApi}
+          onPackPick={onPackPick}
+          deckStatsOpen={open}
+          onOpenDeckStats={onToggleOpen}
+        />
+      )}
+
+      {view === "cards" && !open && (
+        <div className="panel overflow-hidden">
+          <DraftDeckBanner
+            mainPicks={main}
+            cards={cards}
+            open={open}
+            onOpen={onToggleOpen}
+          />
+        </div>
       )}
 
       {open && (

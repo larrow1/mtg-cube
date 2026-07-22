@@ -11,6 +11,12 @@
 import type { CardData, Cube, DraftCard, DraftConfig, DraftSeat, DraftState, DraftView, Pack } from "../types.js";
 import { createRng, shuffle, type Rng } from "../rng.js";
 
+const COGWORK_LIBRARIAN = "Cogwork Librarian";
+
+function isCogworkLibrarian(card: DraftCard): boolean {
+  return card.draftEffect === "cogwork-librarian";
+}
+
 /**
  * Shuffle the cube and deal seatCount * packsPerPlayer packs of cardsPerPack.
  * Round 1 packs go straight into each seat's packQueue; later rounds wait in
@@ -43,7 +49,13 @@ export function createDraft(cube: Cube, config: DraftConfig): DraftState {
     const cardId = shuffled[dealt];
     if (cardId === undefined) throw new Error("Internal error: ran out of cards while dealing");
     dealt += 1;
-    return { instanceId: `d${dealt}`, cardId };
+    return {
+      instanceId: `d${dealt}`,
+      cardId,
+      ...(cube.cards[cardId]?.name === COGWORK_LIBRARIAN
+        ? { draftEffect: "cogwork-librarian" as const }
+        : {}),
+    };
   };
 
   const seats: DraftSeat[] = [];
@@ -108,25 +120,57 @@ function openNextPacksInPlace(s: DraftState): void {
  * Empty packs are discarded. When every pack of the round is exhausted the
  * next round is opened (or the draft is marked complete).
  */
-export function applyPick(state: DraftState, seatIndex: number, instanceId: string): DraftState {
+export function applyPick(
+  state: DraftState,
+  seatIndex: number,
+  instanceId: string,
+  additionalInstanceIds: string[] = []
+): DraftState {
   const s = structuredClone(state);
-  applyPickInPlace(s, seatIndex, instanceId);
+  applyPickInPlace(s, seatIndex, instanceId, additionalInstanceIds);
   return s;
 }
 
-function applyPickInPlace(s: DraftState, seatIndex: number, instanceId: string): void {
+function applyPickInPlace(
+  s: DraftState,
+  seatIndex: number,
+  instanceId: string,
+  additionalInstanceIds: string[] = []
+): void {
   if (s.complete) throw new Error("Draft is already complete");
   const seat = s.seats[seatIndex];
   if (!seat) throw new Error(`No seat at index ${seatIndex}`);
   const pack = seat.packQueue[0];
   if (!pack) throw new Error(`Seat ${seatIndex} has no pack waiting`);
-  const cardIdx = pack.cards.findIndex((c) => c.instanceId === instanceId);
-  if (cardIdx === -1) {
-    throw new Error(`Card ${instanceId} is not in seat ${seatIndex}'s current pack`);
+  const pickIds = [instanceId, ...additionalInstanceIds];
+  if (new Set(pickIds).size !== pickIds.length) {
+    throw new Error("Each drafted card must be unique");
+  }
+  const availableLibrarians = seat.picks.filter(isCogworkLibrarian);
+  if (additionalInstanceIds.length > availableLibrarians.length) {
+    throw new Error("You do not have enough face-up Cogwork Librarians for those additional picks");
+  }
+  for (const pickId of pickIds) {
+    if (!pack.cards.some((card) => card.instanceId === pickId)) {
+      throw new Error(`Card ${pickId} is not in seat ${seatIndex}'s current pack`);
+    }
   }
 
-  const [card] = pack.cards.splice(cardIdx, 1);
-  if (card) seat.picks.push(card);
+  // Cogwork's ruling drafts the cards one at a time. Preserve the submitted
+  // order, then exchange one already-drafted Librarian for each extra card.
+  for (const pickId of pickIds) {
+    const cardIdx = pack.cards.findIndex((card) => card.instanceId === pickId);
+    const [card] = pack.cards.splice(cardIdx, 1);
+    if (card) seat.picks.push(card);
+  }
+  for (let index = 0; index < additionalInstanceIds.length; index += 1) {
+    const librarianIdx = seat.picks.findIndex((card) =>
+      availableLibrarians.some((available) => available.instanceId === card.instanceId)
+    );
+    if (librarianIdx === -1) throw new Error("Internal error: Cogwork Librarian exchange failed");
+    const [librarian] = seat.picks.splice(librarianIdx, 1);
+    if (librarian) pack.cards.push(librarian);
+  }
   seat.packQueue.shift();
 
   if (pack.cards.length > 0) {
@@ -163,13 +207,15 @@ export function runBotPicks(state: DraftState, rng: Rng, cards?: Record<string, 
     if (!seat) break;
     const pack = seat.packQueue[0];
     if (!pack || pack.cards.length === 0) break; // defensive; should not happen
-    const pickId = chooseBotPick(seat, pack, rng, cards);
-    applyPickInPlace(s, seat.seatIndex, pickId);
+    const pickIds = chooseBotPicks(seat, pack, rng, cards);
+    const first = pickIds[0];
+    if (!first) break;
+    applyPickInPlace(s, seat.seatIndex, first, pickIds.slice(1));
   }
   return s;
 }
 
-function chooseBotPick(seat: DraftSeat, pack: Pack, rng: Rng, cards?: Record<string, CardData>): string {
+function chooseBotPicks(seat: DraftSeat, pack: Pack, rng: Rng, cards?: Record<string, CardData>): string[] {
   const colorCounts: Record<string, number> = {};
   if (cards) {
     for (const pick of seat.picks) {
@@ -179,7 +225,7 @@ function chooseBotPick(seat: DraftSeat, pack: Pack, rng: Rng, cards?: Record<str
     }
   }
 
-  let best: { instanceId: string; score: number } | null = null;
+  const scored: { instanceId: string; score: number }[] = [];
   for (const card of pack.cards) {
     let score = 0;
     const data = cards?.[card.cardId];
@@ -191,10 +237,12 @@ function chooseBotPick(seat: DraftSeat, pack: Pack, rng: Rng, cards?: Record<str
       }
     }
     score += rng() * 0.1; // deterministic jitter / tiebreak
-    if (!best || score > best.score) best = { instanceId: card.instanceId, score };
+    scored.push({ instanceId: card.instanceId, score });
   }
-  if (!best) throw new Error("Internal error: bot tried to pick from an empty pack");
-  return best.instanceId;
+  scored.sort((a, b) => b.score - a.score);
+  if (scored.length === 0) throw new Error("Internal error: bot tried to pick from an empty pack");
+  const librarianCount = seat.picks.filter(isCogworkLibrarian).length;
+  return scored.slice(0, Math.min(scored.length, 1 + librarianCount)).map((entry) => entry.instanceId);
 }
 
 /** Build the redacted per-seat view: your pack + picks, public info for others. */
@@ -222,6 +270,7 @@ export function getDraftView(
       isBot: st.isBot,
       pickCount: st.picks.length,
       queuedPacks: st.packQueue.length,
+      faceUpPicks: structuredClone(st.picks.filter(isCogworkLibrarian)),
     })),
     complete: state.complete,
     pickDeadline,

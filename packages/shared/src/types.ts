@@ -203,6 +203,8 @@ export interface DraftConfig {
 export interface DraftCard {
   instanceId: string;
   cardId: string;
+  /** The only supported draft-matters ability; assigned from card data when dealt. */
+  draftEffect?: "cogwork-librarian";
 }
 
 export interface Pack {
@@ -245,7 +247,15 @@ export interface DraftView {
   queuedPacks: number;
   picks: DraftCard[];
   /** Per-seat public info: pick counts and queue sizes. */
-  seats: { seatIndex: number; playerName: string | null; isBot: boolean; pickCount: number; queuedPacks: number }[];
+  seats: {
+    seatIndex: number;
+    playerName: string | null;
+    isBot: boolean;
+    pickCount: number;
+    queuedPacks: number;
+    /** Drafted face up and therefore visible to everyone at the table. */
+    faceUpPicks: DraftCard[];
+  }[];
   complete: boolean;
   pickDeadline: number | null;
 }
